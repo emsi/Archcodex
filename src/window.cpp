@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "window.h"
+#include "discovery.h"
 #include "sessionmodel.h"
 #include "terminal.h"
 #include <QApplication>
@@ -12,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -55,13 +57,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     label->setFont(f);
     heading->addWidget(label);
     heading->addStretch();
-    auto *add = new QPushButton("+");
-    add->setToolTip("Add project");
-    add->setAccessibleName("Add project");
-    add->setMaximumWidth(34);
-    heading->addWidget(add);
+    auto *discoverButton = new QPushButton("Discover");
+    discoverButton->setToolTip("Discover existing local Codex servers and sessions");
+    heading->addWidget(discoverButton);
     left->addLayout(heading);
-    connect(add, &QPushButton::clicked, this, &Window::addProject);
+    connect(discoverButton, &QPushButton::clicked, this, &Window::discover);
     tabs = new QTabBar;
     tabs->addTab("All");
     tabs->addTab("Active");
@@ -81,7 +81,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         if (text.isEmpty())
             clearSearch();
     });
-    notice = new QLabel("Add a connection to discover projects.");
+    notice = new QLabel("Discovering existing local Codex sessions…");
     notice->setTextFormat(Qt::PlainText);
     notice->setWordWrap(true);
     left->addWidget(notice);
@@ -146,11 +146,28 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connections = new QLabel;
     connections->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(connections, 1);
-    auto *projectsMenu = menuBar()->addMenu("&Project");
-    projectsMenu->addAction("Add project…", this, &Window::addProject);
+    auto *projectsMenu = menuBar()->addMenu("&Session");
     projectsMenu->addAction("New session in selected project", this, [this] {
         const auto index = tree->currentIndex();
-        const auto id = index.data(BackendRole).toString();
+        auto id = index.data(BackendRole).toString();
+        if (id.isEmpty() && index.isValid()) {
+            QStringList ids, names;
+            for (const auto &candidate : index.data(BackendsRole).toStringList())
+                if (backends.value(candidate) && backends[candidate]->ready()) {
+                    ids << candidate;
+                    names << profiles[candidate].name + " · " + profiles[candidate].socketPath;
+                }
+            if (ids.size() == 1)
+                id = ids.first();
+            else if (!ids.isEmpty()) {
+                bool ok = false;
+                const auto name =
+                    QInputDialog::getItem(this, "New session", "Connection", names, 0, false, &ok);
+                if (!ok)
+                    return;
+                id = ids[names.indexOf(name)];
+            }
+        }
         if (!index.isValid() || !profiles.contains(id)) {
             error("Select a project first.");
             return;
@@ -167,6 +184,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     projectsMenu->addSeparator();
     projectsMenu->addAction("Quit", this, &QWidget::close);
     auto *connectionMenu = menuBar()->addMenu("&Connections");
+    connectionMenu->addAction("Discover local sessions", this, &Window::discover);
     connectionMenu->addAction("Manage connections…", this, &Window::connectionsDialog);
     auto *view = menuBar()->addMenu("&View");
     view->addAction("Focus project navigator", QKeySequence("Ctrl+Shift+P"), tree,
@@ -185,6 +203,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         profiles[p.id] = p;
         model->backendName(p.id, p.name);
         results->backendName(p.id, p.name);
+        model->backendEnvironment(p.id, p.environmentId);
+        results->backendEnvironment(p.id, p.environmentId);
     }
     for (const auto &p : store->projects())
         model->project(p);
@@ -193,7 +213,15 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         model->upsert(s);
     }
     for (const auto &p : profiles)
-        attach(p, connectOnStart && p.autoConnect);
+        attach(p, connectOnStart && p.autoConnect && !p.discovered);
+    discovery = new HostDiscovery(this);
+    connect(discovery, &HostDiscovery::snapshot, this, &Window::applyDiscovery);
+    connect(discovery, &HostDiscovery::failed, this, [this](const QString &message) {
+        discoveryMessage = message;
+        updateSummary();
+    });
+    if (connectOnStart)
+        QTimer::singleShot(0, this, &Window::discover);
     QSettings settings(directory + "/window.ini", QSettings::IniFormat);
     restoreGeometry(settings.value("geometry").toByteArray());
     splitter->restoreState(settings.value("splitter").toByteArray());
@@ -206,6 +234,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     updateSummary();
 }
 Window::~Window() {
+    discovery->disconnect(this);
+    discovery->stop();
     for (auto *b : backends) {
         b->disconnect(this);
         b->disconnectServer();
@@ -287,8 +317,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                 if (token != searchToken || !searchingView)
                     return;
                 for (auto s : matches) {
-                    if (!scopeBackend.isEmpty() &&
-                        (s.backendId != scopeBackend || s.cwd != scopePath))
+                    if (!scopeEnvironment.isEmpty() &&
+                        (model->environment(s.backendId) != scopeEnvironment || s.cwd != scopePath))
                         continue;
                     const auto key = sessionKey(s.backendId, s.id);
                     if (sessions.contains(key))
@@ -319,8 +349,10 @@ void Window::updateSummary() {
     }
     connections->setText(QString("%1 / %2 connections ready").arg(count).arg(profiles.size()));
     connections->setToolTip(descriptions.join('\n'));
-    if (!searchingView && !profiles.isEmpty())
-        notice->setText(descriptions.join('\n'));
+    if (!searchingView)
+        notice->setText(discoveryMessage.isEmpty()
+                            ? "Projects group existing sessions by working directory."
+                            : discoveryMessage);
     emit connectionSummaryChanged();
 }
 void Window::editConnection(const QString &id) {
@@ -364,6 +396,10 @@ void Window::editConnection(const QString &id) {
     dialog.resize(600, 200);
     if (dialog.exec() != QDialog::Accepted)
         return;
+    // Editing a detected profile makes its executable/connection settings user-managed.
+    p.discovered = false;
+    if (profiles.contains(id) && profiles[id].socketPath != p.socketPath)
+        p.environmentId.clear();
     if (!persist([&] { store->save(p); }))
         return;
     if (auto *old = backends.take(id)) {
@@ -374,6 +410,8 @@ void Window::editConnection(const QString &id) {
     profiles[p.id] = p;
     model->backendName(p.id, p.name);
     results->backendName(p.id, p.name);
+    model->backendEnvironment(p.id, p.environmentId);
+    results->backendEnvironment(p.id, p.environmentId);
     attach(p, true);
     updateSummary();
 }
@@ -419,12 +457,14 @@ void Window::connectionsDialog() {
         }
     });
     button("Connect", [&] {
+        paused.remove(selected());
         auto *b = backends.value(selected());
         if (b)
             b->connectServer();
         populate();
     });
     button("Disconnect", [&] {
+        paused.insert(selected());
         auto *b = backends.value(selected());
         if (b)
             b->disconnectServer();
@@ -441,6 +481,7 @@ void Window::connectionsDialog() {
             return;
         if (!persist([&] { store->removeBackend(id); }))
             return;
+        ignoredSockets.insert(discoveredPaths.value(id, profiles[id].socketPath));
         if (auto *b = backends.take(id)) {
             b->disconnectServer();
             b->deleteLater();
@@ -466,45 +507,97 @@ void Window::connectionsDialog() {
     dialog.resize(800, 300);
     dialog.exec();
 }
-void Window::addProject() {
-    if (profiles.isEmpty()) {
-        editConnection();
-        if (profiles.isEmpty())
-            return;
-    }
-    QDialog dialog(this);
-    dialog.setWindowTitle("Add project");
-    auto *form = new QFormLayout(&dialog);
-    auto *backend = new QComboBox;
-    for (auto it = profiles.begin(); it != profiles.end(); ++it)
-        backend->addItem(it->name, it.key());
-    auto *path = new QLineEdit;
-    path->setPlaceholderText("Absolute path in the backend environment");
-    auto *name = new QLineEdit;
-    form->addRow("Connection", backend);
-    form->addRow("Working directory / worktree", path);
-    form->addRow("Display name (optional)", name);
-    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
-    form->addRow(buttons);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    Project project;
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-        if (!QDir::isAbsolutePath(path->text()) || !validText(path->text()) ||
-            !validText(name->text(), 160)) {
-            error("Enter a valid absolute backend path and display name.");
-            return;
+void Window::discover() {
+    QStringList paths;
+    for (const auto &p : profiles)
+        if (!p.socketPath.isEmpty())
+            paths << p.socketPath;
+    discoveryMessage = "Discovering existing local Codex sessions…";
+    updateSummary();
+    discovery->refresh(paths);
+}
+void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warnings) {
+    QSet<QString> present;
+    for (const auto &value : endpoints) {
+        const auto item = value.toObject();
+        const auto path = item["path"].toString();
+        if (!QDir::isAbsolutePath(path) || !validText(path))
+            continue;
+        QString id;
+        const auto aliases = item["aliases"].toArray();
+        for (const auto &p : profiles)
+            if (p.socketPath == path || aliases.contains(p.socketPath) ||
+                (p.socketPath.isEmpty() && item["default"].toBool())) {
+                id = p.id;
+                break;
+            }
+        if (id.isEmpty()) {
+            if (ignoredSockets.contains(path))
+                continue;
+            BackendProfile p;
+            p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            p.name = item["default"].toBool() ? "Local Codex" : "Local Codex · " + p.id.right(8);
+            p.socketPath = path;
+            p.executable = item["executable"].toString("codex");
+            p.environmentId = item["hostEnvironment"].toBool() ? "local-host" : p.id;
+            p.discovered = true;
+            if (!p.validate().isEmpty() || !persist([&] { store->save(p); }))
+                continue;
+            id = p.id;
+            profiles[id] = p;
+            model->backendName(id, p.name);
+            results->backendName(id, p.name);
+            attach(p, false);
         }
-        project = {backend->currentData().toString(), QDir::cleanPath(path->text()),
-                   name->text().trimmed()};
-        if (project.name.isEmpty())
-            project.name = QFileInfo(project.path).fileName();
-        if (project.name.isEmpty())
-            project.name = project.path;
-        dialog.accept();
-    });
-    dialog.resize(580, 160);
-    if (dialog.exec() == QDialog::Accepted && persist([&] { store->save(project); }))
-        model->project(project);
+        auto &p = profiles[id];
+        const auto executable = item["executable"].toString("codex");
+        if (p.discovered && p.executable != executable) {
+            auto updated = p;
+            updated.executable = executable;
+            if (updated.validate().isEmpty() && persist([&] { store->save(updated); })) {
+                p = updated;
+                auto *old = backends.take(id);
+                old->disconnect(this);
+                old->disconnectServer();
+                old->deleteLater();
+                discoveredPresent.remove(id);
+                attach(p, false);
+            }
+        }
+        const QString environment = item["hostEnvironment"].toBool() ? "local-host" : id;
+        if (p.environmentId != environment) {
+            p.environmentId = environment;
+            persist([&] { store->save(p); });
+        }
+        model->backendEnvironment(id, environment);
+        results->backendEnvironment(id, environment);
+        for (const auto &s : sessions)
+            if (s.backendId == id)
+                model->upsert(s);
+        for (const auto &s : searchSessions)
+            if (s.backendId == id)
+                results->upsert(s);
+        discoveredPaths[id] = path;
+        present.insert(id);
+        if (!backends[id]->ready() && !paused.contains(id) && p.autoConnect &&
+            !discoveredPresent.contains(id))
+            backends[id]->connectServer();
+    }
+    if (warnings.isEmpty()) {
+        for (const auto &id : discoveredPresent - present)
+            if (profiles.contains(id) && profiles[id].discovered)
+                backends[id]->disconnectServer();
+        discoveredPresent = present;
+    } else
+        discoveredPresent.unite(present);
+    discoveryMessage =
+        endpoints.isEmpty()
+            ? "No local Codex servers found. Start Codex normally, or add a custom connection."
+            : QString("%1 local server(s) discovered. Projects group existing sessions.")
+                  .arg(endpoints.size());
+    if (!warnings.isEmpty())
+        discoveryMessage += "\n" + warnings.join('\n');
+    updateSummary();
 }
 void Window::activate(const QModelIndex &index) {
     const auto id = index.data(ThreadRole).toString();
@@ -539,7 +632,7 @@ void Window::search() {
         error("Search text is too long.");
         return;
     }
-    scopeBackend.clear();
+    scopeEnvironment.clear();
     scopePath.clear();
     if (scope->currentIndex() == 1) {
         const auto index = tree->currentIndex();
@@ -547,7 +640,7 @@ void Window::search() {
             error("Select a project or one of its sessions first.");
             return;
         }
-        scopeBackend = index.data(BackendRole).toString();
+        scopeEnvironment = index.data(EnvironmentRole).toString();
         scopePath = index.data(PathRole).toString();
     }
     ++searchToken;
@@ -561,7 +654,7 @@ void Window::search() {
     tabs->setEnabled(false);
     loadMore->setEnabled(false);
     for (auto it = backends.begin(); it != backends.end(); ++it)
-        if (scopeBackend.isEmpty() || scopeBackend == it.key())
+        if (scopeEnvironment.isEmpty() || scopeEnvironment == model->environment(it.key()))
             searching.insert(it.key());
     const auto ids = searching.values();
     for (const auto &id : ids)

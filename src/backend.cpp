@@ -130,8 +130,8 @@ void CodexBackend::connectServer() {
                     initialized = true;
                     retry = 0;
                     emit connectionChanged(QStringLiteral("Connected — loading history"), true);
-                    listPage({});
                     loadedPage();
+                    listPage({});
                 });
     });
     process->start(bridgePath, args);

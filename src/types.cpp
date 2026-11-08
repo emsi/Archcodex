@@ -19,6 +19,8 @@ QString BackendProfile::validate() const {
         return QStringLiteral("Enter a connection name.");
     if (kind != QStringLiteral("local-unix"))
         return QStringLiteral("This version supports local Unix sockets only.");
+    if (!validText(environmentId, 128))
+        return QStringLiteral("Invalid execution environment ID.");
     if (!validText(socketPath) || (!socketPath.isEmpty() && !QDir::isAbsolutePath(socketPath)))
         return QStringLiteral("Socket path must be absolute, or empty for the host Codex default.");
     if (!validText(executable) ||
@@ -32,7 +34,9 @@ QJsonObject BackendProfile::json() const {
             {"kind", kind},
             {"socket", socketPath},
             {"executable", executable},
-            {"autoConnect", autoConnect}};
+            {"autoConnect", autoConnect},
+            {"environment", environmentId},
+            {"discovered", discovered}};
 }
 BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
     return {o["id"].toString(),
@@ -40,7 +44,9 @@ BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
             o["kind"].toString("local-unix"),
             o["socket"].toString(),
             o["executable"].toString("codex"),
-            o["autoConnect"].toBool(true)};
+            o["autoConnect"].toBool(true),
+            o["environment"].toString(),
+            o["discovered"].toBool()};
 }
 bool Session::isActive() const {
     return status["type"].toString() == QStringLiteral("active");

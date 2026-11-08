@@ -17,6 +17,7 @@ namespace Archcodex {
 class SessionModel;
 class SessionFilter;
 class TerminalArea;
+class HostDiscovery;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -40,7 +41,10 @@ class Window : public QMainWindow {
     QSet<QString> searching;
     QStringList searchErrors;
     quint64 searchToken = 0;
-    QString scopeBackend, scopePath;
+    QString scopeEnvironment, scopePath;
+    QString discoveryMessage;
+    QSet<QString> paused, ignoredSockets, discoveredPresent;
+    QHash<QString, QString> discoveredPaths;
     bool searchingView = false, storageFailed = false;
     SessionModel *model, *results;
     SessionFilter *filter;
@@ -52,12 +56,14 @@ class Window : public QMainWindow {
     QPushButton *loadMore;
     QSplitter *splitter;
     TerminalArea *terminal;
+    HostDiscovery *discovery;
     QHash<int, QStringList> expanded;
     int previousTab = 0;
     void attach(const BackendProfile &profile, bool start);
     void connectionsDialog();
     void editConnection(const QString &id = {});
-    void addProject();
+    void discover();
+    void applyDiscovery(const QJsonArray &endpoints, const QStringList &warnings);
     void activate(const QModelIndex &index);
     void search();
     void clearSearch();

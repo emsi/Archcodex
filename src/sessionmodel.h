@@ -14,12 +14,16 @@ enum ModelRole {
     ActiveRole,
     RecencyRole,
     AttentionRole,
-    ProjectNameRole
+    ProjectNameRole,
+    EnvironmentRole,
+    BackendsRole
 };
 class SessionModel : public QStandardItemModel {
   public:
     explicit SessionModel(QObject *parent = nullptr);
     void backendName(const QString &id, const QString &name);
+    void backendEnvironment(const QString &id, const QString &environment);
+    QString environment(const QString &backend) const;
     void project(const Project &project);
     void upsert(const Session &session);
     void remove(const QString &backend, const QString &thread);
@@ -27,10 +31,11 @@ class SessionModel : public QStandardItemModel {
     void resetResults();
 
   private:
-    QHash<QString, QString> backendNames;
+    QHash<QString, QString> backendNames, environments, projectNames;
     QHash<QString, QStandardItem *> projects, threads;
     QStandardItem *ensureProject(const QString &backend, const QString &path);
     void aggregate(QStandardItem *project);
+    void prune(QStandardItem *project);
 };
 class SessionFilter : public QSortFilterProxyModel {
   public:

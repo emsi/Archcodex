@@ -1,7 +1,7 @@
 # Backend design
 
 Status: target contracts for the adopted architecture. The local Unix adapter is
-implemented in [0.1.0](implementation.md); TCP, SSH and myCodex remain planned.
+implemented in [0.2.0](implementation.md); TCP, SSH and myCodex remain planned.
 Last updated: 2026-11-08.
 
 ## 1. Separation of responsibilities

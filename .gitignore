@@ -3,3 +3,4 @@ build/
 dist/
 .flatpak-builder/
 *.user
+__pycache__/

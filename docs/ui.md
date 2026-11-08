@@ -17,7 +17,8 @@ project/session data. The structure should allow more views later without
 adding empty placeholder tabs now.
 
 Projects are the top-level rows. Each project expands to reveal its sessions,
-ordered by recent use. Detected and manually added projects share this tree.
+ordered by recent use. Projects are groups derived from existing sessions; there
+is no project-creation prerequisite or standalone empty-project workflow.
 The interface must not require navigating a separate host tree before reaching
 a project; show a backend label where needed to distinguish locations.
 
@@ -25,9 +26,9 @@ This wireframe expresses arrangement, not final styling or exact dimensions:
 
 ```text
 +----------------------------- Archcodex -------------------------------+
-| Project   View   Connections   Help                                   |
+| Session   View   Connections   Help                                   |
 +-------------------------+---------------------------------------------+
-| Projects          [+]   | Refactor parser                             |
+| Projects     [Discover] | Refactor parser                             |
 | [ All ] [ Active ]      | Archcodex / laptop                          |
 |-------------------------+---------------------------------------------+
 | Search conversations... |                                             |
@@ -52,16 +53,15 @@ customizable docking. These are not implied by the IDE resemblance.
 
 ## 2. All and Active
 
-**All** is the initial view. It contains all known projects, including manually
-added projects with no sessions and cached projects whose backend is currently
-disconnected. Expanding a project exposes its known sessions. History loading
+**All** is the initial view. It contains projects with known sessions, including
+cached sessions whose backend is currently disconnected. Expanding a project exposes its known sessions. History loading
 can be paginated; the view must not imply that the first loaded page is complete.
 
 **Active**, provisionally, contains sessions whose server reports an active turn,
 including turns waiting for approval or structured user input. It retains the
 same project hierarchy and hides projects without matching sessions. A terminal
 being open does not by itself make a session active. This is the provisional
-default implemented in 0.1.0; it was not separately confirmed by the user.
+default implemented in 0.2.0; it was not separately confirmed by the user.
 
 The Active predicate is separate from the tree and the transport adapters. A
 future view can filter the same model without opening another backend connection
@@ -84,35 +84,29 @@ These rules are updated by initial/reconnect snapshots and pushed events. There
 is no timer refreshing Active, no process inspection and no terminal-output
 heuristic for determining membership.
 
-## 3. Project discovery and manual addition
+## 3. Existing-session discovery
 
-Discover projects from the configured backends' project/session metadata during
-connection initialization and reconnection. New metadata events can add projects
-or sessions during normal operation. A backend that lacks project metadata can
-use the existing backend-qualified working-directory mapping described in the
-[project design](design.md).
+Opening the application automatically discovers the current user's host-visible
+Codex servers and connects to their existing sessions. The startup/reconnect
+inventory includes loaded threads independently of paginated history. Project
+rows arise from session working directories; they disappear when no sessions
+remain. Cached sessions still supply groups while disconnected.
 
-Detection does not mean scanning the home directory, discovering hosts on the
-network, repeatedly scanning repositories or polling app-server inventories.
-Unknown locations remain unknown until the backend supplies information or the
-user adds them.
+The **Discover** action explicitly repeats host socket discovery. Linux inotify
+events discover new normal Codex sockets during operation. Neither mechanism
+infers session status; that is supplied by app-server events. Discovery does not
+start servers, resume conversations, launch terminals or create directories.
 
-The **+** action in the Projects header opens a small **Add project** dialog:
+Sessions from servers established to share the host filesystem environment are
+grouped by exact working-directory path. Identical path spellings on unrelated
+or container environments remain separate. Thread routing still retains the
+backend and thread ID, even when their project row is shared.
 
-- Backend/connection, with a way to configure one if none exists.
-- Working-directory or worktree path in that backend's environment.
-- Optional display name, defaulting to a useful directory name.
-
-Store this as a project/location entry. Adding it does not create directories,
-start Codex, resume a conversation or create a worktree. An empty project remains
-visible in All and displays "No sessions yet" when expanded, once the backend's
-inventory is known. Otherwise show loading or disconnected state instead of
-implying an empty history.
-
-Match detected and manual entries using the existing backend/location identity,
-not just their display names. Paths on different hosts remain distinct. A remote
-path is entered/resolved in the remote environment; a desktop file chooser must
-not substitute a sandbox portal path for that backend path.
+Manual connection configuration remains available for custom endpoints and
+restricted discovery environments. It is not required for discoverable local
+servers. Previous display-name metadata is retained, but an old empty manual
+project no longer creates a standalone row. See [local discovery](discovery.md)
+for what host visibility and event coverage mean.
 
 ## 4. Project and session rows
 
@@ -145,7 +139,7 @@ click selects it. Activating a session opens/focuses its Codex TUI in the main
 workspace and passes the exact backend and thread identity to the terminal
 service. Selecting or expanding a project does not launch a terminal.
 
-Keep one visible terminal pane initially. Version 0.1.0 retains explicitly
+Keep one visible terminal pane initially. Version 0.2.0 retains explicitly
 opened terminal clients until closed, without a terminal tab strip. The
 All/Active tabs are navigation views, not terminal tabs. Only explicitly opened
 sessions may create terminal widgets, and changing a filter cannot detach or
@@ -153,7 +147,8 @@ cancel the current session.
 
 The workspace header identifies the conversation, project and backend even when
 the session is hidden by a navigation filter. Before any session is opened, show
-a simple "Select a session" empty state and the Add project/connection actions.
+a "Select an existing session" empty state, automatic discovery status and the
+Discover/custom-connection actions.
 Connection and launch failures stay associated with the affected backend/session
 and do not replace the entire application with an error screen.
 
@@ -184,8 +179,8 @@ concepts. A disconnected backend keeps its saved projects visible in All.
 
 - The left pane starts with All, then Active; both preserve project/session
   hierarchy and distinguish same-named projects on different backends.
-- Detected and manual projects appear together; an empty manual project can be
-  added without starting a process or changing its working directory.
+- Existing sessions appear without project setup. Servers in the same host
+  working directory share a group while retaining their separate routing.
 - MRU ordering and pagination keep large histories usable without moving the
   selected row unpredictably.
 - Pushed events update row indicators and Active membership without recurring

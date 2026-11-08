@@ -1,7 +1,7 @@
 # Project design
 
 Status: adopted architectural direction; detailed contracts below are design
-proposals for the full project. The [0.1.0 implementation](implementation.md)
+proposals for the full project. The [0.2.0 implementation](implementation.md)
 delivers the local Unix backend and initial UI; that document records tested
 behavior and remaining limits. Last updated: 2026-11-08.
 
@@ -259,9 +259,13 @@ Use application-assigned persistent backend IDs. A conversation key contains its
 backend ID and Codex thread ID. A filesystem path or a thread ID on its own is not
 a globally unique execution identity.
 
-Projects contain one or more locations: a backend, an environment-relative path,
+Projects are derived groups of existing sessions, with no required project-creation
+step. Startup discovers existing local servers; see [local discovery](discovery.md).
+Locations contain an execution environment, an environment-relative path,
 and optional repository/worktree metadata. The same absolute path on two hosts
-does not identify the same location. A remote path must not be resolved with the
+does not identify the same location. Discovered servers sharing the host namespace
+are grouped by working-directory path while conversation routing keeps its backend ID.
+A remote path must not be resolved with the
 GUI host's filesystem APIs. A non-Git directory is a valid project.
 
 Use server-provided project metadata where supported. Maintain an application
@@ -343,7 +347,7 @@ saved history. Logging is for diagnosis, not a status-inference mechanism.
 ## 10. Validation and delivery sequence
 
 The [initial UI design](ui.md) provides the starting layout. Implementation was
-subsequently authorized; [version 0.1.0](implementation.md) delivers the local
+subsequently authorized; [version 0.2.0](implementation.md) delivers the local
 Unix milestone for host testing. Backend milestones remain in this order:
 
 1. Local Unix: prove packaged Konsole embedding, explicit attachment, initial
@@ -376,7 +380,7 @@ tests should verify that an idle connected GUI sends no periodic status RPCs.
 - Final UI design, MRU interaction details, notification preferences and terminal
   retention policy.
 - Exact supported Codex versions and optional protocol capabilities.
-- Publication channel and runtime upgrade policy. Version 0.1.0 uses
+- Publication channel and runtime upgrade policy. Version 0.2.0 uses
   `io.github.emsi.Archcodex`, KDE 6.11 and GPL-3.0-or-later.
 - Credential delivery into the embedded TUI without putting secrets in command
   arguments; this is a release gate, not permission to use insecure placeholders.

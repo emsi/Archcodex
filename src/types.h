@@ -12,6 +12,8 @@ struct BackendProfile {
     QString socketPath; // Empty selects the host Codex default, not a guessed sandbox path.
     QString executable = QStringLiteral("codex");
     bool autoConnect = true;
+    QString environmentId; // Shared only when discovery establishes a common host namespace.
+    bool discovered = false;
     QString validate() const;
     QString endpoint() const {
         return QStringLiteral("unix://") + socketPath;

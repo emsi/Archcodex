@@ -1,12 +1,14 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.1.0** implements the first backend: **existing local Unix-socket
+Version **0.2.0** implements the first backend: **existing local Unix-socket
 app-servers**. Remote TCP, SSH and myCodex are later stages.
 
-It groups conversations by working directory, supports manually added projects,
-provides All/Active views and conversation search, and embeds the existing Codex
-TUI. Session and project indicators reflect **server events, without status
+Its primary workflow is returning to **existing Codex sessions**. On startup it
+discovers the current user’s host-visible local Codex servers and loads their
+sessions. Projects are working-directory groups; no project creation is needed.
+It provides All/Active views, conversation search and the existing Codex TUI.
+Session and project indicators reflect **server events, without status
 polling**. Multiple local servers can be connected independently.
 
 The adopted foundation is **C++20, Qt 6 Widgets, KDE Frameworks 6 and Konsole
@@ -16,12 +18,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.1.0-x86_64.flatpak` and
-`dist/SHA256SUMS`. From this checkout on your desktop host:
+The local build produces `dist/Archcodex-0.2.0-x86_64.flatpak` and
+`dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
+myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user ./dist/Archcodex-0.1.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.2.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -30,17 +33,23 @@ may prompt to download that runtime. The application also requires a compatible
 **host Codex CLI** and an independently running app-server. Codex **0.166.0** was
 used for protocol validation. Archcodex does not install or update Codex.
 
-1. Open **Connections → Manage connections → Add**.
-2. Enter a name and an absolute host Unix-socket path, or leave the path empty
-   for the host Codex default daemon socket. Leave the executable as `codex`, or
-   supply its absolute host path if it is absent from the host command environment.
-3. Saving connects to that existing server. Expand a project and press Enter or
-   double-click a session to open its TUI.
-4. Use **+** to register a working directory/worktree manually. **Project → New
-   session in selected project** opens a new Codex TUI there.
-5. Use **Active** for running/waiting sessions. Search conversation text by
-   entering a query and pressing Enter; choose all projects or the selected
-   project as the search scope. **Load more history** retrieves the next page.
+1. Start Codex normally on the host if it is not already running. Archcodex
+   discovers existing local servers automatically; it does not start servers.
+2. Expand a project and press Enter or double-click a session to attach its TUI.
+   Several servers in the same host working directory share a project group.
+3. **Discover** takes an explicit new snapshot, useful for nonstandard socket
+   locations. Normal Codex socket creation is handled through filesystem events.
+4. Search conversation text by entering a query and pressing Enter; choose all
+   projects or the selected project. **Load more history** retrieves older pages.
+5. **Connections → Manage connections → Add** is an advanced fallback for custom
+   endpoints. An empty socket path selects Codex's default. The optional **Session
+   → New session in selected project** action is secondary to existing sessions.
+
+Discovery requires **host Python 3** at `/usr/bin/python3`, using only its standard
+library. It inspects same-user socket/process metadata and waits for Linux
+inotify events; session state comes exclusively from app-server notifications.
+It does not read account credentials. Private container sockets and other users'
+processes are outside automatic discovery. See [local discovery](docs/discovery.md).
 
 See [implementation and host testing](docs/implementation.md) for scope,
 permissions, tested behavior and known limitations.
@@ -58,7 +67,7 @@ does not install Archcodex into your normal Flatpak installation. Source release
 and checksums are pinned in the [manifest](packaging/io.github.emsi.Archcodex.json).
 
 Core tests can also be built with Qt 6 development packages, its SQLite driver,
-Qt Test/WebSockets and Boost headers:
+Qt Test/WebSockets, Boost headers and Python 3:
 
 ```sh
 cmake -S . -B build -G Ninja -DARCHCODEX_GUI=OFF -DBUILD_TESTING=ON
@@ -77,9 +86,10 @@ KPart at runtime. The Flatpak supplies those components.
   sequence: existing local Unix sockets, remote TCP, SSH, then myCodex.
 - [Flatpak design](docs/flatpak.md): runtime, terminal integration, host commands,
   proposed permissions and packaging checks.
+- [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
   sessions, and All/Active navigation tabs.
-- [Implementation and testing](docs/implementation.md): what 0.1.0 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.2.0 delivers and
   how to exercise it on your host.
 
 ## Project status

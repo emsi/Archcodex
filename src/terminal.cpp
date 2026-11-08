@@ -19,7 +19,8 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     layout->setContentsMargins(0, 0, 0, 0);
     layout->addWidget(stack);
     auto *label = new QLabel(
-        "Select a session\n\nAdd a connection to discover projects, or add a project manually.",
+        "Select an existing session\n\nLocal Codex sessions are discovered automatically.\n"
+        "Projects group their working directories; no project setup is needed.",
         this);
     label->setAlignment(Qt::AlignCenter);
     label->setTextFormat(Qt::PlainText);

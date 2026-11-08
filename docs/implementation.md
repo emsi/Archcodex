@@ -1,6 +1,6 @@
-# Initial implementation: 0.1.0
+# Implementation: 0.2.0
 
-This is an installable first iteration for host testing, not completion of every
+This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
 Frameworks, Konsole KPart, Boost.Beast and SQLite. There is no JavaScript/TypeScript
 application UI.
@@ -9,8 +9,10 @@ application UI.
 
 - Multiple named connections to existing local Unix-socket app-servers. A blank
   socket selects Codex's host default; explicit socket paths remain supported.
-- Projects inferred from conversation working directories, plus manually added
-  backend-qualified directories/worktrees. No recursive filesystem discovery.
+- Startup discovery of existing host-visible local Codex servers, with inotify
+  events for new normal sockets and an explicit Discover action. No status polling.
+- Projects derived from conversation working directories. Servers sharing the host
+  filesystem environment share project groups; no manual project setup is required.
 - An IDE-style left navigator with All and Active tabs, recent-use ordering,
   expandable sessions, backend labels and accessible status descriptions.
 - Running, waiting, idle, saved, error and unknown states from protocol events.
@@ -22,7 +24,7 @@ application UI.
   and working directory. No task prompt or approval-policy override is injected.
 - Server-side conversation search on Enter, with all-project or selected-project
   scope. Every result page is considered before project filtering is complete.
-- Persistent backend profiles, manual projects, list metadata and local recent
+- Persistent backend profiles, legacy display names, list metadata and local recent
   use. Full conversation bodies and authentication tokens are not cached.
 - Automatic reconnect after transport failure with bounded backoff, explicit
   disconnect, and manual connection controls. Reconnect takes a fresh snapshot.
@@ -37,16 +39,20 @@ requested. This is deliberately not presented as an exhaustive disk scan.
 
 | Code | Responsibility |
 | --- | --- |
+| `src/discovery.*`, `src/discover.py` | Host socket discovery and filesystem-event subscription. |
 | `src/backend.*` | Shared Codex request/event handling, inventory, recovery and search. |
 | `src/localbackend.cpp` | Local Unix adapter's transport launch arguments. |
 | `src/bridge.cpp` | Beast WebSocket framing over a native socket or host Codex proxy. |
 | `src/store.*`, `src/types.*` | SQLite metadata, validation and state interpretation. |
 | `src/sessionmodel.*` | Project/session tree and All/Active filtering. |
 | `src/terminal.*` | Konsole embedding and structured TUI launch arguments. |
-| `src/window.*` | Rudimentary native interface and connection/project dialogs. |
+| `src/window.*` | Native interface, automatic connection reconciliation and connection dialogs. |
 
 The internal backend contract allows later adapters to reuse the protocol and
-models. There is no public plugin ABI or companion service. The GUI never sends
+models. There is no public plugin ABI or installed companion service. The packaged
+discovery script runs with host Python 3 through the existing host-command boundary;
+it lasts only as long as the GUI. See [discovery details](discovery.md).
+The GUI never sends
 turn/start, approval responses, cancellation or server-stop requests. New
 conversation interaction happens through the explicitly launched TUI.
 
@@ -114,8 +120,15 @@ connection deletes only its local cache/configuration, not Codex history.
 - Launch-argument tests exercise shell metacharacters and the CLI argument
   separator without executing embedded input.
 - Model tests cover 80 sessions across two backends, Active filtering, waiting
-  and unknown states, and preservation of manual project names.
-- Both test suites pass in the KDE 6.11 SDK. Core tests also pass with address
+  and unknown states, shared-host grouping, backend routing, empty-group removal
+  and preservation of legacy display names.
+- Discovery tests cover aliases, updater exclusion, same-user visibility, namespace
+  isolation, inotify creation/deletion and an idle loop with no rescan timeout.
+- A real isolated Codex server started after discovery is picked up by an inotify
+  event. No model turn or account credentials are involved.
+- Window integration tests discover two fixture servers without project setup,
+  load a session outside the history page, merge their project and search both.
+- Discovery, core, model and window integration suites pass in the KDE 6.11 SDK. Core tests also pass with address
   and undefined-behavior sanitizers; leak detection was disabled for that run.
 - An isolated real Codex 0.166.0 app-server passes initialize, inventory, search
   and observer-disconnect checks. It uses a temporary Codex home and a minimal
@@ -145,8 +158,9 @@ none is invented for this unpublished initial package.
 ## Host acceptance test
 
 1. Install the bundle using the README commands and start it from KDE under X11.
-2. Connect to an existing independently running Codex app-server. Confirm its
-   projects and sessions appear, then connect a second socket if available.
+2. Leave existing Codex sessions running before opening Archcodex. Confirm their
+   servers and sessions appear without adding connections or creating projects.
+   Start another Codex server normally and verify discovery reacts to its socket.
 3. Open a conversation; verify that the real Codex TUI accepts keyboard input,
    selection, clipboard operations, scrolling and resizing.
 4. Start work in the TUI. Verify the session/project indicators and Active tab
@@ -170,8 +184,11 @@ independent-server persistence requirement.
   Search is capped at 10,000 results per backend with an explicit narrowing notice.
 - Active means running or waiting for structured input/approval. Last-known
   active sessions remain visible as unknown when disconnected.
-- Projects currently map to exact backend working-directory paths, not the
-  optional server project-management API. Linked worktree grouping is future work.
+- Projects map to exact environment/working-directory paths; discovery establishes
+  which servers share the host environment. Linked-worktree grouping is future work.
+- Host discovery requires Python 3 and readable same-user procfs metadata. Custom
+  sockets outside watched locations may require Discover; private container sockets
+  require future integration or a separately configured exposed endpoint.
 - Terminal views are retained until explicitly closed; they are not evicted in
   the background. A new-session TUI has no thread ID at launch, so reopening its
   subsequently discovered row can create an additional client to the same server
@@ -189,7 +206,7 @@ Build downloads, SDK roots, test data and logs are kept in ignored `.build/`.
 Installable artifacts and checksums are in ignored `dist/`. The full GPL license
 and bundled-component notices accompany the package.
 
-## Implementation decisions made within the authorized task
+## Initial implementation decisions and subsequent changes
 
 The user authorized initial implementation and an installable Flatpak, with the
 stack, layout, event-driven operation and backend sequence already agreed. The
@@ -198,7 +215,7 @@ following details were chosen during implementation rather than agreed beforehan
 | Choice and reason | Affected files / consequence | Status |
 | --- | --- | --- |
 | Deliver local Unix connections first, so a complete first adapter can be tested before adding remote transports. | `src/localbackend.cpp`, shared `src/backend.*`; TCP, SSH and myCodex remain later stages. | Implemented; host integration acceptance remains. |
-| Version 0.1.0, `io.github.emsi.Archcodex`, GPL-3.0-or-later, original SVG icon, KDE 6.11, Konsole 26.08.2 and Boost 1.90.0. | `CMakeLists.txt`, `LICENSE`, `data/`, `packaging/`; GPL-compatible open-source distribution and x86_64 test artifact. Metadata uses CC0-1.0. | Packaged locally; no public repository, tag or release created. |
+| Initial version 0.1.0 (now 0.2.0), `io.github.emsi.Archcodex`, GPL-3.0-or-later, original SVG icon, KDE 6.11, Konsole 26.08.2 and Boost 1.90.0. | `CMakeLists.txt`, `LICENSE`, `data/`, `packaging/`; GPL-compatible open-source distribution and x86_64 test artifact. Metadata uses CC0-1.0. | Packaged locally; no public repository, tag or release created. |
 | X11/xcb for this first package; host commands through Flatpak, without direct network/filesystem/DRI grants. | Manifest and `src/terminal.cpp`, `src/bridge.cpp`; XWayland may work, native Wayland is unqualified. Host-command permission is broad execution authority. | Runtime closure and native X11 validated; sandbox host boundary still needs host testing. |
 | Separate Beast helper per backend, bounded buffers/metadata concurrency, finite request deadlines, automatic reconnect and startup connection by default. | `src/backend.*`, `src/bridge.cpp`, `src/types.h`; GUI stays responsive without recurring session queries. Profiles can disable startup connection. | Protocol and reconnect/disconnect mechanisms implemented; tests cover the documented cases. |
 | Metadata-only SQLite storage and Linux instance lock, 200-entry history pages and 10,000-result search limit. | `src/store.*`, `src/main.cpp`, `src/backend.cpp`; no offline full-text index or credential cache. Search depends on the experimental server API. | Persistence, permission, pagination and protocol checks pass. |
@@ -206,3 +223,16 @@ following details were chosen during implementation rather than agreed beforehan
 | Disable Konsole tracking actions and patch its process/title snapshots, because Archcodex uses server events for that information. | `src/terminal.cpp`, `packaging/konsole-event-only.patch`; upstream changes require patch review. | Patched terminal compiles and passes a real-PTY smoke test. No upstream changes submitted. |
 | Install development/packaging tools in the build container and use a separate KDE SDK root when namespaces prevent normal flatpak-builder execution. | Container packages include Flatpak, Qt/KDE development tools, Boost, Xvfb, validators and sanitizers. `.build/` retains approximately 9 GiB of runtimes, sources, roots, fixtures and logs; `dist/` holds local artifacts. | Local bundle exported; icon validation ran without its sandbox. No normal user app installation, host service change or credential access. |
 | Commit the authorized source/documentation changes and provide a source archive alongside the bundle. | Repository plus ignored `dist/`; generated outputs are excluded from Git. | Required by the standing commit instruction; the delivered build record identifies the source commit. No push or publication. |
+
+
+Version 0.2.0 implements the user's correction that existing sessions are the
+primary workflow. Additional implementation choices are: host Python 3 with no
+third-party modules; same-user procfs discovery plus inotify; canonical socket
+identity; shared-host project grouping; retaining legacy display names without
+empty project rows; and remembering automatic endpoints as ordinary profiles.
+Disconnect pauses an endpoint for this GUI run. Removal suppresses rediscovery
+for this run; a later startup may discover the existing server again. Editing a
+discovered profile makes its executable/settings user-managed. Automatically
+managed profiles follow the detected server executable when its release changes.
+No new Flatpak permissions or installed host service are added. The source,
+bundle, source archive and checksums are updated; no public release is made.

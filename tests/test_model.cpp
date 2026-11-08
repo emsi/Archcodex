@@ -58,11 +58,44 @@ class ModelTests : public QObject {
         SessionModel model;
         model.backendName("b", "Before");
         model.project({"b", "/work", "My project"});
+        QCOMPARE(model.rowCount(), 0); // A saved label does not create an empty project.
         model.upsert(
             Session::fromThread("b", {{"id", "t"}, {"cwd", "/work"}, {"name", "Session"}}));
         QVERIFY(model.item(0)->text().startsWith("My project"));
         model.backendName("b", "After");
         QVERIFY(model.item(0)->text().endsWith("After"));
+    }
+    void sharedHostProjectsKeepTheirBackendRouting() {
+        SessionModel model;
+        model.backendEnvironment("one", "local-host");
+        model.backendEnvironment("two", "local-host");
+        auto first = Session::fromThread("one", {{"id", "same"}, {"cwd", "/work"}});
+        auto second = Session::fromThread("two", {{"id", "same"}, {"cwd", "/work"}});
+        model.upsert(first);
+        model.upsert(second);
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->rowCount(), 2);
+        QCOMPARE(model.item(0)->data(BackendsRole).toStringList().size(), 2);
+        QVERIFY(model.item(0)->data(BackendRole).toString().isEmpty());
+        QCOMPARE(model.item(0)->child(0)->data(BackendRole).toString(), "one");
+        model.removeBackend("one");
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->child(0)->data(BackendRole).toString(), "two");
+        model.remove("two", "same");
+        QCOMPARE(model.rowCount(), 0);
+    }
+    void discoveredEnvironmentRegroupsCachedSessions() {
+        SessionModel model;
+        auto s = Session::fromThread("one", {{"id", "t"}, {"cwd", "/work"}});
+        model.upsert(s);
+        model.backendEnvironment("one", "local-host");
+        model.upsert(s);
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->data(EnvironmentRole).toString(), "local-host");
+        s.cwd = "/new-worktree";
+        model.upsert(s);
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->data(PathRole).toString(), "/new-worktree");
     }
 };
 QTEST_MAIN(ModelTests)
