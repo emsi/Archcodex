@@ -21,11 +21,14 @@ is required. Wayland is optional.
   sequence: existing local Unix sockets, remote TCP, SSH, then myCodex.
 - [Flatpak design](docs/flatpak.md): runtime, terminal integration, host commands,
   proposed permissions and packaging checks.
+- [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
+  sessions, and All/Active navigation tabs.
 
 ## Project status
 
 Design documentation only. There is no application implementation, build system
-or Flatpak manifest yet. The next step is **UI design**, before implementation.
+or Flatpak manifest yet. **UI design is in progress**, starting with the project
+navigator and terminal workspace.
 
 The documents distinguish agreed requirements from proposed implementation
 details and work that still needs validation. Upstream observations were checked

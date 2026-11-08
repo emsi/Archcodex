@@ -27,9 +27,11 @@ several execution environments easy to find, open and return to.
 Backend delivery order is fixed: **existing local Unix app-server sockets →
 remote TCP app-server endpoints → SSH-forwarded sockets → myCodex**.
 
-This document defines behavior and architecture. Window layout, navigation
-interaction, terminal arrangement, colors and notification preferences belong to
-the next UI design stage.
+This document defines behavior and architecture. The
+[initial UI design](ui.md) starts with a simple IDE layout: expandable projects
+and sessions on the left, All/Active navigation tabs, and the terminal workspace
+on the right. Interaction refinements, colors and notification preferences remain
+part of the ongoing UI design stage.
 
 ## 2. Technology decisions
 
@@ -338,8 +340,8 @@ saved history. Logging is for diagnosis, not a status-inference mechanism.
 
 ## 10. Validation and delivery sequence
 
-The next work is UI design. Implementation follows only after that design work
-is agreed. Backend milestones remain in this order:
+UI design is in progress in the [initial UI design](ui.md). Implementation follows
+only after that design work is agreed. Backend milestones remain in this order:
 
 1. Local Unix: prove packaged Konsole embedding, explicit attachment, initial
    inventory, pushed state, search and conversation continuity.
