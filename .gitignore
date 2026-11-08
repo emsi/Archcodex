@@ -1,0 +1,5 @@
+.build/
+build/
+dist/
+.flatpak-builder/
+*.user

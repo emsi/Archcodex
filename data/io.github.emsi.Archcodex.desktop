@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Archcodex
+Comment=Projects and sessions across Codex app-servers
+Exec=archcodex
+Icon=io.github.emsi.Archcodex
+Terminal=false
+Categories=Development;
+StartupNotify=true
+StartupWMClass=archcodex

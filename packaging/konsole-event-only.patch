@@ -1,0 +1,16 @@
+--- a/src/session/SessionController.cpp
++++ b/src/session/SessionController.cpp
+@@ -328,2 +328,6 @@
+ {
++#ifdef ARCHCODEX_EMBEDDED_TERMINAL
++    // Archcodex obtains titles and execution state from app-server events.
++    return;
++#endif
+     if (!_interactionTimer->isActive()) {
+@@ -335,2 +339,6 @@
+ {
++#ifdef ARCHCODEX_EMBEDDED_TERMINAL
++    // Archcodex obtains titles and execution state from app-server events.
++    return;
++#endif
+     Q_ASSERT(!session().isNull());

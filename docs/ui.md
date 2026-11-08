@@ -1,7 +1,8 @@
 # Initial UI design
 
 Status: rudimentary layout requested by the user; interaction details below are
-proposals for review. Documentation only, with no UI implementation.
+the design baseline. The [initial implementation](implementation.md) now delivers
+the two-pane layout and records which refinements remain open.
 Last updated: 2026-11-08.
 
 ## 1. Starting layout
@@ -59,8 +60,8 @@ can be paginated; the view must not imply that the first loaded page is complete
 **Active**, provisionally, contains sessions whose server reports an active turn,
 including turns waiting for approval or structured user input. It retains the
 same project hierarchy and hides projects without matching sessions. A terminal
-being open does not by itself make a session active. This definition is pending
-the user's clarification.
+being open does not by itself make a session active. This is the provisional
+default implemented in 0.1.0; it was not separately confirmed by the user.
 
 The Active predicate is separate from the tree and the transport adapters. A
 future view can filter the same model without opening another backend connection
@@ -144,11 +145,11 @@ click selects it. Activating a session opens/focuses its Codex TUI in the main
 workspace and passes the exact backend and thread identity to the terminal
 service. Selecting or expanding a project does not launch a terminal.
 
-Keep one visible terminal pane initially. Whether to retain hidden terminal
-clients or add a terminal tab strip is still open; the All/Active tabs are
-navigation views, not terminal tabs. Only explicitly opened sessions may create
-terminal widgets, and changing a filter cannot detach or cancel the current
-session.
+Keep one visible terminal pane initially. Version 0.1.0 retains explicitly
+opened terminal clients until closed, without a terminal tab strip. The
+All/Active tabs are navigation views, not terminal tabs. Only explicitly opened
+sessions may create terminal widgets, and changing a filter cannot detach or
+cancel the current session.
 
 The workspace header identifies the conversation, project and backend even when
 the session is hidden by a navigation filter. Before any session is opened, show
@@ -194,5 +195,6 @@ concepts. A disconnected backend keeps its saved projects visible in All.
 - Keyboard navigation, theme contrast, accessible status names and terminal
   focus work with the simple two-pane layout.
 
-These are future implementation checks. This document adds no application code,
-new dependency, runtime configuration or packaging permission.
+These are UI acceptance criteria. See [implementation and testing](implementation.md)
+for current evidence, dependencies, packaging permissions and outstanding host
+checks.

@@ -1,20 +1,22 @@
 # Flatpak distribution and host integration
 
 Status: primary distribution direction adopted; permission baseline and host
-integration below are proposed for implementation and validation. This is not a
-buildable manifest. Last updated: 2026-11-08.
+integration below describe the full-project design. The
+[0.1.0 implementation](implementation.md) has a narrower local-only permission
+set and a [buildable manifest](../packaging/io.github.emsi.Archcodex.json).
+Last updated: 2026-11-08.
 
 ## 1. Packaging model
 
 Distribute Archcodex as a Flatpak using the KDE Platform and KDE SDK. Build the
 C++/Qt Widgets application and its required Konsole component against the same
-runtime generation. Pin source releases and checksums in the eventual manifest.
+runtime generation. Source releases and checksums are pinned in the manifest.
 
 The [Konsole Flathub manifest](https://github.com/flathub/org.kde.konsole/blob/master/org.kde.konsole.json)
 is the starting reference. On 2026-11-08 it selected KDE runtime **6.11** and
 Konsole **26.08.2**, with DRI, IPC, network, Wayland, fallback X11 and host-command
-D-Bus access. These are observed reference versions, not a final dependency pin
-for Archcodex.
+D-Bus access. Version 0.1.0 adopts those runtime/component versions with the
+narrower permissions documented in [implementation and testing](implementation.md).
 
 Bundle the Konsole KPart and any dependencies missing from the chosen runtime.
 Installing the separate Konsole Flatpak does not supply Archcodex's plugin. Do
@@ -24,12 +26,12 @@ the built artifact.
 
 The host desktop baseline remains Debian 13 and Ubuntu 26.04 or newer. Host Qt
 versions are not the application's library baseline; the Flatpak runtime is.
-Select a supported runtime branch during implementation and maintain an explicit
-upgrade policy. A `.deb` is not a primary deliverable in this design.
+Version 0.1.0 selects KDE 6.11; an explicit upgrade policy remains to be defined.
+A `.deb` is not a primary deliverable in this design.
 
-The final reverse-DNS application ID, exact license and distribution repository
-are open. Flathub is a possible publication destination, not a publication action
-authorized or performed by this design milestone.
+Version 0.1.0 uses application ID `io.github.emsi.Archcodex` and GPL-3.0-or-later.
+The distribution repository remains open. Flathub is a possible publication
+destination; the local test bundle does not publish the application there.
 
 ## 2. Host execution is an explicit architectural boundary
 
@@ -213,5 +215,7 @@ Before calling the package supported:
 9. Inspect permission use and remove inherited permissions that have no tested
    purpose. Document the host-execution trust model in release information.
 
-No Flatpak manifest, permission override, installed runtime, host helper, service
-or publication is created by this documentation work.
+The original documentation work created none of these runtime artifacts. The
+later implementation adds the manifest, build tools and a local test bundle;
+see [implementation and testing](implementation.md). No host service or public
+publication is created.

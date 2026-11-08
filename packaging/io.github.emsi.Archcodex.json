@@ -1,0 +1,60 @@
+{
+  "app-id": "io.github.emsi.Archcodex",
+  "runtime": "org.kde.Platform",
+  "runtime-version": "6.11",
+  "sdk": "org.kde.Sdk",
+  "command": "archcodex",
+  "finish-args": [
+    "--socket=x11",
+    "--share=ipc",
+    "--talk-name=org.freedesktop.Flatpak",
+    "--env=QT_QPA_PLATFORM=xcb"
+  ],
+  "cleanup": ["/include", "/lib/cmake", "/lib/pkgconfig", "/share/doc", "/share/man", "*.a"],
+  "modules": [
+    {
+      "name": "boost-headers",
+      "buildsystem": "simple",
+      "build-commands": [
+        "mkdir -p /app/include /app/share/licenses/boost",
+        "cp -a boost /app/include/",
+        "cp LICENSE_1_0.txt /app/share/licenses/boost/"
+      ],
+      "sources": [{
+        "type": "archive",
+        "url": "https://archives.boost.io/release/1.90.0/source/boost_1_90_0.tar.bz2",
+        "sha256": "49551aff3b22cbc5c5a9ed3dbc92f0e23ea50a0f7325b0d198b705e8ee3fc305"
+      }]
+    },
+    {
+      "name": "konsole",
+      "buildsystem": "cmake-ninja",
+      "config-opts": [
+        "-DBUILD_TESTING=OFF", "-DWITH_LIBSSH=OFF",
+        "-DENABLE_PLUGIN_SSHMANAGER=OFF", "-DENABLE_PLUGIN_QUICKCOMMANDS=OFF",
+        "-DCMAKE_DISABLE_FIND_PACKAGE_KF6DocTools=ON", "-DCMAKE_INSTALL_LIBDIR=lib",
+        "-DCMAKE_CXX_FLAGS=-DARCHCODEX_EMBEDDED_TERMINAL"
+      ],
+      "post-install": [
+        "mkdir -p /app/share/licenses/konsole",
+        "cp -a LICENSES/. /app/share/licenses/konsole/"
+      ],
+      "sources": [{
+        "type": "archive",
+        "url": "https://download.kde.org/stable/release-service/26.08.2/src/konsole-26.08.2.tar.xz",
+        "sha256": "2154a03a952c29be435defffd4c88f9d2eff44a55cdfa33b16a8fc7bfd978217"
+      }, {"type": "patch", "path": "konsole-event-only.patch"}]
+    },
+    {
+      "name": "archcodex",
+      "buildsystem": "cmake-ninja",
+      "config-opts": ["-DBUILD_TESTING=ON", "-DCMAKE_BUILD_TYPE=RelWithDebInfo"],
+      "run-tests": true,
+      "test-rule": "test",
+      "sources": [{
+        "type": "dir", "path": "..",
+        "skip": [".git", ".build", "build", "dist", ".flatpak-builder"]
+      }]
+    }
+  ]
+}

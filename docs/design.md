@@ -1,7 +1,9 @@
 # Project design
 
 Status: adopted architectural direction; detailed contracts below are design
-proposals, not implemented or runtime-tested behavior. Last updated: 2026-11-08.
+proposals for the full project. The [0.1.0 implementation](implementation.md)
+delivers the local Unix backend and initial UI; that document records tested
+behavior and remaining limits. Last updated: 2026-11-08.
 
 ## 1. Product and agreed constraints
 
@@ -340,8 +342,9 @@ saved history. Logging is for diagnosis, not a status-inference mechanism.
 
 ## 10. Validation and delivery sequence
 
-UI design is in progress in the [initial UI design](ui.md). Implementation follows
-only after that design work is agreed. Backend milestones remain in this order:
+The [initial UI design](ui.md) provides the starting layout. Implementation was
+subsequently authorized; [version 0.1.0](implementation.md) delivers the local
+Unix milestone for host testing. Backend milestones remain in this order:
 
 1. Local Unix: prove packaged Konsole embedding, explicit attachment, initial
    inventory, pushed state, search and conversation continuity.
@@ -373,12 +376,14 @@ tests should verify that an idle connected GUI sends no periodic status RPCs.
 - Final UI design, MRU interaction details, notification preferences and terminal
   retention policy.
 - Exact supported Codex versions and optional protocol capabilities.
-- Final Flatpak application ID, runtime branch, publication channel and license.
+- Publication channel and runtime upgrade policy. Version 0.1.0 uses
+  `io.github.emsi.Archcodex`, KDE 6.11 and GPL-3.0-or-later.
 - Credential delivery into the embedded TUI without putting secrets in command
   arguments; this is a release gate, not permission to use insecure placeholders.
 - Default offline search caching and realistic saved-history dataset size.
 - Whether future releases need explicit server lifecycle controls or a native
   conversation view.
 
-No application code, packaging configuration or myCodex changes are part of this
-documentation milestone.
+The original documentation milestone made no implementation changes. The later
+[initial implementation](implementation.md) adds application code and Flatpak
+packaging. myCodex remains unchanged.
