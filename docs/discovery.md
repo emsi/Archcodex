@@ -1,6 +1,6 @@
 # Existing local sessions first
 
-Archcodex 0.3.0 starts by finding existing Codex servers, then requests their
+Archcodex 0.3.2 starts by finding existing Codex servers, then requests their
 loaded sessions and history. Projects are groups of those sessions, not objects
 the user must create. One server can contain multiple sessions; the number of
 TUIs is not used to infer the number of execution servers.
@@ -56,6 +56,34 @@ handles readiness without treating the filesystem as a session-state source.
 Discovery is bounded to 4,096 endpoints and reports reaching the limit. Transport
 messages remain bounded to 16 MiB. The helper exits when its GUI input pipe
 closes; no daemon or login service is created.
+
+## Actionable discovery diagnostics
+
+The helper reports structured issues rather than a generic warning string. It
+separates ownership checks, unidentified same-user processes, confirmed Codex
+processes, procfs access failures, directory-watch failures and the endpoint limit.
+Permission failures include the operation, exact path and errno name/message.
+Each affected process contributes its first failed operation, avoiding duplicate
+warnings for its many descriptors. Reports contain up to 12 examples per issue
+category and an explicit omitted-entry count. Normal process-exit races remain
+ordinary omissions, not warnings. Directory-watch errors are reported from the
+final watch configuration, avoiding duplicate reports from the two setup passes.
+
+An executable link can be inaccessible before the scanner knows whether the
+process is Codex. The UI says so explicitly and does not claim missing sessions.
+Known Codex inspection failures are separate; directory-watch failures explain
+that manual Discover still works and connected session events continue normally.
+No additional process environment, configuration content or credential reads are
+introduced to produce these diagnostics.
+
+The status bar links to an on-demand nonmodal details window; discovery does not
+open it automatically or place reports in the project tree. See [UI behavior](ui.md).
+Helper startup/exit failures include available OS errors, exit status and a bounded
+4 KiB stderr tail. A one-shot 15-second response deadline covers each explicit
+refresh as well as startup, preventing a permanently pending retry. This is a
+request timeout, not a recurring scan or status query. Reports are not persisted.
+The report and helper protocol are internal to the matching application package;
+there is no new public integration API or dependency.
 
 ## Grouping and attachment
 

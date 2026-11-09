@@ -171,8 +171,8 @@ cancel the current session.
 
 The workspace header identifies the conversation, project and backend even when
 the session is hidden by a navigation filter. Before any session is opened, show
-a "Select an existing session" empty state, automatic discovery status and the
-Discover/custom-connection actions.
+a "Select an existing session" empty state and the Discover/custom-connection
+actions. Application-wide discovery status belongs in the status bar.
 Client exit retains the terminal buffer and displays an inline exit/crash message.
 An explicit Restart client action creates a fresh terminal for that launch, and
 Close terminal releases the view. Opening other sessions does not discard it.
@@ -208,6 +208,35 @@ Backend setup is reached through **Connections**, outside the project hierarchy.
 Use a small connection summary in the status bar rather than an initial
 connection dashboard. Connection status and session status remain different
 concepts. A disconnected backend keeps its saved projects visible in All.
+
+### Discovery feedback
+
+The explorer contains its controls and tree, plus search-result feedback only
+while a search is active. Routine tab explanations stay in tab tooltips. Successful
+discovery does not insert a server count or explanatory banner above the tree.
+Connection readiness remains in the application status bar: “Connections ready”
+when all profiles are connected, with counts only when partially connected.
+
+The status bar exposes a compact, keyboard-accessible **Discovery limited** or
+**Discovery failed** action when applicable. It also shows transient checking
+state and an actionable no-local-servers state. A successful nonempty discovery
+clears that action. **Connections → Discovery details…** always remains available.
+No discovery event opens a window, steals focus, starts a toast timer or interrupts
+terminal input automatically.
+
+Clicking the action opens one native, nonmodal details window. It shows the time
+of the last check, what failed, its effect and a useful next step. Each issue has
+collapsed **Technical details** with exact paths, failed operations and OS errors.
+Controls provide **Retry discovery**, **Add connection…**, **Copy report** and
+**Close**; Escape closes the window. Retry is disabled while a requested check is
+pending. Identical reports preserve expanded details and text selection. Updated
+reports keep expanded sections by issue code; successful checks clear old issues.
+
+Unidentified processes are distinguished from confirmed Codex processes. A denied
+executable link does not prove that a Codex session is missing. If all expected
+servers are listed, the user need not fix unrelated inaccessible processes.
+Reports include bounded examples and explicitly state when further entries were
+omitted; they are held in memory and copied only on the user's action.
 
 ## 7. First UI validation checklist
 

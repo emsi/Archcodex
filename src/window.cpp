@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "window.h"
 #include "discovery.h"
+#include "discoverydialog.h"
 #include "sessionmodel.h"
 #include "terminal.h"
 #include <QApplication>
@@ -25,7 +26,9 @@
 #include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
+#include <QStyle>
 #include <QTabBar>
+#include <QToolButton>
 #include <QToolTip>
 #include <QTreeView>
 #include <QUuid>
@@ -151,10 +154,12 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         if (text.isEmpty())
             clearSearch();
     });
-    notice = new QLabel("Discovering existing local Codex sessions…");
-    notice->setTextFormat(Qt::PlainText);
-    notice->setWordWrap(true);
-    left->addWidget(notice);
+    searchNotice = new QLabel;
+    searchNotice->setObjectName("searchFeedback");
+    searchNotice->hide();
+    searchNotice->setTextFormat(Qt::PlainText);
+    searchNotice->setWordWrap(true);
+    left->addWidget(searchNotice);
     tree = new SessionTree;
     tree->setModel(filter);
     tree->setHeaderHidden(true);
@@ -240,6 +245,12 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connections = new QLabel;
     connections->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(connections, 1);
+    discoveryStatus = new QToolButton;
+    discoveryStatus->setObjectName("discoveryStatus");
+    discoveryStatus->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    discoveryStatus->setAutoRaise(true);
+    statusBar()->addPermanentWidget(discoveryStatus);
+    connect(discoveryStatus, &QToolButton::clicked, this, &Window::showDiscoveryDetails);
     auto *projectsMenu = menuBar()->addMenu("&Session");
     projectsMenu->addAction("New session in selected project", this, [this] {
         const auto index = tree->currentIndex();
@@ -263,6 +274,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     auto *connectionMenu = menuBar()->addMenu("&Connections");
     connectionMenu->addAction("Discover local sessions", this, &Window::discover);
     connectionMenu->addAction("Manage connections…", this, &Window::connectionsDialog);
+    connectionMenu->addAction("Discovery details…", this, &Window::showDiscoveryDetails);
     auto *view = menuBar()->addMenu("&View");
     auto *hideUnsaved = view->addAction("Hide unsaved sessions");
     hideUnsaved->setObjectName("hideUnsavedSessions");
@@ -313,7 +325,10 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     discovery = new HostDiscovery(this);
     connect(discovery, &HostDiscovery::snapshot, this, &Window::applyDiscovery);
     connect(discovery, &HostDiscovery::failed, this, [this](const QString &message) {
-        discoveryMessage = message;
+        discoveryReport.failure = message;
+        discoveryReport.issues = {};
+        discoveryReport.inProgress = false;
+        discoveryReport.checked = QDateTime::currentDateTime();
         updateSummary();
     });
     if (connectOnStart)
@@ -559,12 +574,43 @@ void Window::updateSummary() {
         count += connectionReady.value(it.key());
         descriptions << it->name + ": " + connectionStates.value(it.key(), "Disconnected");
     }
-    connections->setText(QString("%1 / %2 connections ready").arg(count).arg(profiles.size()));
+    connections->setText(
+        profiles.isEmpty() ? "No connections"
+        : count == profiles.size()
+            ? "Connections ready"
+            : QString("%1 of %2 connections ready").arg(count).arg(profiles.size()));
     connections->setToolTip(descriptions.join('\n'));
-    if (!searchingView)
-        notice->setText(viewDescriptions[tabs->currentIndex()] +
-                        (discoveryMessage.isEmpty() ? QString() : "\n" + discoveryMessage));
+    searchNotice->setVisible(searchingView);
+    const bool failed = !discoveryReport.failure.isEmpty();
+    const bool limited = !discoveryReport.issues.isEmpty();
+    const bool empty = discoveryReport.checked.isValid() && !discoveryReport.endpoints;
+    discoveryStatus->setVisible(discoveryReport.inProgress || failed || limited || empty);
+    discoveryStatus->setText(discoveryReport.inProgress ? "Discovering…"
+                             : failed                   ? "Discovery failed"
+                             : limited                  ? "Discovery limited"
+                                                        : "No local servers");
+    discoveryStatus->setIcon(style()->standardIcon(discoveryReport.inProgress
+                                                       ? QStyle::SP_BrowserReload
+                                                   : failed  ? QStyle::SP_MessageBoxCritical
+                                                   : limited ? QStyle::SP_MessageBoxWarning
+                                                             : QStyle::SP_MessageBoxInformation));
+    discoveryStatus->setToolTip("View discovery details and available actions");
+    discoveryStatus->setAccessibleName(discoveryStatus->text() + " — view details");
+    if (discoveryDialog)
+        discoveryDialog->setReport(discoveryReport);
     emit connectionSummaryChanged();
+}
+void Window::showDiscoveryDetails() {
+    if (!discoveryDialog) {
+        discoveryDialog = new DiscoveryDialog(this);
+        connect(discoveryDialog, &DiscoveryDialog::retryRequested, this, &Window::discover);
+        connect(discoveryDialog, &DiscoveryDialog::addConnectionRequested, this,
+                [this] { editConnection(); });
+    }
+    discoveryDialog->setReport(discoveryReport);
+    discoveryDialog->show();
+    discoveryDialog->raise();
+    discoveryDialog->activateWindow();
 }
 void Window::editConnection(const QString &id) {
     BackendProfile p = profiles.value(id);
@@ -726,11 +772,11 @@ void Window::discover() {
     for (const auto &p : profiles)
         if (!p.socketPath.isEmpty())
             paths << p.socketPath;
-    discoveryMessage = "Discovering existing local Codex sessions…";
+    discoveryReport.inProgress = true;
     updateSummary();
     discovery->refresh(paths);
 }
-void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warnings) {
+void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues) {
     QSet<QString> present;
     for (const auto &value : endpoints) {
         const auto item = value.toObject();
@@ -805,20 +851,18 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warn
             backends[id]->connectServer();
     }
     refreshNames();
-    if (warnings.isEmpty()) {
+    if (issues.isEmpty()) {
         for (const auto &id : discoveredPresent - present)
             if (profiles.contains(id) && profiles[id].discovered)
                 backends[id]->disconnectServer();
         discoveredPresent = present;
     } else
         discoveredPresent.unite(present);
-    discoveryMessage =
-        endpoints.isEmpty()
-            ? "No local Codex servers found. Start Codex normally, or add a custom connection."
-            : QString("%1 local server(s) discovered. Folders group existing sessions.")
-                  .arg(endpoints.size());
-    if (!warnings.isEmpty())
-        discoveryMessage += "\n" + warnings.join('\n');
+    discoveryReport.issues = issues;
+    discoveryReport.failure.clear();
+    discoveryReport.inProgress = false;
+    discoveryReport.checked = QDateTime::currentDateTime();
+    discoveryReport.endpoints = endpoints.size();
     updateSummary();
 }
 void Window::activate(const QModelIndex &index) {
@@ -914,11 +958,12 @@ void Window::clearSearch() {
     updateSummary();
 }
 void Window::updateSearchSummary() {
+    searchNotice->setVisible(searchingView);
     int visible = 0;
     for (int i = 0; i < results->rowCount(); ++i)
         visible += results->item(i)->data(CountRole).toInt();
     const auto hidden = searchSessions.size() - visible;
-    notice->setText(
+    searchNotice->setText(
         QString("%1 results%2%3%4")
             .arg(visible)
             .arg(hidden ? QString(" (%1 unsaved/unavailable hidden)").arg(hidden) : QString())

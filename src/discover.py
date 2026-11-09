@@ -7,6 +7,7 @@ snapshots. The idle loop waits indefinitely for descriptors, with no scan timer.
 """
 
 import ctypes
+import errno
 import json
 import os
 import pwd
@@ -26,12 +27,26 @@ def valid_path(value):
                     for c in value))
 
 
-def socket_path(path, uid):
+def issue(code, summary, explanation, action, details=()):
+    return {"code": code, "summary": summary, "explanation": explanation,
+            "action": action, "details": list(details)[:12],
+            "omitted": max(0, len(details) - 12)}
+
+
+def error_detail(path, operation, error):
+    code = errno.errorcode.get(error.errno, str(error.errno))
+    return f"{path} — {operation}: {error.strerror or str(error)} ({code})"
+
+
+def socket_path(path, uid, on_denied=None):
     try:
         resolved = os.path.realpath(path)
         info = os.stat(resolved)
         if valid_path(resolved) and info.st_uid == uid and stat.S_ISSOCK(info.st_mode):
             return resolved
+    except PermissionError as error:
+        if on_denied:
+            on_denied(path, error)
     except OSError:
         pass
     return None
@@ -44,49 +59,72 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
     retry handles that race. Never treat socket-file existence as live status.
     """
     uid = os.getuid() if uid is None else uid
-    listeners, found, warnings = {}, {}, []
+    listeners, found, issues = {}, {}, []
     try:
         owner = pwd.getpwuid(uid)
         identity = {"user": owner.pw_name, "ownerHome": owner.pw_dir}
     except KeyError:
         identity = {}
     identity["host"] = socket.gethostname()
+    probe, operation = proc / "net/unix", "read Unix socket table"
     try:
         for line in (proc / "net/unix").read_text(errors="surrogateescape").splitlines()[1:]:
             fields = line.split(maxsplit=7)
             if len(fields) == 8 and fields[4] == "0001" and fields[5] == "01":
                 if valid_path(fields[7]):
                     listeners[fields[6]] = fields[7]
+        probe, operation = proc, "list processes"
         processes = list(proc.iterdir())
-    except OSError:
-        return [], ["Cannot read host procfs; local discovery is incomplete."]
-    denied = 0
+    except OSError as error:
+        return [], [issue("procfs", "Host process information is unavailable",
+                          "Automatic discovery could not take a host snapshot. Existing connections are retained.",
+                          "Retry discovery. If you know the app-server socket, add it as a connection.",
+                          [error_detail(probe, operation, error)])]
+    denied = {"ownership": {}, "unidentified": {}, "codex": {}}
     for process in processes:
         if not process.name.isdecimal():
             continue
+        category = "ownership"
+        probe, operation = process, "check process owner"
+
+        def denied_path(path, error):
+            denied[category].setdefault(process.name, error_detail(path, operation, error))
+
         try:
             if process.stat().st_uid != uid:
                 continue
-            exe = os.readlink(process / "exe")
+            category = "unidentified"
+            probe, operation = process / "exe", "read executable link"
+            exe = os.readlink(probe)
             name = os.path.basename(exe).removesuffix(" (deleted)")
             if name != "codex" and not name.startswith("codex-"):
                 continue
-            args = (process / "cmdline").read_bytes()[:65536].split(b"\0")
+            category = "codex"
+            probe, operation = process / "cmdline", "read command metadata"
+            args = probe.read_bytes()[:65536].split(b"\0")
             if b"app-server" in args:
                 remaining = args[args.index(b"app-server") + 1:]
                 if b"pid-update-loop" in remaining or (remaining and remaining[0] in (
                         b"daemon", b"proxy", b"generate-ts", b"generate-json-schema", b"help")):
                     continue  # Updater/control tooling is not a conversation server.
             # A container-private path with the same spelling is not a host socket.
-            namespace = os.readlink(process / "ns/mnt")
-            host_environment = namespace == os.readlink(proc / "self/ns/mnt")
+            probe, operation = process / "ns/mnt", "read mount namespace link"
+            namespace = os.readlink(probe)
+            probe = proc / "self/ns/mnt"
+            host_environment = namespace == os.readlink(probe)
             try:
                 cwd = os.readlink(process / "cwd")
             except OSError:
                 cwd = ""
-            for fd in (process / "fd").iterdir():
+            probe, operation = process / "fd", "list socket descriptors"
+            descriptors = list(probe.iterdir())
+            for fd in descriptors:
                 try:
+                    operation = "read descriptor link"
                     link = os.readlink(fd)
+                except PermissionError as error:
+                    denied_path(fd, error)
+                    continue
                 except OSError:
                     continue
                 if not link.startswith("socket:["):
@@ -94,14 +132,21 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
                 path = listeners.get(link[8:-1])
                 if not path:
                     continue
-                canonical = socket_path(path, uid)
+                operation = "inspect socket node"
+                canonical = socket_path(path, uid, denied_path)
                 if canonical:
                     if not host_environment:
                         try:
-                            there = os.stat(process / "root" / path.lstrip("/"))
-                            here = os.stat(path)
+                            probe = process / "root" / path.lstrip("/")
+                            operation = "verify socket across mount namespaces"
+                            there = os.stat(probe)
+                            probe = path
+                            here = os.stat(probe)
                             if (there.st_dev, there.st_ino) != (here.st_dev, here.st_ino):
                                 continue
+                        except PermissionError as error:
+                            denied_path(probe, error)
+                            continue
                         except OSError:
                             continue
                     executable = exe if valid_path(exe) and os.access(exe, os.X_OK) else "codex"
@@ -111,16 +156,36 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
                                         "pid": int(process.name),
                                         "cwd": cwd if valid_path(cwd) else ""}
                     if len(found) >= LIMIT:
-                        warnings.append("Local discovery reached 4,096 endpoints; coverage is incomplete.")
+                        issues.append(issue("endpoint-limit", "Discovery reached its socket limit",
+                                            "The scan stopped after 4,096 endpoints; remaining processes were not checked.",
+                                            "Add a known socket manually if its server is missing."))
                         break
-        except PermissionError:
-            denied += 1
+        except PermissionError as error:
+            denied_path(probe, error)
         except OSError:
             continue  # Process exit during a snapshot is ordinary.
         if len(found) >= LIMIT:
             break
-    if denied:
-        warnings.append("Some same-user processes are inaccessible; discovery may be incomplete.")
+    for category, failures in denied.items():
+        if not failures:
+            continue
+        count = len(failures)
+        noun = "process" if count == 1 else "processes"
+        summary, explanation = {
+            "ownership": (f"Could not check the owner of {count} {noun}",
+                          "Linux denied access to process ownership information. These entries were skipped."),
+            "unidentified": (f"{count} {noun} could not be identified",
+                             "Linux denied access to executable links for processes owned by your user. "
+                             "Archcodex cannot tell whether they are Codex; this does not prove any sessions are missing."),
+            "codex": (f"{count} Codex {noun} could not be fully inspected",
+                      "Linux denied access while matching known Codex processes to their sockets. "
+                      "Those servers may be absent from the explorer; existing connections are retained."),
+        }[category]
+        issues.append(issue(category + "-access", summary, explanation,
+                            "If all expected servers are listed, no action is needed. Otherwise, add the missing "
+                            "server's Unix socket in Connections. The details identify the blocked operation; "
+                            "retry after resolving access to that process.",
+                            [failures[pid] for pid in sorted(failures, key=int)]))
     for alias in [default, *aliases]:
         if not alias or not valid_path(alias):
             continue
@@ -130,7 +195,7 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
             found[canonical]["default"] |= alias == default
     for item in found.values():
         item["aliases"] = sorted(set(item["aliases"]))
-    return sorted(found.values(), key=lambda item: item["path"]), warnings
+    return sorted(found.values(), key=lambda item: item["path"]), issues
 
 
 class Watcher:
@@ -173,11 +238,19 @@ class Watcher:
             if wd is None:
                 wd = self.libc.inotify_add_watch(self.fd, os.fsencode(directory), self.MASK)
                 if wd < 0:
-                    errors.append("Some socket directories could not be watched; use Discover to refresh.")
+                    code = ctypes.get_errno()
+                    errors.append(error_detail(directory, "watch socket directory",
+                                               OSError(code, os.strerror(code))))
                     continue
                 self.directories[directory] = wd
             self.watches[wd] = (directory, names)
-        return sorted(set(errors))
+        if not errors:
+            return []
+        return [issue("directory-watches", f"Automatic discovery updates unavailable for {len(errors)} socket directories",
+                      "New or removed servers in these locations may not appear automatically. "
+                      "Connected sessions still receive their normal server events.",
+                      "Use Discover to refresh after starting or stopping a server. Check the directory error below.",
+                      sorted(errors))]
 
     def changed(self):
         changed = False
@@ -220,11 +293,11 @@ def main():
         dirty = False
         while True:
             if dirty:
-                warnings = watcher.configure(roots, paths + known)
+                watcher.configure(roots, paths + known)
                 endpoints, issues = snapshot(default=default, aliases=paths)
                 known = sorted(set(known + [item["path"] for item in endpoints]))[-LIMIT:]
-                warnings += watcher.configure(roots, paths + known)
-                message = {"endpoints": endpoints, "warnings": sorted(set(warnings + issues))}
+                issues += watcher.configure(roots, paths + known)
+                message = {"endpoints": endpoints, "issues": issues}
                 if message != last:
                     print(json.dumps(message, ensure_ascii=True, separators=(",", ":")), flush=True)
                     last = message

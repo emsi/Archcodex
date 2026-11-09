@@ -267,6 +267,25 @@ class CoreTests : public QObject {
         QVERIFY(!qvariant_cast<Session>(updates.last().at(0)).known);
         b.disconnectServer();
     }
+    void discoveryStructuredReport() {
+        if (QFile::exists("/.flatpak-info"))
+            QSKIP("Host-command access is an explicit host acceptance test outside the build "
+                  "sandbox.");
+        HostDiscovery discovery;
+        QSignalSpy snapshots(&discovery, &HostDiscovery::snapshot);
+        QSignalSpy failures(&discovery, &HostDiscovery::failed);
+        discovery.refresh();
+        QTRY_VERIFY_WITH_TIMEOUT(!snapshots.isEmpty() || !failures.isEmpty(), 5000);
+        QVERIFY2(failures.isEmpty(),
+                 failures.isEmpty() ? "" : qPrintable(failures.last()[0].toString()));
+        for (const auto &value : snapshots.last()[1].toJsonArray()) {
+            const auto issue = value.toObject();
+            QVERIFY(!issue["code"].toString().isEmpty());
+            QVERIFY(!issue["summary"].toString().isEmpty());
+            QVERIFY(issue["details"].isArray());
+        }
+        discovery.stop();
+    }
     void isolatedRealCodexIfRequested() {
         const auto executable = qEnvironmentVariable("ARCHCODEX_TEST_CODEX");
         if (executable.isEmpty())

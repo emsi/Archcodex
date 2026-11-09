@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "backend.h"
+#include "discovery.h"
 #include "store.h"
 #include <QMainWindow>
 #include <QModelIndex>
+#include <QPointer>
 #include <memory>
 
 class QTreeView;
@@ -13,11 +15,12 @@ class QComboBox;
 class QLabel;
 class QPushButton;
 class QSplitter;
+class QToolButton;
 namespace Archcodex {
 class SessionModel;
 class SessionFilter;
 class TerminalArea;
-class HostDiscovery;
+class DiscoveryDialog;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -42,7 +45,10 @@ class Window : public QMainWindow {
     QStringList searchErrors;
     quint64 searchToken = 0;
     QString scopeBackend, scopePath, pendingOpen;
-    QString discoveryMessage;
+    DiscoveryReport discoveryReport;
+    QPointer<DiscoveryDialog> discoveryDialog;
+    QToolButton *discoveryStatus;
+    void showDiscoveryDetails();
     QSet<QString> paused, ignoredSockets, discoveredPresent;
     QHash<QString, QString> discoveredPaths;
     bool searchingView = false, storageFailed = false;
@@ -52,7 +58,7 @@ class Window : public QMainWindow {
     QTabBar *tabs;
     QLineEdit *searchBox;
     QComboBox *scope;
-    QLabel *notice, *terminalTitle, *connections;
+    QLabel *searchNotice, *terminalTitle, *connections;
     QPushButton *loadMore;
     QSplitter *splitter;
     TerminalArea *terminal;
@@ -71,7 +77,7 @@ class Window : public QMainWindow {
     void connectionsDialog();
     void editConnection(const QString &id = {});
     void discover();
-    void applyDiscovery(const QJsonArray &endpoints, const QStringList &warnings);
+    void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues);
     void activate(const QModelIndex &index);
     void search();
     void clearSearch();

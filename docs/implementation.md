@@ -1,4 +1,4 @@
-# Implementation: 0.3.1
+# Implementation: 0.3.2
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
@@ -16,6 +16,8 @@ application UI.
   confined to details; no manual project setup is required.
 - Persisted **View → Hide unsaved sessions**, enabled by default, with an exception
   for open terminal views so retained errors remain accessible in Active.
+- Nonblocking discovery diagnostics in the status bar and an on-demand details
+  window with specific failures, remedies, retry, add-connection and copy actions.
 - An IDE-style left navigator with All, Active, Running and Waiting tabs, recent-use ordering,
   expandable sessions, backend labels and accessible status descriptions.
 - Running, waiting (including idle prompts), saved, error and unknown states from protocol events.
@@ -468,3 +470,73 @@ test and reported version 0.3.1. Its bundle imported successfully into the isola
 `.build/flatpak` installation; cache triggers still reported the known sandbox
 namespace restriction. Flatpak metadata/permissions match 0.3.0 exactly. No normal
 user installation, host service, credential or remote repository was modified.
+
+
+## 0.3.2 discovery feedback
+
+The user requested removing the verbose discovery/status banner from the project
+explorer and replacing vague warnings with actionable modern UX. The old warning
+counted permission failures before the process was necessarily identified as
+Codex, so it could not establish that sessions were missing. That distinction is
+now explicit in the report. Filter explanations remain available in tab tooltips;
+only search-result feedback occupies the explorer while a search is active.
+
+### Decisions not agreed in advance
+
+The UI correction and implementation were authorized. These are the supporting
+choices, affected files and consequences:
+
+- `src/window.*`, new `src/discoverydialog.*`: use a small application status-bar
+  action and one modeless details window, opened only by the user. This avoids
+  interrupting terminal input with recurring modal dialogs. A healthy nonempty
+  discovery hides the action; checking, failure, incomplete discovery and zero
+  local servers have distinct labels/icons. The Connections menu always offers
+  details. Connection readiness uses text without counts when all are ready.
+- `src/discoverydialog.*`: show last-check time, issue summaries, explanations and
+  next steps, with technical detail collapsed initially. Preserve expanded
+  sections by issue code and leave identical reports untouched to prevent flicker
+  and lost text selection. Retry, Add connection, Copy report and Close are native
+  controls; retries are disabled while pending. Recovery clears old issues and
+  helper failure replaces stale diagnostic issues. Report copying is explicit;
+  reports and stderr are held in memory rather than written to a new log file.
+- `src/discover.py`: replace internal warning strings with structured issue
+  records. Distinguish unknown ownership, unidentified same-user processes,
+  recognized Codex processes, procfs failure, directory-watch failure and endpoint
+  limits. Record the actual failed operation/path/errno from existing inspections,
+  including denied descriptor/socket checks that were previously silently skipped.
+  Count affected processes once and retain the first failure per process, up to
+  12 examples per category with omitted counts. Normal exits are not warnings.
+  Report only the final directory-watch configuration to avoid duplicate issues.
+  No account credentials, process environments or new privilege changes are used.
+- `src/discovery.*`: carry structured reports alongside endpoint snapshots; the
+  bundled GUI/helper must match. Include available launch/exit errors and the last
+  4 KiB of helper stderr. Reuse the existing one-shot 15-second deadline for every
+  explicit refresh so a failed retry cannot remain pending forever. Normal
+  discovery remains driven by inotify; session status remains server-event based.
+- `tests/test_discovery.py`, `tests/test_core.cpp`, `tests/test_window.cpp`: cover
+  accurate process classification, paths/errors, bounded samples, harmless exits,
+  watch failures, real helper report parsing, hidden explorer feedback, user-only
+  nonmodal opening, stable repeated reports, recovery, copy and action signals.
+  The real helper parsing test skips inside a Flatpak build sandbox where host
+  command access is not available; synthetic tests remain active there. Optional
+  screenshot capture uses synthetic data in ignored `.build/discovery-ux-test/`.
+- `CMakeLists.txt`, `data/`, `scripts/build-flatpak.sh`, `README.md`, `docs/`: deliver
+  patch version 0.3.2. Link the new Qt Widgets dialog without new dependencies or
+  Flatpak permissions. Reuse existing SDK/runtime roots and package tooling;
+  `.build/` retains local test/build state, and `dist/` holds the bundle, matching
+  source archive and checksums. Commit completed work under the standing user
+  instruction; no push, tag or public release.
+
+Full Flatpak sandbox execution still requires the user's host: this container
+blocks its namespaces. Tests use fixtures and existing read-only discovery;
+no authenticated Codex turn or host configuration change is involved.
+
+
+For 0.3.2, discovery/core/model/window suites passed in the KDE SDK and native
+core/discovery suites passed. The two new discovery-window tests passed under
+X11; their inspected screenshots are retained in `.build/discovery-ux-test/`.
+The packaged KDE Platform application passed its X11 Konsole/PTY smoke test and
+reported version 0.3.2. The bundle imported into the isolated project-local
+Flatpak installation; cache triggers reported the existing namespace restriction.
+Effective package metadata/permissions match 0.3.1. Optional real Codex integration
+tests were not run; no model turn was initiated. No normal user installation or host configuration was changed.

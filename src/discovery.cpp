@@ -15,30 +15,35 @@ HostDiscovery::HostDiscovery(QObject *parent) : QObject(parent) {
     startup.setSingleShot(true);
     connect(&startup, &QTimer::timeout, this, [this] {
         stop();
-        emit failed("Host discovery did not respond. Check host Python 3 and Flatpak host access.");
+        emit failed(failureDetails("Host discovery did not respond within 15 seconds. Check host "
+                                   "Python 3 and Flatpak host-command access."));
     });
     connect(&process, &QProcess::started, this, &HostDiscovery::sendRequest);
     connect(&process, &QProcess::readyReadStandardError, this,
-            [this] { process.readAllStandardError(); });
+            [this] { stderrTail = (stderrTail + process.readAllStandardError()).right(4096); });
     connect(&process, &QProcess::errorOccurred, this, [this](auto error) {
         if (!stopping && error == QProcess::FailedToStart) {
             startup.stop();
             emit failed(
-                "Cannot start host discovery. Python 3 and Flatpak host access are required.");
+                failureDetails("Cannot start host discovery: " + process.errorString() +
+                               "\nHost Python 3 and Flatpak host-command access are required."));
         }
     });
     connect(&process, qOverload<int, QProcess::ExitStatus>(&QProcess::finished), this,
-            [this](int, auto) {
+            [this](int code, QProcess::ExitStatus status) {
                 startup.stop();
                 if (!stopping)
-                    emit failed("Host discovery stopped. Use Discover to retry; manual connections "
-                                "remain available.");
+                    emit failed(failureDetails(
+                        QString("Host discovery %1 (exit code %2). Retry discovery or add a "
+                                "connection manually.")
+                            .arg(status == QProcess::CrashExit ? "crashed" : "stopped")
+                            .arg(code)));
             });
     connect(&process, &QProcess::readyReadStandardOutput, this, [this] {
         buffer += process.readAllStandardOutput();
         if (buffer.size() > 16 * 1024 * 1024) {
             stop();
-            emit failed("Host discovery exceeded its response limit.");
+            emit failed(failureDetails("Host discovery exceeded its 16 MiB response limit."));
             return;
         }
         while (buffer.contains('\n')) {
@@ -46,19 +51,24 @@ HostDiscovery::HostDiscovery(QObject *parent) : QObject(parent) {
             QJsonParseError error;
             const auto message = QJsonDocument::fromJson(buffer.left(end), &error).object();
             buffer.remove(0, end + 1);
-            if (error.error != QJsonParseError::NoError || !message.contains("endpoints")) {
+            if (error.error != QJsonParseError::NoError || !message["endpoints"].isArray() ||
+                !message["issues"].isArray()) {
                 stop();
-                emit failed("Host discovery failed: " +
-                            message["error"].toString("invalid response"));
+                emit failed(failureDetails("Host discovery failed: " +
+                                           message["error"].toString("invalid response")));
                 return;
             }
             startup.stop();
-            QStringList warnings;
-            for (const auto &warning : message["warnings"].toArray())
-                warnings << warning.toString();
-            emit snapshot(message["endpoints"].toArray(), warnings);
+            emit snapshot(message["endpoints"].toArray(), message["issues"].toArray());
         }
     });
+}
+QString HostDiscovery::failureDetails(const QString &summary) {
+    if (process.isOpen())
+        stderrTail = (stderrTail + process.readAllStandardError()).right(4096);
+    const auto diagnostic = QString::fromUtf8(stderrTail).trimmed();
+    return summary +
+           (diagnostic.isEmpty() ? QString() : "\n\nHelper stderr (last 4 KiB):\n" + diagnostic);
 }
 HostDiscovery::~HostDiscovery() {
     stop();
@@ -76,6 +86,7 @@ void HostDiscovery::stop() {
     }
 }
 void HostDiscovery::sendRequest() {
+    startup.start(15000); // One response deadline per explicit request, not a scan timer.
     process.write(QJsonDocument(QJsonObject{{"paths", QJsonArray::fromStringList(paths)}})
                       .toJson(QJsonDocument::Compact) +
                   '\n');
@@ -102,6 +113,7 @@ void HostDiscovery::refresh(const QStringList &requestedPaths) {
         program = "/usr/bin/flatpak-spawn";
     }
     buffer.clear();
+    stderrTail.clear();
     stopping = false;
     startup.start(15000);
     process.start(program, args);

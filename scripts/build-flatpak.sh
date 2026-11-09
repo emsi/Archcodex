@@ -13,5 +13,5 @@ flatpak-builder --user --install-deps-from=flathub --force-clean \
   --default-branch=stable --repo=.build/repository \
   .build/flatpak-app packaging/io.github.emsi.Archcodex.json
 flatpak build-bundle --runtime-repo=https://flathub.org/repo/flathub.flatpakrepo \
-  .build/repository "dist/Archcodex-0.3.1-$target_arch.flatpak" io.github.emsi.Archcodex stable
-sha256sum "dist/Archcodex-0.3.1-$target_arch.flatpak" > dist/SHA256SUMS
+  .build/repository "dist/Archcodex-0.3.2-$target_arch.flatpak" io.github.emsi.Archcodex stable
+sha256sum "dist/Archcodex-0.3.2-$target_arch.flatpak" > dist/SHA256SUMS

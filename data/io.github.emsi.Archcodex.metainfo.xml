@@ -16,5 +16,5 @@
   <launchable type="desktop-id">io.github.emsi.Archcodex.desktop</launchable>
   <provides><binary>archcodex</binary></provides>
   <content_rating type="oars-1.1"/>
-  <releases><release version="0.3.1" date="2026-11-09" type="development"/><release version="0.3.0" date="2026-11-09" type="development"/><release version="0.2.1" date="2026-11-09" type="development"/><release version="0.2.0" date="2026-11-08" type="development"/></releases>
+  <releases><release version="0.3.2" date="2026-11-09" type="development"/><release version="0.3.1" date="2026-11-09" type="development"/><release version="0.3.0" date="2026-11-09" type="development"/><release version="0.2.1" date="2026-11-09" type="development"/><release version="0.2.0" date="2026-11-08" type="development"/></releases>
 </component>

@@ -1,7 +1,7 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.3.1** implements the first backend: **existing local Unix-socket
+Version **0.3.2** implements the first backend: **existing local Unix-socket
 app-servers**. Remote TCP, SSH and myCodex are later stages.
 
 Its primary workflow is returning to **existing Codex sessions**. On startup it
@@ -18,6 +18,9 @@ Each view compresses its own folder paths. Running and Waiting open expanded;
 waiting sessions use green indicators, running sessions blue.
 Session and project indicators reflect **server events, without status
 polling**. Multiple local servers can be connected independently.
+Discovery issues appear in the status bar; click **Discovery limited** or use
+**Connections → Discovery details** for explanations, technical details and
+retry/add-connection/copy-report actions. Discovery never opens a popup on its own.
 
 The adopted foundation is **C++20, Qt 6 Widgets, KDE Frameworks 6 and Konsole
 KPart**, distributed primarily as a **Flatpak**. Linux is the only target; KDE on
@@ -26,13 +29,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.3.1-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.3.2-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.3.1-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.3.2-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -99,7 +102,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
   sessions, and the four session filters.
-- [Implementation and testing](docs/implementation.md): what 0.3.1 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.3.2 delivers and
   how to exercise it on your host.
 
 ## Project status

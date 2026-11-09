@@ -1,16 +1,22 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "discovery.h"
+#include "discoverydialog.h"
 #include "fixture.h"
 #include "sessionmodel.h"
 #include "terminal.h"
 #include "window.h"
 #include <QAction>
+#include <QClipboard>
 #include <QComboBox>
 #include <QHelpEvent>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
+#include <QPlainTextEdit>
+#include <QPushButton>
 #include <QSettings>
 #include <QTabBar>
+#include <QToolButton>
 #include <QToolTip>
 #include <QTreeView>
 #include <QtTest>
@@ -18,6 +24,106 @@
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void discoveryFeedbackIsActionableAndDoesNotInterrupt() {
+        Fixture fixture;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        window.show();
+        auto *discovery = window.findChild<HostDiscovery *>();
+        auto *feedback = window.findChild<QLabel *>("searchFeedback");
+        auto *status = window.findChild<QToolButton *>("discoveryStatus");
+        QVERIFY(feedback && feedback->isHidden());
+        QVERIFY(status && status->isHidden());
+        const QJsonArray endpoints{QJsonObject{{"path", fixture.path()},
+                                               {"default", true},
+                                               {"user", "alice"},
+                                               {"host", "workstation"}}};
+        const QJsonArray issues{QJsonObject{
+            {"code", "unidentified-access"},
+            {"summary", "2 processes could not be identified"},
+            {"explanation",
+             "Linux denied access to executable links. Archcodex cannot tell whether they are "
+             "Codex; this does not prove any sessions are missing."},
+            {"action", "If all expected servers are listed, no action is needed. Otherwise, add "
+                       "the missing server's Unix socket in Connections. "
+                       "Retry after resolving access to that process."},
+            {"details",
+             QJsonArray{"/proc/4201/exe — read executable link: Permission denied (EACCES)",
+                        "/proc/4202/exe — read executable link: Permission denied (EACCES)"}}}};
+        discovery->snapshot(endpoints, issues);
+        QVERIFY(feedback->isHidden());
+        QVERIFY(status->isVisible());
+        QCOMPARE(status->text(), "Discovery limited");
+        QVERIFY(!QApplication::activeModalWidget());
+        QVERIFY(!window.findChild<DiscoveryDialog *>());
+        QTest::mouseClick(status, Qt::LeftButton);
+        QPointer<DiscoveryDialog> dialog = window.findChild<DiscoveryDialog *>();
+        QVERIFY(dialog && dialog->isVisible() && !dialog->isModal());
+        QVERIFY(!QApplication::activeModalWidget());
+        auto *technical = dialog->findChild<QPlainTextEdit *>();
+        QVERIFY(technical && technical->isHidden());
+        QTest::mouseClick(dialog->findChild<QToolButton *>(), Qt::LeftButton);
+        QVERIFY(technical->isVisible());
+        QVERIFY(technical->toPlainText().contains("/proc/4201/exe"));
+        QTest::mouseClick(dialog->findChild<QPushButton *>("copyDiscoveryReport"), Qt::LeftButton);
+        QVERIFY(QApplication::clipboard()->text().contains("EACCES"));
+        QVERIFY(
+            QApplication::clipboard()->text().contains("does not prove any sessions are missing"));
+        discovery->snapshot(endpoints, issues);
+        QCOMPARE(window.findChildren<DiscoveryDialog *>().size(), 1);
+        QCOMPARE(dialog->findChild<QPlainTextEdit *>(), technical);
+        QVERIFY(technical->isVisible());
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty()) {
+            QApplication::processEvents();
+            QVERIFY(dialog->grab().save(screenshots + "/discovery-details.png"));
+            for (auto *backend : window.findChildren<Backend *>())
+                backend->sessionChanged(Session::fromThread(backend->profile.id, fixture.thread()));
+            window.findChild<QTreeView *>()->expandAll();
+            QVERIFY(window.grab().save(screenshots + "/discovery-status.png"));
+        }
+        discovery->snapshot(endpoints, {});
+        QVERIFY(status->isHidden());
+        QVERIFY(feedback->isHidden());
+        QVERIFY(!dialog->findChild<QPlainTextEdit *>());
+        QTest::keyClick(dialog, Qt::Key_Escape);
+        QTRY_VERIFY(!dialog);
+        discovery->failed("Cannot start host discovery: No such file or directory");
+        QCOMPARE(status->text(), "Discovery failed");
+        QVERIFY(status->isVisible());
+        QVERIFY(!window.findChild<DiscoveryDialog *>());
+        QVERIFY(feedback->isHidden());
+        window.close();
+    }
+    void discoveryActionsAndProgress() {
+        DiscoveryDialog dialog;
+        QSignalSpy retry(&dialog, &DiscoveryDialog::retryRequested);
+        QSignalSpy add(&dialog, &DiscoveryDialog::addConnectionRequested);
+        DiscoveryReport report;
+        report.checked = QDateTime::currentDateTime();
+        report.failure = "Example helper failure";
+        dialog.setReport(report);
+        dialog.show();
+        auto *retryButton = dialog.findChild<QPushButton *>("retryDiscovery");
+        QTest::mouseClick(retryButton, Qt::LeftButton);
+        QCOMPARE(retry.size(), 1);
+        report.inProgress = true;
+        dialog.setReport(report);
+        QVERIFY(!retryButton->isEnabled());
+        for (auto *button : dialog.findChildren<QPushButton *>())
+            if (button->text() == "Add connection…")
+                QTest::mouseClick(button, Qt::LeftButton);
+        QCOMPARE(add.size(), 1);
+        report.inProgress = false;
+        report.failure.clear();
+        report.endpoints = 2;
+        dialog.setReport(report);
+        QVERIFY(retryButton->isEnabled());
+        bool healthy = false;
+        for (auto *label : dialog.findChildren<QLabel *>())
+            healthy |= label->text().contains("No discovery access problems");
+        QVERIFY(healthy);
+    }
     void viewsFollowEventsAndPreserveNavigation() {
         Fixture fixture;
         QTemporaryDir data;

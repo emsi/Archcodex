@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import importlib.util
+import errno
 import json
 import os
 from pathlib import Path
@@ -118,6 +119,63 @@ class DiscoveryTests(unittest.TestCase):
         finally:
             watcher.close()
 
+    def test_access_reports_distinguish_unknown_and_known_codex(self):
+        self.server(100)
+        self.server(200)
+        readlink = os.readlink
+        blocked = {self.proc / "100/exe", self.proc / "200/fd/7"}
+        def inspect(path):
+            if Path(path) in blocked:
+                raise PermissionError(errno.EACCES, "Permission denied", str(path))
+            return readlink(path)
+        with patch.object(discovery.os, "readlink", side_effect=inspect):
+            endpoints, issues = discovery.snapshot(self.proc)
+        self.assertEqual(endpoints, [])
+        reports = {item["code"]: item for item in issues}
+        self.assertEqual(set(reports), {"unidentified-access", "codex-access"})
+        unknown = reports["unidentified-access"]
+        self.assertIn("1 process", unknown["summary"])
+        self.assertIn("cannot tell whether they are Codex", unknown["explanation"])
+        self.assertIn("/100/exe", unknown["details"][0])
+        self.assertIn("read executable link", unknown["details"][0])
+        self.assertIn("EACCES", unknown["details"][0])
+        self.assertIn("/200/fd/7", reports["codex-access"]["details"][0])
+        self.assertIn("Unix socket", unknown["action"])
+
+    def test_access_report_samples_are_bounded_and_exits_are_not_warnings(self):
+        for pid in range(100, 114):
+            self.server(pid)
+        readlink = os.readlink
+        def inspect(path):
+            if Path(path).name == "exe":
+                if Path(path).parent.name == "113":
+                    raise FileNotFoundError(errno.ENOENT, "No such process")
+                raise PermissionError(errno.EACCES, "Permission denied")
+            return readlink(path)
+        with patch.object(discovery.os, "readlink", side_effect=inspect):
+            _, issues = discovery.snapshot(self.proc)
+        self.assertEqual(len(issues), 1)
+        self.assertIn("13 processes", issues[0]["summary"])
+        self.assertEqual(len(issues[0]["details"]), 12)
+        self.assertEqual(issues[0]["omitted"], 1)
+
+    def test_procfs_and_watch_failures_include_paths_and_os_errors(self):
+        _, issues = discovery.snapshot(self.proc)
+        self.assertEqual(issues[0]["code"], "procfs")
+        self.assertIn(str(self.proc / "net/unix"), issues[0]["details"][0])
+        self.assertIn("ENOENT", issues[0]["details"][0])
+        watcher = discovery.Watcher()
+        try:
+            with patch.object(watcher.libc, "inotify_add_watch", return_value=-1), \
+                 patch.object(discovery.ctypes, "get_errno", return_value=errno.ENOSPC):
+                issues = watcher.configure([str(self.root)], [])
+            self.assertEqual(issues[0]["code"], "directory-watches")
+            self.assertIn(str(self.root), issues[0]["details"][0])
+            self.assertIn("ENOSPC", issues[0]["details"][0])
+            self.assertIn("Connected sessions still receive", issues[0]["explanation"])
+        finally:
+            watcher.close()
+
     def test_idle_loop_blocks_without_a_rescan_timeout(self):
         class StopLoop(Exception):
             pass
@@ -146,7 +204,9 @@ class DiscoveryTests(unittest.TestCase):
             process.stdin.write(b'{"paths":[]}\n')
             process.stdin.flush()
             self.assertTrue(select.select([process.stdout], [], [], 5)[0])
-            self.assertIn("endpoints", json.loads(process.stdout.readline()))
+            message = json.loads(process.stdout.readline())
+            self.assertIn("endpoints", message)
+            self.assertIsInstance(message["issues"], list)
             process.stdin.close()
             self.assertEqual(process.wait(timeout=5), 0)
 
