@@ -67,6 +67,7 @@ QStringList terminalArguments(const BackendProfile &profile, const QString &thre
 QStringList clientArguments(const BackendProfile &profile, const QString &threadId,
                             const QString &cwd = {});
 QString serverLabel(const BackendProfile &profile);
+QString serverTreeLabel(const BackendProfile &profile);
 QString serverDetails(const BackendProfile &profile);
 } // namespace Archcodex
 

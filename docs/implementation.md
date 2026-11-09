@@ -1,4 +1,4 @@
-# Implementation: 0.4.1
+# Implementation: 0.5.0
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
@@ -700,3 +700,104 @@ myCodex roots show only WORKDIR/descendant sessions by default; enable the
 Backends option to reveal other shared history, then disable it again and check
 search and activity views. Previously hidden history must reappear without
 changing execution eligibility or introducing polling.
+
+## 0.5.0 host groups and opened-terminal navigation
+
+Projects now separates the local computer (`username @ hostname`), local myCodex
+(`myCodex @ hostname`) and each configured remote myCodex connection. These groups
+contain short server/container names followed by the existing compact project
+folders and sessions. Keeping the backend layer preserves routing when two
+servers report the same directory or conversation ID. The local host comes
+first, local myCodex second, and remote groups sort by name. Activity does not
+reorder these groups; their children retain recent-use ordering.
+
+Automatic child labels omit repeated host/myCodex/storage text; details and the
+terminal header retain full context. Manual names are preserved. The existing
+container discovery stream now supplies the Docker host's hostname and username,
+obtained once on that host. The remote SSH alias is the fallback before discovery
+reports its hostname. Cached metadata supplies offline labels; fresh discovery
+takes precedence. Remote groups are keyed by configured SSH connection, not
+hostname alone, so different execution contexts are not merged by display name.
+
+The additional Opened tab lists every open terminal view, including retained
+exited/error output as explicitly requested. It bypasses history visibility
+settings and opens expanded by default. Closing a terminal removes that entry;
+an idle or running conversation without a GUI terminal does not appear there.
+Opened membership is not persisted or inferred from server state.
+
+Ctrl+Tab and Ctrl+Shift+Tab navigate open terminals in recent-use order. Holding
+Ctrl freezes a snapshot, successive presses cycle forward/backward, and release
+commits the current selection as most recent. Clicking, closing a view, opening
+another terminal or deactivating the window finishes the sequence safely. Keys
+are intercepted in the owning main window, including the embedded terminal,
+without changing normal TUI input or shortcuts inside separate dialogs. Retained
+exit output remains in the switcher until closed. Session-menu actions expose
+the shortcuts. The terminal header and visible navigator selection follow focus.
+Switching never launches a new client or issues a backend request.
+
+Group-level search now targets the group's backend IDs. Existing server/folder
+search remains confined to its original backend, and every row keeps its exact
+backend/thread identity. Parent counts and dots aggregate only visible children.
+Empty configured servers remain in All and disappear from other views unless
+they contain matching entries.
+
+### Where the remote TUI runs
+
+For the implemented remote myCodex backend, **Codex TUI runs inside the container
+on the remote Docker host**. The local Konsole widget provides rendering and
+keyboard input through host OpenSSH (`ssh -tt`). On the remote host, the existing
+Python helper validates the selected execution context and runs `docker exec -it`
+as the discovered container user. Inside that container, it selects the session's
+working directory and launches the discovered Codex executable with
+`--remote unix://SOCKET resume -- THREAD_ID` against that container's app-server.
+The local computer does not run that Codex TUI.
+
+Status uses a separate non-PTY path: `ssh -T`, `docker exec -i`, then the container's
+`codex app-server proxy --sock SOCKET`. It carries protocol traffic and pushed
+events to the existing bridge/backend. Local myCodex uses the same container
+paths without SSH; ordinary local host sessions run their TUI on the host.
+No transport, authentication policy, app-server lifetime or polling behavior was
+changed by this UI update.
+
+### Decisions not agreed in advance
+
+The user authorized host/type grouping, shorter explorer labels with unchanged
+terminal headers, Opened and Ctrl+Tab navigation. They explicitly selected
+inclusion of retained exited/error terminal views. Implementation choices:
+
+| Choice | Files and consequences |
+| --- | --- |
+| Retain server/container nodes beneath host groups; keep group IDs separate from backend IDs. | `src/sessionmodel.*`, `src/window.*`; avoids merging execution contexts or changing session routing. Adds group-scoped search and aggregate counts/dots. Local/local-myCodex roots precede alphabetically ordered remote groups. |
+| Obtain host identity from the existing event-driven discovery helper, cache it in profile metadata, and use SSH aliases until it arrives. | `src/containers.py`, `src/window.*`; no extra host command, DNS lookup, recurring query, secret access or new dependency. Configured SSH connections remain distinct even if their hostnames match. |
+| Separate short tree labels from full profile labels and preserve manual names. | `src/types.*`, `src/window.cpp`; terminal titles and connection details keep their existing context; numeric suffixes distinguish otherwise identical automatic names within a group. |
+| Append Opened as the fifth tab, expand it by default, and bypass both saved-history and myCodex-WORKDIR filters in that view. | `src/sessionmodel.*`, `src/window.cpp`; every retained terminal stays reachable, while other views keep their visibility policy. Existing tab indices remain unchanged; no schema/settings migration. |
+| Keep a transient recent-use list in TerminalArea and freeze it while Ctrl is held. | `src/terminal.*`, `src/window.cpp`; reverse navigation, closed-client cleanup and retained exits are supported without polling, reconnecting or reordering history on status events. Application event filtering is confined to the owning main window. |
+| Package as 0.5.0 using existing dependencies, permissions and runtime. | CMake, AppStream, build script and docs; local test/build artifacts under `.build/ui-0.5.0/` plus reused SDK/native/runtime trees, and the bundle/checksum under `dist/`. No myCodex changes or container recreation required. |
+
+0.5.0 validation: all seven suites pass across the native/KDE environments.
+New tests cover group aggregation, reparenting/removal and exact backend routing
+with QAbstractItemModelTester; local/remote host labels and short child names;
+group versus server search scope; Opened visibility for retained errors outside
+history filters; and preservation of full terminal titles. The X11/real-PTY
+switcher test exercises a held-Ctrl forward/reverse sequence, MRU commit on
+release, retained exit output, closed-view cleanup, and normal text input to the
+actual terminal display. It verifies that switching keys are absent from the
+child process's input. All nine terminal QtTest cases pass.
+
+The host-group screenshot was visually reviewed. The staged application reports
+0.5.0 and passes its X11/Konsole smoke test using KDE Platform libraries. The
+bundle installs into the project-local `.build/flatpak` installation; installed
+application bytes match the staged binary, checksums match, and effective
+permissions are identical to 0.4.1. The container still blocks Flatpak namespaces,
+so the existing isolated SDK build/export route and temporary D-Bus installation
+check were reused. Cache-update triggers report that restriction, while bundle
+deployment succeeds. Full sandbox execution and real remote Docker/SSH session
+attachment remain host acceptance checks. AppStream retains the existing missing
+homepage warning; formatting, whitespace, shell, JSON and desktop-entry checks
+pass.
+
+Builds, fixture state, helper scripts, screenshots and logs remain under `.build/`
+(principally `ui-0.5.0`, plus `host-groups-*.log` and the reused SDK/native/runtime
+trees). Completed code, tests and documentation are committed locally under the
+standing instruction. No push, tag, external release, container modification or
+normal host Flatpak installation was performed.

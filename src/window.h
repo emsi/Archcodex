@@ -46,7 +46,12 @@ class Window : public QMainWindow {
     QSet<QString> searching;
     QStringList searchErrors;
     quint64 searchToken = 0;
-    QString scopeBackend, scopePath, pendingOpen;
+    QSet<QString> scopeBackends;
+    bool scopedSearch = false;
+    QString scopePath, pendingOpen;
+    QString localUser, localHost;
+    bool localIdentityDiscovered = false;
+    QHash<QString, QString> containerHostNames;
     bool pendingRestart = false;
     DiscoveryReport discoveryReport;
     QPointer<DiscoveryDialog> discoveryDialog;
@@ -87,6 +92,10 @@ class Window : public QMainWindow {
     QString topologySelected;
     QSet<QString> seenRoots;
     void refreshNames();
+    QString groupKey(const BackendProfile &profile) const;
+    QString groupLabel(const BackendProfile &profile) const;
+    void presentProfile(const BackendProfile &profile, const QString &label = {});
+    void terminalFocused(const QString &key);
     void clientStateChanged(const Session &session);
     void restartTerminal(const Session &session);
     void showSettings();

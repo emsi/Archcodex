@@ -16,6 +16,8 @@ class TerminalArea : public QWidget {
     bool restart(const BackendProfile &profile, const Session &session, QString *error);
     bool newSession(const BackendProfile &profile, const QString &path, QString *error);
     bool focusSession(const QString &key);
+    void switchRecent(bool backwards = false);
+    QString currentKey() const;
     void closeCurrent();
     void closeBackend(const QString &backend);
     bool smokeTest(QString *error);
@@ -24,6 +26,10 @@ class TerminalArea : public QWidget {
     void clientStateChanged(const Archcodex::Session &session);
     void clientExited(const QString &key, int exitCode, bool crashed);
     void restartRequested(const Archcodex::Session &session);
+    void sessionFocused(const QString &key);
+
+  protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
   private slots:
     void processExited(int exitCode, bool crashed);
@@ -37,12 +43,17 @@ class TerminalArea : public QWidget {
     QHash<QString, QString> titles;
     QHash<QString, QString> exits;
     QHash<QString, Session> clients;
+    QStringList recent, cycle;
+    int cycleIndex = 0;
+    void remember(const QString &key);
+    bool showSession(const QString &key);
+    void cycleSession(bool backwards);
+    void finishCycle();
     void forgetClient(const QString &key);
     KParts::ReadOnlyPart *create(QString *error);
     bool startSession(const BackendProfile &profile, const Session &session, QString *error);
     bool launch(const QString &key, const QStringList &arguments, const QString &title,
                 const Session &session, QString *error);
-    QString currentKey() const;
     void updateCurrent();
 };
 } // namespace Archcodex

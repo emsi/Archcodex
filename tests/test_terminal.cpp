@@ -2,6 +2,7 @@
 #include "terminal.h"
 #include <QAccessible>
 #include <QFile>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QPushButton>
 #include <QStackedWidget>
@@ -12,6 +13,86 @@ using namespace Archcodex;
 class TerminalTests : public QObject {
     Q_OBJECT
   private slots:
+    void controlTabCyclesFrozenRecentOrderAndNeverReachesTheTerminal() {
+        QTemporaryDir dir;
+        QFile script(dir.path() + "/client");
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nfor id; do :; done\nprintf 'READY\\n'\nIFS= read -r "
+                     "answer\nprintf '%s' \"$answer\" > '" +
+                     dir.path().toUtf8() + "/'\"$id\"\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        TerminalArea area;
+        area.resize(800, 500);
+        area.show();
+        area.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&area));
+        QSignalSpy exits(&area, &TerminalArea::clientExited);
+        QSignalSpy titles(&area, &TerminalArea::currentChanged);
+        BackendProfile p{
+            "b", "Full server · host · storage", "local-unix", "/unused", script.fileName(), false};
+        QString error;
+        for (const auto &id : {"a", "b", "c"}) {
+            auto s = Session::fromThread("b", {{"id", id}, {"name", id}, {"cwd", dir.path()}});
+            QVERIFY2(area.open(p, s, &error), qPrintable(error));
+        }
+        QVERIFY(titles.last()[0].toString().contains(p.name));
+        QTRY_VERIFY(QApplication::focusWidget() && area.isAncestorOf(QApplication::focusWidget()));
+        const auto tab = [&](bool backwards = false) {
+            const auto modifiers =
+                Qt::ControlModifier | (backwards ? Qt::ShiftModifier : Qt::NoModifier);
+            QKeyEvent shortcut(QEvent::ShortcutOverride, Qt::Key_Tab, modifiers);
+            auto *input = QApplication::focusWidget();
+            QVERIFY(input && area.isAncestorOf(input));
+            QApplication::sendEvent(input, &shortcut);
+            QVERIFY(shortcut.isAccepted());
+            QKeyEvent press(QEvent::KeyPress, backwards ? Qt::Key_Backtab : Qt::Key_Tab, modifiers);
+            QApplication::sendEvent(input, &press);
+        };
+        const auto release = [&] {
+            QKeyEvent event(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier);
+            QApplication::sendEvent(QApplication::focusWidget(), &event);
+        };
+        QCOMPARE(area.currentKey(), sessionKey("b", "c"));
+        tab();
+        QCOMPARE(area.currentKey(), sessionKey("b", "b"));
+        tab();
+        QCOMPARE(area.currentKey(), sessionKey("b", "a"));
+        tab(true);
+        QCOMPARE(area.currentKey(), sessionKey("b", "b"));
+        release();
+        tab();
+        QCOMPARE(area.currentKey(), sessionKey("b", "c"));
+        release();
+        tab(true);
+        QCOMPARE(area.currentKey(), sessionKey("b", "a"));
+        tab(true);
+        QCOMPARE(area.currentKey(), sessionKey("b", "b"));
+        release();
+        QTRY_VERIFY(QApplication::focusWidget() && area.isAncestorOf(QApplication::focusWidget()));
+        auto *input = QApplication::focusWidget();
+        auto *accessible = QAccessible::queryAccessibleInterface(input);
+        QVERIFY(accessible && accessible->textInterface());
+        auto *text = accessible->textInterface();
+        QTRY_VERIFY(text->text(0, text->characterCount()).contains("READY"));
+        QTest::keyClicks(input, "ordinary input");
+        QTest::keyClick(input, Qt::Key_Return);
+        QTRY_COMPARE(exits.size(), 1);
+        QFile received(dir.path() + "/b");
+        QVERIFY(received.open(QIODevice::ReadOnly));
+        QCOMPARE(received.readAll(), QByteArray("ordinary input"));
+        // Retained exit output participates, while closed views do not.
+        area.switchRecent();
+        QCOMPARE(area.currentKey(), sessionKey("b", "c"));
+        area.switchRecent();
+        QCOMPARE(area.currentKey(), sessionKey("b", "b"));
+        area.closeCurrent();
+        area.switchRecent();
+        QCOMPARE(area.currentKey(), sessionKey("b", "c"));
+        area.closeBackend("b");
+        area.switchRecent();
+        QVERIFY(area.currentKey().isEmpty());
+    }
     void containerHistoryAndChangedEnvironmentCannotLaunch() {
         TerminalArea area;
         BackendProfile p{"container", "Container"};

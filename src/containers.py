@@ -10,8 +10,10 @@ import contextlib
 import hashlib
 import json
 import os
+import pwd
 import re
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -179,6 +181,11 @@ class Inventory:
         self.pending = set()
         self.changed = asyncio.Event()
         self.semaphore = asyncio.Semaphore(8)
+        self.host = socket.gethostname()
+        try:
+            self.user = pwd.getpwuid(os.getuid()).pw_name
+        except KeyError:
+            self.user = str(os.getuid())
 
     def publish(self):
         self.changed.set()
@@ -187,7 +194,8 @@ class Inventory:
         while True:
             await self.changed.wait()
             self.changed.clear()
-            message = {"containers": list(self.records.values()), "issues": list(self.errors.values()),
+            message = {"host": self.host, "user": self.user,
+                       "containers": list(self.records.values()), "issues": list(self.errors.values()),
                        "complete": bool(self.engines) and self.ready == self.engines and not self.errors and not self.pending}
             encoded = json.dumps(message, ensure_ascii=True, separators=(",", ":"))
             if len(encoded) > LIMIT:

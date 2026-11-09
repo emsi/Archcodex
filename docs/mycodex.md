@@ -1,4 +1,4 @@
-# myCodex integration: 0.4.1
+# myCodex integration: 0.5.0
 
 Implemented on 2026-11-09 following the request to adopt direct container
 integration. Existing containers are the primary workflow. No new myCodex
@@ -111,6 +111,8 @@ not require refetching or polling. Other backend types are unaffected. An alread
 open terminal remains open even if changing this setting hides its explorer row.
 The independent unsaved-session filter still applies. This is a display filter,
 not execution authority; showing shared history does not authorize launching it.
+Opened is a separate inventory of GUI terminal views and bypasses both history
+visibility filters, including for retained exited clients.
 
 The initial policy deliberately uses one concrete piece of evidence: this
 specific server's loaded-thread inventory or live-session event. Archcodex

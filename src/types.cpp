@@ -255,4 +255,14 @@ QString serverDetails(const BackendProfile &p) {
     }
     return lines.join('\n');
 }
+QString serverTreeLabel(const BackendProfile &p) {
+    if (!p.discovered)
+        return p.name;
+    if (p.isContainer())
+        return p.identity["containerName"].toString("Container").left(150);
+    auto local = p;
+    local.identity.remove("user");
+    local.identity.remove("host");
+    return serverLabel(local);
+}
 } // namespace Archcodex

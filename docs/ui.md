@@ -11,13 +11,18 @@ Start with a familiar IDE arrangement: a narrow project navigator on the left
 and a large terminal workspace on the right. Use ordinary native widgets and a
 resizable divider. Keep the first version simple.
 
-The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, then **Waiting**. These tabs are views of the same
+The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, **Waiting**, then **Opened**. These tabs are views of the same
 project/session data. Each view uses a predicate over the same session model.
 
-Servers are the top-level rows. Each expands into folders and sessions, ordered
-by recent use. No project-creation prerequisite exists. Future SSH and myCodex
-adapters will supply the host/container context for their roots; those adapters
-are not implemented in this version.
+Top-level rows separate the local computer (`username @ hostname`), local myCodex
+(`myCodex @ hostname`) and each remote myCodex connection (`myCodex @ remote-host`).
+The local computer comes first, local myCodex second, and remote groups follow
+in name order. Server/container nodes within them keep backend routing explicit,
+with short labels such as `Main` or the container name. Each expands into compact
+folders and sessions ordered by recent use. No project creation is needed.
+Group labels use discovery-provided host identity; configured SSH aliases are
+the fallback until discovery reports the remote hostname. Terminal headers keep
+the full server/container/host labels. Manual connection names are preserved.
 
 The directory prefix common to visible sessions on a server is omitted and shown
 in that server's details. This is calculated after applying the current view and
@@ -30,16 +35,19 @@ with common root `/home/alice`:
 
 ```text
 Projects                             Terminal workspace
-[All] [Active] [Running] [Waiting]
+[All] [Active] [Running] [Waiting] [Opened]
 Search conversations…
 Scope: All servers
-v Main · alice@workstation
-  v git/team
-    v alpha
-        Refactor parser
-    > beta
-  > docs/notes
-> ~/.codex-work · alice@workstation
+v alice @ workstation
+  v Main
+    v git/team
+      v alpha
+          Refactor parser
+      > beta
+    > docs/notes
+  > ~/.codex-work
+> myCodex @ workstation
+> myCodex @ remote-host
 ```
 
 Names use configuration and user/host context, with a launch directory as a
@@ -54,7 +62,7 @@ customizable docking. These are not implied by the IDE resemblance.
 
 ## 2. Session views
 
-The four views share one model, one connection per backend and one set of pushed
+The five views share one model, one connection per backend and one set of pushed
 state updates. Filtering never opens/closes a terminal or resumes/cancels work.
 All is the initial view; search temporarily covers all states and restores the
 selected filter when cleared.
@@ -65,9 +73,10 @@ selected filter when cleared.
 | Active | Loaded sessions and open terminal views, including retained client errors and other runtime states. |
 | Running | Confirmed active turn with no waiting flags. |
 | Waiting | Confirmed idle prompt or active turn waiting for input/approval. |
+| Opened | Every open GUI terminal view, including retained exited/error output; visibility settings do not hide these views. |
 
 Active includes server runtime presence and terminal views that the user has
-opened. A retained exited/error client belongs to Active alone, even when the
+opened. A retained exited/error client belongs to Active and Opened, even when the
 server still advertises its thread as idle or running. A normal idle session is ready for a new prompt.
 An approval is explicitly labelled as such in its status details. All confirmed
 waiting states use green dots, including ordinary idle prompts, questions and
@@ -88,12 +97,12 @@ an unsubscribed idle thread for its unload grace period. This is the observable
 runtime boundary, rather than a guess based on terminal output or process lists.
 
 All and Active remember expanded groups; the first visit inherits the current
-expansion state. Running and Waiting expand every branch by default, including
+expansion state. Running, Waiting and Opened expand every branch by default, including
 new branches arriving through events. Explicitly collapsed branches are remembered
-separately for those two views during the current GUI run and are not reopened by
+separately for those views during the current GUI run and are not reopened by
 updates or tab changes. Matching sessions retain selection through recompression
 and search return. Switching views does not activate a terminal. The initial sidebar is wider to accommodate the
-four labels; existing saved window geometry remains respected.
+five labels; existing saved window geometry remains respected.
 
 Rows update only when their values change, with changed roles sent together.
 Status-only events do not change recency. Tooltips are escaped plain metadata
@@ -125,6 +134,9 @@ Older cached entries without persistence metadata remain until fresh evidence
 arrives. An open terminal overrides this visibility filter so errors remain
 reachable. Closing its view removes that exception. Terminal presence and exit
 messages are never persisted as live state across application restarts.
+Opened always exposes those terminal views, including ones excluded by myCodex's
+WORKDIR filter in the other tabs. It opens expanded by default. Closing a view
+removes its Opened entry without altering the underlying Codex conversation.
 
 Manual connection configuration remains available for custom endpoints and
 restricted discovery environments. It is not required for discoverable local
@@ -180,6 +192,12 @@ The previous terminal and output remain until validation and component creation
 succeed. A live client cannot be replaced through Restart client, and
 Close terminal releases the view. Opening other sessions does not discard it.
 The terminal's lifetime is separate from the server conversation's lifetime.
+Ctrl+Tab switches through recently used open terminals, and Ctrl+Shift+Tab
+reverses direction. Holding Ctrl freezes the list so repeated Tab presses cycle
+through it; releasing Ctrl makes the selected terminal most recent. Exited views
+remain in the list until closed. Ordinary keyboard input stays with the TUI,
+and these shortcuts are not intercepted inside separate dialogs. Switching
+focuses an existing terminal; it does not reconnect, resume or query a server.
 A new-session launcher has no conversation ID until Codex creates it. It is
 shown as **New session terminal** until explicitly closed; its independently
 discovered conversation can also appear. Automatic correlation is not guessed
@@ -198,7 +216,8 @@ Application contains the saved-session visibility setting, synchronized with the
 existing View menu shortcut. Backends contains myCodex's shared-history visibility
 option: WORKDIR and its subdirectories only by default, with an explicit option
 to show sessions outside it. This applies before tree compression and aggregation
-in every tab and search results. Hidden sessions are not discarded.
+in history/activity tabs and search results. Opened always lists open terminal
+views. Hidden sessions are not discarded.
 Apply saves without closing; OK saves and closes; Cancel discards unapplied edits.
 The settings use the existing application-specific `window.ini` file. Additional
 backend or terminal pages can be added when they contain actual settings; no empty
@@ -259,9 +278,9 @@ omitted; they are held in memory and copied only on the user's action.
 
 ## 7. First UI validation checklist
 
-- The left pane offers All, Active, Running and Waiting; all preserve project/session
+- The left pane offers All, Active, Running, Waiting and Opened; all preserve project/session
   hierarchy and distinguish same-named projects on different backends.
-- Existing sessions appear without project setup. Separate server roots preserve
+- Existing sessions appear without project setup. Separate servers within host groups preserve
   routing even for identical working directories and thread IDs.
 - MRU ordering and pagination keep large histories usable without moving the
   selected row unpredictably.

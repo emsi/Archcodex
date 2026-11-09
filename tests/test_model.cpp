@@ -7,6 +7,62 @@ using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
+    void hostGroupsAggregateReparentAndPreserveBackendRouting() {
+        SessionModel model;
+        QAbstractItemModelTester tester(&model,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        model.backendGroup("local", "host", "alice @ workstation");
+        model.backendGroup("a", "containers", "myCodex @ workstation");
+        model.backendGroup("b", "containers", "myCodex @ workstation");
+        model.backendName("local", "Main");
+        model.backendName("a", "project-a");
+        model.backendName("b", "project-b");
+        for (const auto &backend : {"local", "a", "b"})
+            model.upsert(Session::fromThread(
+                backend,
+                {{"id", "same-id"}, {"cwd", "/work"}, {"status", QJsonObject{{"type", "idle"}}}}));
+        QCOMPARE(model.rowCount(), 2);
+        QCOMPARE(model.item(0)->data(KindRole).toInt(), int(NodeKind::Group));
+        QCOMPARE(model.item(0)->text(), "alice @ workstation");
+        QCOMPARE(model.item(1)->text(), "myCodex @ workstation");
+        QCOMPARE(model.item(1)->data(CountRole).toInt(), 2);
+        QCOMPARE(model.item(1)->data(BackendsRole).toStringList(), (QStringList{"a", "b"}));
+        QCOMPARE(model.item(1)->child(0)->text(), "project-a");
+        QCOMPARE(model.item(1)->child(0)->child(0)->child(0)->data(BackendRole).toString(), "a");
+        model.backendGroup("b", "remote", "myCodex @ remote");
+        QCOMPARE(model.rowCount(), 3);
+        QCOMPARE(model.item(1)->data(CountRole).toInt(), 1);
+        QCOMPARE(model.item(2)->data(CountRole).toInt(), 1);
+        model.removeBackend("b");
+        QCOMPARE(model.rowCount(), 2);
+        model.removeBackend("a");
+        QCOMPARE(model.rowCount(), 1);
+        model.resetResults();
+        model.upsert(Session::fromThread("local", {{"id", "result"}, {"cwd", "/work"}}));
+        QCOMPARE(model.item(0)->data(KindRole).toInt(), int(NodeKind::Group));
+        QCOMPARE(model.item(0)->child(0)->data(BackendRole).toString(), "local");
+    }
+    void openedIncludesRetainedTerminalsRegardlessOfHistoryFilters() {
+        SessionModel model;
+        model.backendGroup("b", "host", "myCodex @ host");
+        model.setContainerWorkdir("b", "/work/one");
+        model.setView(SessionView::Opened);
+        auto s = Session::fromThread("b", {{"id", "t"},
+                                           {"cwd", "/work/other"},
+                                           {"ephemeral", true},
+                                           {"status", QJsonObject{{"type", "idle"}}}});
+        s.terminalOpen = true;
+        s.clientIssue = "Terminal client exited";
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        model.setView(SessionView::All);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
+        model.setView(SessionView::Opened);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        s.terminalOpen = false;
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
+    }
     void eightySessionsAndActiveFiltering() {
         SessionModel model;
         model.backendName("one", "Host one");

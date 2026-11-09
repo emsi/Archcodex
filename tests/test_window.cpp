@@ -26,9 +26,93 @@
 #include <QTreeView>
 #include <QtTest>
 
+namespace {
+QList<QModelIndex> serverNodes(QTreeView *tree) {
+    QList<QModelIndex> found;
+    const auto walk = [&](auto &&self, const QModelIndex &parent) -> void {
+        for (int i = 0; i < tree->model()->rowCount(parent); ++i) {
+            const auto index = tree->model()->index(i, 0, parent);
+            if (index.data(KindRole).toInt() == int(NodeKind::Server))
+                found << index;
+            else
+                self(self, index);
+        }
+    };
+    walk(walk, {});
+    return found;
+}
+QModelIndex serverNode(QTreeView *tree, int row = 0) {
+    return serverNodes(tree).value(row);
+}
+} // namespace
+
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void localHostAndContainerHostsHaveSeparateGroupsWithShortLabels() {
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            BackendProfile local{"host", "Local"};
+            local.discovered = true;
+            local.autoConnect = false;
+            local.identity = {{"user", "alice"}, {"host", "workstation"}, {"default", true}};
+            store.save(local);
+            for (const auto &id : {"local-container", "remote-container"}) {
+                BackendProfile p{id, "Container"};
+                p.kind = "mycodex";
+                p.discovered = true;
+                p.autoConnect = false;
+                p.containerId = QString(64, 'a');
+                p.containerEpoch = "epoch";
+                p.runtimeHome = "/home/alice";
+                p.runtimeUser = "alice";
+                p.dockerContext = "default";
+                p.discoveryHost = id;
+                p.socketPath = "/tmp/codex.sock";
+                p.sshHost = QString(id) == "remote-container" ? "ssh-alias" : "";
+                p.identity = {
+                    {"containerName", "project"},
+                    {"containerWorkdir", "/work"},
+                    {"dockerHost", p.sshHost.isEmpty() ? "workstation" : "remote-machine"},
+                    {"stateMode", "Shared"}};
+                p.name = serverLabel(p);
+                store.save(p);
+            }
+        }
+        Window window(data.path(), false);
+        window.show();
+        auto *tree = window.findChild<QTreeView *>();
+        QTRY_COMPARE(tree->model()->rowCount(), 3);
+        QCOMPARE(tree->model()->index(0, 0).data().toString(), "alice @ workstation");
+        QCOMPARE(tree->model()->index(1, 0).data().toString(), "myCodex @ workstation");
+        QSet<QString> labels;
+        for (int i = 0; i < tree->model()->rowCount(); ++i) {
+            const auto group = tree->model()->index(i, 0);
+            QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
+            labels.insert(group.data(Qt::DisplayRole).toString());
+            QCOMPARE(tree->model()->rowCount(group), 1);
+            const auto server = tree->model()->index(0, 0, group);
+            QCOMPARE(server.data(Qt::DisplayRole).toString(),
+                     server.data(BackendRole) == "host" ? QString("Main") : QString("project"));
+        }
+        QCOMPARE(labels, (QSet<QString>{"alice @ workstation", "myCodex @ workstation",
+                                        "myCodex @ remote-machine"}));
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty()) {
+            for (auto *backend : window.findChildren<Backend *>())
+                backend->sessionChanged(Session::fromThread(
+                    backend->profile.id, {{"id", "example"},
+                                          {"name", "Example session"},
+                                          {"cwd", "/work"},
+                                          {"path", "/saved/example"},
+                                          {"status", QJsonObject{{"type", "idle"}}}}));
+            tree->expandAll();
+            QApplication::processEvents();
+            QVERIFY(window.grab().save(screenshots + "/host-groups.png"));
+        }
+        window.close();
+    }
     void cleanup() {
         QVERIFY(Worker::finishPending());
     }
@@ -88,7 +172,7 @@ class WindowTests : public QObject {
         discovery->snapshot(
             {{"containers", containers}, {"issues", QJsonArray{}}, {"complete", true}});
         auto *tree = window.findChild<QTreeView *>();
-        QCOMPARE(tree->model()->rowCount(), 2);
+        QCOMPARE(serverNodes(tree).size(), 2);
         for (auto *b : window.findChildren<Backend *>()) {
             QVERIFY(!b->ready());
             auto s = Session::fromThread(
@@ -105,8 +189,8 @@ class WindowTests : public QObject {
         }
         auto *tabs = window.findChild<QTabBar *>();
         tabs->setCurrentIndex(1);
-        QCOMPARE(tree->model()->rowCount(), 1);
-        QCOMPARE(tree->model()->index(0, 0).data(BackendRole).toString(), ids[0]);
+        QCOMPARE(serverNodes(tree).size(), 1);
+        QCOMPARE(serverNode(tree).data(BackendRole).toString(), ids[0]);
         tabs->setCurrentIndex(0);
         auto empty = containers[0].toObject();
         empty["containerId"] = QString(64, 'c');
@@ -115,10 +199,10 @@ class WindowTests : public QObject {
         containers << empty;
         discovery->snapshot(
             {{"containers", containers}, {"issues", QJsonArray{}}, {"complete", true}});
-        QCOMPARE(tree->model()->rowCount(), 3);
+        QCOMPARE(serverNodes(tree).size(), 3);
         bool found = false;
-        for (int i = 0; i < tree->model()->rowCount(); ++i) {
-            const auto root = tree->model()->index(i, 0);
+        for (int i = 0; i < serverNodes(tree).size(); ++i) {
+            const auto root = serverNode(tree, i);
             if (root.data(Qt::DisplayRole).toString().contains("empty-container")) {
                 found = true;
                 QCOMPARE(root.data(CountRole).toInt(), 0);
@@ -162,9 +246,7 @@ class WindowTests : public QObject {
             }
         }
         const auto count = [](QTreeView *tree, const QString &backend) {
-            auto *model = tree->model();
-            for (int i = 0; i < model->rowCount(); ++i) {
-                const auto index = model->index(i, 0);
+            for (const auto &index : serverNodes(tree)) {
                 if (index.data(BackendRole) == backend)
                     return index.data(CountRole).toInt();
             }
@@ -358,29 +440,29 @@ class WindowTests : public QObject {
             {QJsonObject{{"path", fixture.path()}, {"hostEnvironment", true}}}, {});
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();
-        QCOMPARE(tabs->count(), 4);
-        QTRY_COMPARE(tree->model()->rowCount(), 1);
-        auto server = [&] { return tree->model()->index(0, 0); };
+        QCOMPARE(tabs->count(), 5);
+        QTRY_COMPARE(serverNodes(tree).size(), 1);
+        auto server = [&] { return serverNode(tree); };
         auto project = [&] { return tree->model()->index(0, 0, server()); };
         QTRY_VERIFY(project().isValid());
         QTRY_COMPARE(tree->model()->index(0, 0, project()).data(ThreadRole).toString(), "thread-1");
         tree->expand(project());
         tree->setCurrentIndex(tree->model()->index(0, 0, project()));
         tabs->setCurrentIndex(1);
-        QCOMPARE(tree->model()->rowCount(), 1);
+        QCOMPARE(serverNodes(tree).size(), 1);
         QVERIFY(tree->isExpanded(project()));
         QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "thread-1");
         tabs->setCurrentIndex(2);
-        QCOMPARE(tree->model()->rowCount(), 0);
+        QCOMPARE(serverNodes(tree).size(), 0);
         tabs->setCurrentIndex(3);
-        QCOMPARE(tree->model()->rowCount(), 1);
+        QCOMPARE(serverNodes(tree).size(), 1);
         fixture.notify(
             "thread/status/changed",
             {{"threadId", "thread-1"},
              {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
-        QTRY_COMPARE(tree->model()->rowCount(), 0);
+        QTRY_COMPARE(serverNodes(tree).size(), 0);
         tabs->setCurrentIndex(2);
-        QCOMPARE(tree->model()->rowCount(), 1);
+        QCOMPARE(serverNodes(tree).size(), 1);
         tabs->setCurrentIndex(1);
         // Tooltips keep a stable snapshot while events arrive under the pointer.
         const auto pos = tree->visualRect(project()).center();
@@ -396,9 +478,9 @@ class WindowTests : public QObject {
         QCOMPARE(QToolTip::text(), tip);
         QToolTip::hideText();
         fixture.notify("thread/closed", {{"threadId", "thread-1"}});
-        QTRY_COMPARE(tree->model()->rowCount(), 0);
+        QTRY_COMPARE(serverNodes(tree).size(), 0);
         tabs->setCurrentIndex(0);
-        QCOMPARE(tree->model()->rowCount(), 1);
+        QCOMPARE(serverNodes(tree).size(), 1);
         window.close();
     }
     void activityViewsExpandWithoutOverridingManualCollapse() {
@@ -429,7 +511,7 @@ class WindowTests : public QObject {
         put("old-documents", "/home/emsi/Documents", "notLoaded");
         auto waiting = put("waiting", "/home/emsi/Documents/Chats", "idle");
         put("running", "/srv/work/build", "active");
-        auto root = [&] { return tree->model()->index(0, 0); };
+        auto root = [&] { return serverNode(tree); };
         auto folder = [&] { return tree->model()->index(0, 0, root()); };
         for (const auto tab : {2, 3}) {
             tabs->setCurrentIndex(tab);
@@ -498,27 +580,30 @@ class WindowTests : public QObject {
             auto *setting = window.findChild<QAction *>("hideUnsavedSessions");
             QVERIFY(setting && setting->isChecked());
             QTRY_VERIFY(fixture.methods.contains("thread/read"));
-            QTRY_COMPARE(tree->model()->rowCount(), 1);
-            QCOMPARE(tree->model()->index(0, 0).data(CountRole).toInt(), 0);
+            QTRY_COMPARE(serverNodes(tree).size(), 1);
+            QCOMPARE(serverNode(tree).data(CountRole).toInt(), 0);
             setting->setChecked(false);
-            QTRY_COMPARE(tree->model()->index(0, 0).data(CountRole).toInt(), 1);
-            auto session = Session::fromThread(
-                tree->model()->index(0, 0).data(BackendRole).toString(), fixture.thread());
+            QTRY_COMPARE(serverNode(tree).data(CountRole).toInt(), 1);
+            auto session = Session::fromThread(serverNode(tree).data(BackendRole).toString(),
+                                               fixture.thread());
             session.terminalOpen = true;
             session.clientIssue = "Terminal client exited with code 1";
             window.findChild<TerminalArea *>()->clientStateChanged(session);
             setting->setChecked(true);
             tabs->setCurrentIndex(1);
-            QCOMPARE(tree->model()->rowCount(), 1);
+            QCOMPARE(serverNodes(tree).size(), 1);
             tabs->setCurrentIndex(2);
-            QCOMPARE(tree->model()->rowCount(), 0);
+            QCOMPARE(serverNodes(tree).size(), 0);
             tabs->setCurrentIndex(3);
-            QCOMPARE(tree->model()->rowCount(), 0);
+            QCOMPARE(serverNodes(tree).size(), 0);
+            tabs->setCurrentIndex(int(SessionView::Opened));
+            QCOMPARE(serverNodes(tree).size(), 1);
             session.terminalOpen = false;
             session.clientIssue.clear();
             window.findChild<TerminalArea *>()->clientStateChanged(session);
+            QCOMPARE(serverNodes(tree).size(), 0);
             tabs->setCurrentIndex(1);
-            QCOMPARE(tree->model()->rowCount(), 0);
+            QCOMPARE(serverNodes(tree).size(), 0);
             setting->setChecked(false);
             window.close();
         }
@@ -536,7 +621,7 @@ class WindowTests : public QObject {
         auto *tree = window.findChild<QTreeView *>();
         QTRY_COMPARE(first.readIds.size(), 1);
         QTRY_COMPARE(second.readIds.size(), 1);
-        QTRY_COMPARE(tree->model()->rowCount(), 2);
+        QTRY_COMPARE(serverNodes(tree).size(), 2);
         Store store(data.path() + "/metadata.sqlite");
         QString firstId;
         for (const auto &p : store.backends())
@@ -544,9 +629,9 @@ class WindowTests : public QObject {
                 firstId = p.id;
         QVERIFY(!firstId.isEmpty());
         QModelIndex server;
-        for (int i = 0; i < tree->model()->rowCount(); ++i)
-            if (tree->model()->index(i, 0).data(BackendRole) == firstId)
-                server = tree->model()->index(i, 0);
+        for (int i = 0; i < serverNodes(tree).size(); ++i)
+            if (serverNode(tree, i).data(BackendRole) == firstId)
+                server = serverNode(tree, i);
         QVERIFY(server.isValid());
         auto session = tree->model()->index(0, 0, tree->model()->index(0, 0, server));
         QCOMPARE(session.data(ThreadRole).toString(), "thread-1");
@@ -599,10 +684,10 @@ class WindowTests : public QObject {
         };
         const QJsonArray endpoints{endpoint(first), endpoint(second)};
         discovery->snapshot(endpoints, {});
-        QTRY_COMPARE_WITH_TIMEOUT(tree->model()->rowCount(), 2, 5000);
-        auto project = [&] { return tree->model()->index(0, 0); };
-        QTRY_COMPARE_WITH_TIMEOUT(tree->model()->index(0, 0).data(CountRole).toInt() +
-                                      tree->model()->index(1, 0).data(CountRole).toInt(),
+        QTRY_COMPARE_WITH_TIMEOUT(serverNodes(tree).size(), 2, 5000);
+        auto project = [&] { return serverNode(tree); };
+        QTRY_COMPARE_WITH_TIMEOUT(serverNode(tree).data(CountRole).toInt() +
+                                      serverNode(tree, 1).data(CountRole).toInt(),
                                   3, 5000);
         QVERIFY(first.methods.contains("thread/loaded/list"));
         QVERIFY(first.methods.contains("thread/read"));
@@ -613,7 +698,7 @@ class WindowTests : public QObject {
         discovery->snapshot(endpoints, {});
         QTest::qWait(100);
         QCOMPARE(first.methods.size(), requests);
-        QCOMPARE(tree->model()->rowCount(), 2);
+        QCOMPARE(serverNodes(tree).size(), 2);
         // A selected server searches only that server, even on a shared host.
         tree->setCurrentIndex(project());
         window.findChild<QComboBox *>()->setCurrentIndex(1);
@@ -624,8 +709,17 @@ class WindowTests : public QObject {
                      2);
         QVERIFY(first.methods.count("thread/search") == 0 ||
                 second.methods.count("thread/search") == 0);
-        QTRY_COMPARE(tree->model()->rowCount(), 1);
-        QTRY_COMPARE(tree->model()->index(0, 0).data(CountRole).toInt(), 2);
+        QTRY_COMPARE(serverNodes(tree).size(), 1);
+        QTRY_COMPARE(serverNode(tree).data(CountRole).toInt(), 2);
+        // The parent group searches every server it contains, without losing
+        // the backend identities retained on its children.
+        query->clear();
+        tree->setCurrentIndex(tree->model()->index(0, 0));
+        query->setText("group search");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(first.methods.count("thread/search") + second.methods.count("thread/search"),
+                     6);
+        QTRY_COMPARE(serverNodes(tree).size(), 2);
         window.close();
     }
 };

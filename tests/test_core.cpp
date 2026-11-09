@@ -81,16 +81,24 @@ class CoreTests : public QObject {
                       {"codexHome", "/home/alice/.codex"},
                       {"cwd", "/home/alice/git/project"}};
         QCOMPARE(serverLabel(p), "Custom name");
+        QCOMPARE(serverTreeLabel(p), "Custom name");
         p.discovered = true;
         QCOMPARE(serverLabel(p), "Codex · project · alice@workstation");
         p.identity["default"] = true;
         QCOMPARE(serverLabel(p), "Main · alice@workstation");
+        QCOMPARE(serverTreeLabel(p), "Main");
         p.identity["default"] = false;
         p.identity["codexHome"] = "/home/alice/.codex-work";
         QCOMPARE(serverLabel(p), "~/.codex-work · alice@workstation");
+        QCOMPARE(serverTreeLabel(p), "~/.codex-work");
         QVERIFY(!serverLabel(p).contains("12345"));
         QVERIFY(serverDetails(p).contains("12345"));
         QCOMPARE(BackendProfile::fromJson(p.json()).identity, p.identity);
+        p.kind = "mycodex";
+        p.identity["containerName"] = "example-project";
+        p.identity["stateMode"] = "Shared";
+        QCOMPARE(serverTreeLabel(p), "example-project");
+        QCOMPARE(serverLabel(p), "myCodex · example-project · This computer · Shared");
     }
     void inventoryValidationAndOpenPreflight() {
         Fixture f;

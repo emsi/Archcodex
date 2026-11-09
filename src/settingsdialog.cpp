@@ -60,7 +60,8 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, QWidget *parent) : QDial
     backends->addWidget(showAllMyCodexSessions);
     help(backends,
          "By default, each local or remote myCodex server lists sessions in its container's "
-         "WORKDIR and subdirectories. This applies to every tab and search results. "
+         "WORKDIR and subdirectories. This applies to history/activity tabs and search results. "
+         "Opened always lists all open terminal views. "
          "Other shared-history sessions stay hidden until you enable this option.\n\n"
          "Shared-history sessions can be opened only where Archcodex has already observed them "
          "running. "

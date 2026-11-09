@@ -5,7 +5,9 @@
 #include <KPluginMetaData>
 #include <KXMLGUIClient>
 #include <QAction>
+#include <QApplication>
 #include <QDir>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMetaObject>
 #include <QPushButton>
@@ -16,6 +18,7 @@
 
 namespace Archcodex {
 TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStackedWidget(this)) {
+    qApp->installEventFilter(this);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     exitBar = new QWidget(this);
@@ -50,6 +53,7 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     });
 }
 TerminalArea::~TerminalArea() {
+    qApp->removeEventFilter(this);
     stack->disconnect(this);
     for (auto *p : findChildren<KParts::ReadOnlyPart *>())
         p->disconnect(this);
@@ -168,20 +172,94 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh", arguments);
     stack->setCurrentWidget(part->widget());
     delete old;
+    finishCycle();
+    remember(key);
     part->widget()->setFocus();
     updateCurrent();
+    emit sessionFocused(key);
     return true;
 }
 bool TerminalArea::focusSession(const QString &key) {
+    if (!parts.value(key))
+        return false;
+    finishCycle();
+    remember(key);
+    return showSession(key);
+}
+bool TerminalArea::showSession(const QString &key) {
     auto *part = parts.value(key).data();
     if (!part)
         return false;
     stack->setCurrentWidget(part->widget());
     part->widget()->setFocus();
     updateCurrent();
+    emit sessionFocused(key);
     return true;
 }
+void TerminalArea::remember(const QString &key) {
+    if (key.isEmpty() || !parts.value(key))
+        return;
+    recent.removeAll(key);
+    recent.prepend(key);
+}
+void TerminalArea::finishCycle() {
+    if (cycle.isEmpty())
+        return;
+    cycle.clear();
+    remember(currentKey());
+}
+void TerminalArea::cycleSession(bool backwards) {
+    if (cycle.isEmpty()) {
+        for (const auto &key : recent)
+            if (parts.value(key))
+                cycle.append(key);
+        cycleIndex = cycle.indexOf(currentKey());
+        if (cycleIndex < 0 && backwards)
+            cycleIndex = 0;
+    }
+    if (cycle.isEmpty())
+        return;
+    cycleIndex = (cycleIndex + (backwards ? -1 : 1) + cycle.size()) % cycle.size();
+    showSession(cycle[cycleIndex]);
+}
+void TerminalArea::switchRecent(bool backwards) {
+    cycleSession(backwards);
+    finishCycle();
+}
+bool TerminalArea::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() == QEvent::ApplicationDeactivate) {
+        finishCycle();
+        return false;
+    }
+    auto *widget = qobject_cast<QWidget *>(watched);
+    if (!widget || widget->window() != window())
+        return false;
+    if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::MouseButtonPress)
+        finishCycle();
+    if (event->type() == QEvent::KeyRelease) {
+        const auto *key = static_cast<QKeyEvent *>(event);
+        if (key->key() == Qt::Key_Control && !key->isAutoRepeat())
+            finishCycle();
+    }
+    if (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress)
+        return false;
+    auto *key = static_cast<QKeyEvent *>(event);
+    const auto modifiers = key->modifiers();
+    if ((modifiers & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) ==
+            Qt::ControlModifier &&
+        (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab)) {
+        if (event->type() == QEvent::KeyPress)
+            cycleSession(modifiers.testFlag(Qt::ShiftModifier) || key->key() == Qt::Key_Backtab);
+        key->accept();
+        return true;
+    }
+    if (event->type() == QEvent::KeyPress && !modifiers.testFlag(Qt::ControlModifier))
+        finishCycle();
+    return false;
+}
 void TerminalArea::forgetClient(const QString &key) {
+    finishCycle();
+    recent.removeAll(key);
     auto s = clients.take(key);
     if (s.id.isEmpty())
         return;

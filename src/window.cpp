@@ -34,6 +34,7 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QStyle>
+#include <QSysInfo>
 #include <QTabBar>
 #include <QToolButton>
 #include <QToolTip>
@@ -99,15 +100,19 @@ void restoreTree(QTreeView *tree, const QStringList &keys, const QString &select
     });
 }
 bool expandsByDefault(int index) {
-    return index == int(SessionView::Running) || index == int(SessionView::Waiting);
+    return index == int(SessionView::Running) || index == int(SessionView::Waiting) ||
+           index == int(SessionView::Opened);
 }
 const QStringList viewDescriptions{
     "All sessions, including saved history. Hollow dots mean unknown state.",
     "Live sessions, including idle prompts and errors. Hollow dots mean last-known active.",
     "Sessions currently executing a turn.",
-    "Live sessions ready for a prompt, an answer or an approval."};
+    "Live sessions ready for a prompt, an answer or an approval.",
+    "Open terminal views, including retained output from exited clients."};
 } // namespace
 Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(directory) {
+    localUser = qEnvironmentVariable("USER", "Local user");
+    localHost = QSysInfo::machineHostName();
     if (!QDir(directory).exists()) {
         if (!QDir().mkpath(directory))
             throw std::runtime_error("Cannot create the application data directory.");
@@ -147,6 +152,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tabs->addTab("Active");
     tabs->addTab("Running");
     tabs->addTab("Waiting");
+    tabs->addTab("Opened");
     for (int i = 0; i < tabs->count(); ++i)
         tabs->setTabToolTip(i, viewDescriptions[i]);
     tabs->setExpanding(false);
@@ -157,7 +163,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     searchBox->setClearButtonEnabled(true);
     left->addWidget(searchBox);
     scope = new QComboBox;
-    scope->addItems({"All servers", "Selected server or folder"});
+    scope->addItems({"All servers", "Selected group, server or folder"});
     scope->setAccessibleName("Search scope");
     left->addWidget(scope);
     connect(searchBox, &QLineEdit::returnPressed, this, &Window::search);
@@ -213,14 +219,16 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 return;
             const QSignalBlocker block(tree);
             restoreTree(tree, topologyExpanded, topologySelected);
-            for (int i = 0; i < filter->rowCount(); ++i) {
-                const auto root = filter->index(i, 0);
+            walkTree(filter, {}, [&](const QModelIndex &root) {
+                const auto kind = static_cast<NodeKind>(root.data(KindRole).toInt());
+                if (kind != NodeKind::Group && kind != NodeKind::Server)
+                    return;
                 const auto key = root.data(KeyRole).toString();
                 if (!seenRoots.contains(key)) {
                     tree->expand(root);
                     seenRoots.insert(key);
                 }
-            }
+            });
             expandActivityViews();
         });
     }
@@ -254,6 +262,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(terminal, &TerminalArea::currentChanged, terminalTitle, &QLabel::setText);
     connect(terminal, &TerminalArea::clientStateChanged, this, &Window::clientStateChanged);
     connect(terminal, &TerminalArea::restartRequested, this, &Window::restartTerminal);
+    connect(terminal, &TerminalArea::sessionFocused, this, &Window::terminalFocused);
     connections = new QLabel;
     connections->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(connections, 1);
@@ -275,7 +284,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         const auto index = tree->currentIndex();
         auto id = index.data(BackendRole).toString();
         if (!index.isValid() || !profiles.contains(id) ||
-            index.data(KindRole).toInt() == int(NodeKind::Server)) {
+            (index.data(KindRole).toInt() != int(NodeKind::Folder) &&
+             index.data(KindRole).toInt() != int(NodeKind::Session))) {
             error("Select a project first.");
             return;
         }
@@ -287,6 +297,10 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         if (!terminal->newSession(profiles[id], index.data(PathRole).toString(), &issue))
             error(issue);
     });
+    projectsMenu->addAction("Next recent terminal", QKeySequence("Ctrl+Tab"), terminal,
+                            [this] { terminal->switchRecent(false); });
+    projectsMenu->addAction("Previous recent terminal", QKeySequence("Ctrl+Shift+Tab"), terminal,
+                            [this] { terminal->switchRecent(true); });
     projectsMenu->addAction("Close terminal", terminal, &TerminalArea::closeCurrent);
     projectsMenu->addSeparator();
     projectsMenu->addAction("Quit", this, &QWidget::close);
@@ -442,6 +456,7 @@ void Window::error(const QString &text) {
     box.exec();
 }
 void Window::attach(const BackendProfile &p, bool start) {
+    presentProfile(p);
     auto *b =
         new AsyncBackend(p, QCoreApplication::applicationDirPath() + "/archcodex-bridge", this);
     backends[p.id] = b;
@@ -527,8 +542,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                     return;
                 QList<Session> updates;
                 for (auto s : matches) {
-                    if (!scopeBackend.isEmpty() &&
-                        (s.backendId != scopeBackend ||
+                    if (scopedSearch &&
+                        (!scopeBackends.contains(s.backendId) ||
                          (!scopePath.isEmpty() && s.cwd != scopePath &&
                           !s.cwd.startsWith(scopePath == "/" ? "/" : scopePath + "/"))))
                         continue;
@@ -580,8 +595,6 @@ void Window::attach(const BackendProfile &p, bool start) {
                       "it will then become available here through server events.");
                 return;
             }
-            s.opened = QDateTime::currentSecsSinceEpoch();
-            sessions[key] = s;
             QString launchError;
             const bool opened = restart ? terminal->restart(profiles[id], s, &launchError)
                                         : terminal->open(profiles[id], s, &launchError);
@@ -589,7 +602,6 @@ void Window::attach(const BackendProfile &p, bool start) {
                 error(launchError);
                 return;
             }
-            persist([&] { store->save(s); });
         });
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
@@ -788,6 +800,17 @@ void Window::containerHostsDialog() {
 void Window::applyContainers(const QString &hostId, const QJsonObject &inventory) {
     if (!containerHosts.contains(hostId) || disabledContainerHosts.contains(hostId))
         return;
+    const auto host = inventory["host"].toString();
+    if (!host.isEmpty() && validText(host, 255)) {
+        containerHostNames[hostId] = host;
+        if (containerHosts[hostId].isEmpty()) {
+            localHost = host;
+            localIdentityDiscovered = true;
+            const auto user = inventory["user"].toString();
+            if (!user.isEmpty() && validText(user, 128))
+                localUser = user;
+        }
+    }
     QSet<QString> present, empty;
     QStringList issues;
     for (const auto &issue : inventory["issues"].toArray())
@@ -843,6 +866,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                           {"stateVolume", c["stateVolume"]},
                           {"codexHome", c["codexHome"]},
                           {"containerWorkdir", c["cwd"]},
+                          {"dockerHost", host},
                           {"pid", ep["pid"]},
                           {"cwd", ep["cwd"]}};
             p.name = serverLabel(p);
@@ -891,10 +915,13 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
         }
         if (!hasServer) {
             empty.insert(rootId);
-            model->backendName(
-                rootId,
-                "myCodex · " + c["containerName"].toString() + " · " +
-                    (containerHosts[hostId].isEmpty() ? "This computer" : containerHosts[hostId]));
+            BackendProfile container;
+            container.kind = "mycodex";
+            container.sshHost = containerHosts[hostId];
+            container.discoveryHost = hostId;
+            model->backendGroup(rootId, groupKey(container), groupLabel(container),
+                                container.sshHost.isEmpty() ? 1 : 2);
+            model->backendName(rootId, c["containerName"].toString());
             model->backendDetails(
                 rootId, c["paused"].toBool() ? "Container paused"
                                              : "Running container — no accessible Codex server.\n" +
@@ -927,13 +954,29 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
     updateContainerSummary();
 }
 void Window::refreshNames() {
+    for (const auto &p : profiles) {
+        if (!p.isContainer() && !localIdentityDiscovered) {
+            if (!p.identity["user"].toString().isEmpty())
+                localUser = p.identity["user"].toString();
+            if (!p.identity["host"].toString().isEmpty())
+                localHost = p.identity["host"].toString();
+        } else if (p.isContainer() && !p.identity["dockerHost"].toString().isEmpty()) {
+            if (!containerHostNames.contains(p.discoveryHost))
+                containerHostNames[p.discoveryHost] = p.identity["dockerHost"].toString();
+            if (p.sshHost.isEmpty() && !localIdentityDiscovered)
+                localHost = p.identity["dockerHost"].toString();
+        }
+    }
     // Distinguish otherwise identical automatic labels with stable profile order,
     // never with a process ID. Manual names remain user-controlled.
     QStringList ids = profiles.keys();
     ids.sort();
     QHash<QString, int> totals, used;
-    for (const auto &id : ids)
+    QHash<QString, int> treeTotals, treeUsed;
+    for (const auto &id : ids) {
         ++totals[serverLabel(profiles[id])];
+        ++treeTotals[groupKey(profiles[id]) + QChar(0x1f) + serverTreeLabel(profiles[id])];
+    }
     for (const auto &id : ids) {
         auto &p = profiles[id];
         auto name = serverLabel(p);
@@ -942,14 +985,61 @@ void Window::refreshNames() {
             name += QString(" (%1)").arg(ordinal);
         const bool changed = p.name != name;
         p.name = name;
-        for (auto *source : {model, results}) {
-            source->backendName(id, name);
-            source->backendDetails(id, serverDetails(p));
-        }
+        auto treeName = serverTreeLabel(p);
+        const auto treeKey = groupKey(p) + QChar(0x1f) + treeName;
+        const int treeOrdinal = ++treeUsed[treeKey];
+        if (p.discovered && treeTotals[treeKey] > 1)
+            treeName += QString(" (%1)").arg(treeOrdinal);
+        presentProfile(p, treeName);
         if (changed)
             persist([&] { store->save(p); });
     }
     updateSummary();
+}
+QString Window::groupKey(const BackendProfile &p) const {
+    return !p.isContainer() ? QString("local-host")
+           : p.sshHost.isEmpty()
+               ? QString("mycodex-local")
+               : "mycodex-ssh:" + (p.discoveryHost.isEmpty() ? p.sshHost : p.discoveryHost);
+}
+QString Window::groupLabel(const BackendProfile &p) const {
+    if (!p.isContainer())
+        return localUser + " @ " + localHost;
+    return "myCodex @ " +
+           (p.sshHost.isEmpty() ? localHost : containerHostNames.value(p.discoveryHost, p.sshHost));
+}
+void Window::presentProfile(const BackendProfile &p, const QString &label) {
+    for (auto *source : {model, results}) {
+        source->backendGroup(p.id, groupKey(p), groupLabel(p),
+                             !p.isContainer()      ? 0
+                             : p.sshHost.isEmpty() ? 1
+                                                   : 2);
+        source->backendName(p.id, label.isEmpty() ? serverTreeLabel(p) : label);
+        source->backendDetails(p.id, serverDetails(p));
+    }
+}
+void Window::terminalFocused(const QString &key) {
+    pendingOpen.clear();
+    pendingRestart = false;
+    auto it = sessions.find(key);
+    if (it == sessions.end())
+        return;
+    it->opened = QDateTime::currentSecsSinceEpoch();
+    model->upsert(*it);
+    if (searchSessions.contains(key)) {
+        searchSessions[key] = *it;
+        results->upsert(*it);
+    }
+    walkTree(filter, {}, [&](const QModelIndex &index) {
+        if (index.data(KeyRole) == key) {
+            tree->setCurrentIndex(index);
+            for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
+                tree->expand(parent);
+            tree->scrollTo(index);
+        }
+    });
+    if (!it->id.startsWith("new-"))
+        persist([&] { store->save(*it); });
 }
 void Window::clientStateChanged(const Session &client) {
     const auto key = sessionKey(client.backendId, client.id);
@@ -1271,6 +1361,12 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
         for (const auto &field : {"user", "host", "ownerHome", "cwd", "pid", "default"})
             if (item.contains(field))
                 p.identity[field] = item[field];
+        if (!item["host"].toString().isEmpty()) {
+            localHost = item["host"].toString();
+            if (!item["user"].toString().isEmpty())
+                localUser = item["user"].toString();
+            localIdentityDiscovered = true;
+        }
         const auto executable = item["executable"].toString("codex");
         if (p.discovered && p.executable != executable) {
             auto updated = p;
@@ -1332,15 +1428,6 @@ void Window::activate(const QModelIndex &index) {
     pendingOpen.clear();
     pendingRestart = false;
     if (terminal->focusSession(key)) {
-        auto &s = sessions[key];
-        s.opened = QDateTime::currentSecsSinceEpoch();
-        model->upsert(s);
-        if (searchSessions.contains(key)) {
-            searchSessions[key] = s;
-            results->upsert(s);
-        }
-        if (!s.id.startsWith("new-"))
-            persist([&] { store->save(s); });
         return;
     }
     if (!profiles.contains(backend))
@@ -1362,16 +1449,19 @@ void Window::search() {
         error("Search text is too long.");
         return;
     }
-    scopeBackend.clear();
+    scopeBackends.clear();
+    scopedSearch = scope->currentIndex() == 1;
     scopePath.clear();
-    if (scope->currentIndex() == 1) {
+    if (scopedSearch) {
         const auto index = tree->currentIndex();
         if (!index.isValid()) {
-            error("Select a server, folder or session first.");
+            error("Select a host group, server, folder or session first.");
             return;
         }
-        scopeBackend = index.data(BackendRole).toString();
-        if (index.data(KindRole).toInt() != int(NodeKind::Server))
+        const auto backends = index.data(BackendsRole).toStringList();
+        scopeBackends = QSet<QString>(backends.cbegin(), backends.cend());
+        if (index.data(KindRole).toInt() == int(NodeKind::Folder) ||
+            index.data(KindRole).toInt() == int(NodeKind::Session))
             scopePath = index.data(PathRole).toString();
     }
     if (!searchingView) {
@@ -1389,7 +1479,7 @@ void Window::search() {
     tabs->setEnabled(false);
     loadMore->setEnabled(false);
     for (auto it = backends.begin(); it != backends.end(); ++it)
-        if (scopeBackend.isEmpty() || scopeBackend == it.key())
+        if (!scopedSearch || scopeBackends.contains(it.key()))
             searching.insert(it.key());
     const auto ids = searching.values();
     for (const auto &id : ids)

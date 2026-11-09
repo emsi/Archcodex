@@ -39,7 +39,7 @@ static QString normalized(const QString &path) {
     return QDir::isAbsolutePath(path) ? QDir::cleanPath(path) : QString();
 }
 SessionModel::SessionModel(QObject *parent) : QStandardItemModel(parent) {
-    setHorizontalHeaderLabels({"Servers, folders and sessions"});
+    setHorizontalHeaderLabels({"Hosts, servers, folders and sessions"});
 }
 void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
     for (auto it = values.begin(); it != values.end();)
@@ -51,6 +51,10 @@ void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
         setItemData(item->index(), values);
 }
 bool SessionModel::visible(const Session &s) const {
+    // Opened is an inventory of GUI terminal views, even if another visibility
+    // setting excludes their history or the client has exited.
+    if (view == SessionView::Opened)
+        return s.terminalOpen;
     if (myCodexWorkdirOnly && containerWorkdirs.contains(s.backendId)) {
         const auto workdir = containerWorkdirs.value(s.backendId);
         const auto path = normalized(s.cwd);
@@ -68,6 +72,8 @@ bool SessionModel::visible(const Session &s) const {
         return s.isWaiting();
     case SessionView::All:
         return true;
+    case SessionView::Opened:
+        return s.terminalOpen;
     }
     return false;
 }
@@ -110,6 +116,54 @@ void SessionModel::backendName(const QString &id, const QString &name) {
     } else
         rebuild(id);
 }
+void SessionModel::backendGroup(const QString &backend, const QString &group, const QString &label,
+                                int order) {
+    const bool moved = backendGroups.value(backend) != group;
+    backendGroups[backend] = group;
+    groupLabels[group] = label;
+    groupOrders[group] = order;
+    if (moved && roots.contains(backend)) {
+        emit topologyAboutToChange();
+        placeRoot(backend);
+        pruneGroups();
+        emit topologyChanged();
+    }
+    if (auto *item = groups.value(group)) {
+        updateItem(item, {{Qt::DisplayRole, label}, {GroupOrderRole, order}});
+        aggregate(item);
+    }
+}
+void SessionModel::placeRoot(const QString &backend) {
+    auto *root = roots.value(backend);
+    const auto key = backendGroups.value(backend);
+    if (!root || key.isEmpty())
+        return;
+    auto *group = groups.value(key);
+    if (!group) {
+        group = new QStandardItem(groupLabels.value(key));
+        group->setEditable(false);
+        group->setData("group:" + key, KeyRole);
+        group->setData(int(NodeKind::Group), KindRole);
+        group->setData(groupOrders.value(key), GroupOrderRole);
+        appendRow(group);
+        groups[key] = group;
+    }
+    if (root->parent() != group) {
+        auto *previous = root->parent();
+        auto row = previous ? previous->takeRow(root->row()) : takeRow(root->row());
+        group->appendRow(row);
+        if (previous)
+            aggregate(previous);
+    }
+    aggregate(group);
+}
+void SessionModel::pruneGroups() {
+    for (const auto &key : groups.keys())
+        if (!groups[key]->rowCount()) {
+            auto *item = groups.take(key);
+            removeRow(item->row());
+        }
+}
 void SessionModel::backendDetails(const QString &id, const QString &value) {
     details[id] = value;
     if (auto *root = roots.value(id))
@@ -142,6 +196,7 @@ void SessionModel::updateSession(QStandardItem *item, const Session &s) {
         {KeyRole, sessionKey(s.backendId, s.id)},
         {KindRole, int(NodeKind::Session)},
         {BackendRole, s.backendId},
+        {BackendsRole, QStringList{s.backendId}},
         {EnvironmentRole, environment(s.backendId)},
         {PathRole, s.cwd},
         {ThreadRole, s.id},
@@ -164,6 +219,7 @@ void SessionModel::updateSession(QStandardItem *item, const Session &s) {
 void SessionModel::aggregate(QStandardItem *p) {
     int count = 0, active = 0, running = 0, waiting = 0, unknown = 0, attention = 0;
     qint64 recency = 0;
+    QStringList backends;
     for (int i = 0; i < p->rowCount(); ++i) {
         const auto *s = p->child(i);
         count += s->data(CountRole).toInt();
@@ -173,11 +229,18 @@ void SessionModel::aggregate(QStandardItem *p) {
         unknown += s->data(UnknownCountRole).toInt();
         attention = std::max(attention, s->data(AttentionRole).toInt());
         recency = std::max(recency, s->data(RecencyRole).toLongLong());
+        backends.append(s->data(BackendsRole).toStringList());
     }
     const auto backend = p->data(BackendRole).toString();
     const auto path = p->data(PathRole).toString();
+    const auto kind = static_cast<NodeKind>(p->data(KindRole).toInt());
+    if (kind == NodeKind::Server)
+        backends = {backend}; // Include an empty server in group-scoped searches.
+    backends.removeDuplicates();
+    backends.sort();
     const auto prefix =
-        p->data(KindRole).toInt() == int(NodeKind::Server)
+        kind == NodeKind::Group ? p->text()
+        : kind == NodeKind::Server
             ? details.value(backend, backendNames.value(backend)) + "\nCommon folder: " + path
             : path;
     const auto text =
@@ -188,15 +251,26 @@ void SessionModel::aggregate(QStandardItem *p) {
             .arg(running)
             .arg(waiting)
             .arg(unknown);
-    QMap<int, QVariant> values{{CountRole, count},          {ActiveCountRole, active},
-                               {RunningCountRole, running}, {WaitingCountRole, waiting},
-                               {UnknownCountRole, unknown}, {ActiveRole, active > 0},
-                               {RunningRole, running > 0},  {WaitingRole, waiting > 0},
-                               {RecencyRole, recency},      {AttentionRole, attention},
-                               {Qt::ToolTipRole, text},     {Qt::AccessibleDescriptionRole, text}};
+    QMap<int, QVariant> values{{CountRole, count},
+                               {BackendsRole, backends},
+                               {ActiveCountRole, active},
+                               {RunningCountRole, running},
+                               {WaitingCountRole, waiting},
+                               {UnknownCountRole, unknown},
+                               {ActiveRole, active > 0},
+                               {RunningRole, running > 0},
+                               {WaitingRole, waiting > 0},
+                               {RecencyRole, recency},
+                               {AttentionRole, attention},
+                               {Qt::ToolTipRole, text},
+                               {Qt::AccessibleDescriptionRole, text}};
     if (p->data(AttentionRole) != attention)
         values[Qt::DecorationRole] = dot(attention);
     updateItem(p, values);
+}
+void SessionModel::aggregateAncestors(QStandardItem *item) {
+    for (; item; item = item->parent())
+        aggregate(item);
 }
 void SessionModel::rebuild(const QString &backend) {
     // Membership/path changes come here. Other status/title updates retain every index.
@@ -210,6 +284,7 @@ void SessionModel::rebuild(const QString &backend) {
         root->setData(int(NodeKind::Server), KindRole);
         appendRow(root);
         roots[backend] = root;
+        placeRoot(backend);
     }
     root->setText(backendNames.value(backend, backend));
     root->setData(environment(backend), EnvironmentRole);
@@ -312,7 +387,7 @@ void SessionModel::rebuild(const QString &backend) {
     std::reverse(ordered.begin(), ordered.end());
     for (const auto &path : ordered)
         aggregate(folders.value(folderKey(backend, path)));
-    aggregate(root);
+    aggregateAncestors(root);
     emit topologyChanged();
 }
 void SessionModel::upsert(const Session &s) {
@@ -380,18 +455,26 @@ void SessionModel::removeBackend(const QString &backend) {
     for (const auto &key : folders.keys())
         if (folders[key]->data(BackendRole) == backend)
             folders.remove(key);
-    if (auto *root = roots.take(backend))
-        removeRow(root->row());
+    if (auto *root = roots.take(backend)) {
+        if (auto *parent = root->parent()) {
+            parent->removeRow(root->row());
+            aggregate(parent);
+        } else
+            removeRow(root->row());
+    }
     backendNames.remove(backend);
     details.remove(backend);
     environments.remove(backend);
     containerWorkdirs.remove(backend);
+    backendGroups.remove(backend);
+    pruneGroups();
     emit topologyChanged();
 }
 void SessionModel::resetResults() {
     emit topologyAboutToChange();
     records.clear();
     roots.clear();
+    groups.clear();
     folders.clear();
     threads.clear();
     removeRows(0, rowCount());
@@ -415,6 +498,15 @@ bool SessionFilter::filterAcceptsRow(int row, const QModelIndex &parent) const {
            sourceModel()->index(row, 0, parent).data(CountRole).toInt() > 0;
 }
 bool SessionFilter::lessThan(const QModelIndex &a, const QModelIndex &b) const {
+    // Host groups stay in a predictable order while sessions beneath them use
+    // recency. Comparisons are reversed here because the proxy sorts descending.
+    if (a.data(KindRole).toInt() == int(NodeKind::Group) &&
+        b.data(KindRole).toInt() == int(NodeKind::Group)) {
+        if (a.data(GroupOrderRole) != b.data(GroupOrderRole))
+            return a.data(GroupOrderRole).toInt() > b.data(GroupOrderRole).toInt();
+        const auto name = QString::localeAwareCompare(a.data().toString(), b.data().toString());
+        return name ? name > 0 : a.data(KeyRole).toString() > b.data(KeyRole).toString();
+    }
     const auto x = a.data(RecencyRole).toLongLong(), y = b.data(RecencyRole).toLongLong();
     if (x != y)
         return x < y;
