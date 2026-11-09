@@ -111,6 +111,11 @@ or database work off the GUI thread. Deliver model changes through queued Qt
 signals. Coalesce repaint work during bursts without discarding meaningful
 state transitions. No worker thread per conversation is required.
 
+Remote integration must also remove GUI-thread process shutdown waits, isolate
+host failures, bound delivery batches and move persistence out of session-change
+callbacks on the GUI thread. These remain delivery requirements, not claims about
+the current local implementation. See the [myCodex responsiveness contract](mycodex.md#4-responsiveness-and-failure-isolation).
+
 The GUI does not need an always-running companion daemon. Closing it ends its
 notification reception. Backend work continues because the app-server has an
 independent lifetime. Background desktop notifications after the GUI exits are
@@ -259,12 +264,18 @@ Use application-assigned persistent backend IDs. A conversation key contains its
 backend ID and Codex thread ID. A filesystem path or a thread ID on its own is not
 a globally unique execution identity.
 
+Shared history adds a separate visibility relationship: a container's server can
+list a saved thread without being a suitable environment to restart it. Track
+live execution and established resume context separately from history visibility;
+metadata reads and equal cwd strings do not establish restart eligibility. See
+[shared-history routing](mycodex.md#2-execution-identity-and-shared-history).
+
 Projects are derived groups of existing sessions, with no required project-creation
 step. Startup discovers existing local servers; see [local discovery](discovery.md).
 Locations contain an execution environment, an environment-relative path,
 and optional repository/worktree metadata. The same absolute path on two hosts
-does not identify the same location. Discovered servers sharing the host namespace
-are grouped by working-directory path while conversation routing keeps its backend ID.
+does not identify the same location. Each server retains its own root, with
+working-directory groups and conversation routing scoped to its backend ID.
 A remote path must not be resolved with the
 GUI host's filesystem APIs. A non-Git directory is a valid project.
 
@@ -387,6 +398,10 @@ tests should verify that an idle connected GUI sends no periodic status RPCs.
 - Default offline search caching and realistic saved-history dataset size.
 - Whether future releases need explicit server lifecycle controls or a native
   conversation view.
+- myCodex physical socket exposure versus an exec relay, terminal placement and
+  legacy-container support; see [transport options](mycodex-transport-options.md).
+- Reliable resume-context provenance and presentation of shared/unassigned
+  history; shared files never make containers interchangeable execution targets.
 
 The original documentation milestone made no implementation changes. The later
 [initial implementation](implementation.md) adds application code and Flatpak

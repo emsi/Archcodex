@@ -97,6 +97,10 @@ capability error.
   session lifetime, search, technology choices and validation.
 - [Backend design](docs/backends.md): adapter contracts and the implementation
   sequence: existing local Unix sockets, remote TCP, SSH, then myCodex.
+- [myCodex integration](docs/mycodex.md): agreed identity, discovery,
+  responsiveness and shared-history requirements.
+- [myCodex transport discussion](docs/mycodex-transport-options.md): volume/socket
+  exposure and SSH forwarding compared with an optional container exec relay.
 - [Flatpak design](docs/flatpak.md): runtime, terminal integration, host commands,
   proposed permissions and packaging checks.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.

@@ -173,47 +173,36 @@ transport and protocol machinery with container/environment discovery and
 terminal launch behavior. Docker and myCodex dependencies must not leak into
 other adapters or into the shared UI model.
 
-The current [myCodex repository](https://github.com/emsi/myCodex) provides a
-persistent container workstation and tmux/byobu attachment. Its launcher
-currently has human-readable information and interactive execution paths. Those
-are useful for people, but a raw protocol relay needs machine-readable metadata
-and a non-TTY stream. Relevant sources:
-[launcher](https://github.com/emsi/myCodex/blob/master/bin/myCodex),
-[Compose configuration](https://github.com/emsi/myCodex/blob/master/docker-compose.yaml).
+The [agreed myCodex direction](mycodex.md) covers private/shared environments,
+local and configured remote hosts, automatic container discovery, event-driven
+updates, failure isolation and independent server lifetime. It separates host,
+Docker engine, container, app-server and history-store identities.
 
-Proposed small integration additions, to be designed and authorized separately:
+A visible saved conversation is not proof that it can be restarted in the
+container whose server returned it. Keep history visibility, actual live
+execution and established resume context separate. Never select a container by
+shared volume, thread ID or cwd alone. Existing saved-session filtering and a
+successful metadata read do not establish execution eligibility.
 
-| Proposed operation | Purpose and constraints |
-| --- | --- |
-| `info --json` | Versioned descriptor for the instance, execution user, workdir, storage identity, Codex version and reachable endpoint information. |
-| `app-server proxy` | Non-TTY, bidirectional relay to the intended existing server; protocol bytes on stdout and diagnostics on stderr. |
-| `app-server ensure --json`, if needed | Explicit lifecycle action that reports the resolved endpoint; never silently recreate a running container merely to attach. |
+Connection mechanics remain an [open transport discussion](mycodex-transport-options.md).
+An actual host-accessible container socket can reuse the local Unix adapter or
+native SSH forwarding. An advertised symlink in a shared home may instead point
+to a private container runtime directory. A non-PTY container exec relay is one
+alternative; `myCodex integration` or other new launcher commands are not an
+adopted requirement. Discovery metadata and TUI placement are separate decisions
+from byte transport.
 
-These names are proposals, not claims that the commands exist today. First
-determine whether existing interfaces can meet the contract without changes.
-Use the intended container user and Codex environment, not an accidental root
-session from an unqualified container exec.
+Discovery uses Docker lifecycle events plus endpoint events and initial/recovery
+snapshots. List running myCodex containers even when they have no app-server;
+report coverage limits. Use the host-command boundary and SSH as appropriate,
+without mounting the Docker socket into the Flatpak. Do not turn discovery or
+attachment into a pull, update, recreation, server start or history resume.
 
-Shared Codex history and home volumes need particular care: two containers may
-see the same files without sharing a usable daemon socket or process namespace.
-Discover the actual execution owner. Do not identify an active backend only by
-`CODEX_HOME`, and do not redesign authentication/state volumes as a side effect
-of GUI integration.
-
-Preserve myCodex's existing attach and image lifecycle semantics. The GUI should
-not turn a connection into an implicit pull, update, recreation or restart.
-Conversation persistence can rely on the independent app-server; preserving an
-existing tmux screen is optional and is not required for the common backend
-contract.
-
-myCodex can be local or reached through SSH. The adapter must state which host
-owns the launcher, which environment owns the socket, and where the TUI runs.
-Use the host-command bridge for local launcher commands; do not mount the Docker
-socket into the Flatpak just to discover instances.
-
-Acceptance: distinct instances sharing history, private and shared state modes,
-running-container attachment without mutation, correct execution user, protocol
-relay without PTY corruption, remote instances and continuity after GUI exit.
+Acceptance: distinct execution contexts sharing the same history, unknown or
+unavailable resume contexts, private/shared modes, zero/multiple servers,
+container/socket lifecycle events, GUI responsiveness during remote failure,
+explicit GUI/TUI endpoint targeting and continuity after GUI exit. The chosen
+transport must additionally pass the qualification cases in the separate analysis.
 
 ## 7. Shared release requirements
 

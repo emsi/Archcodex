@@ -37,8 +37,9 @@ destination; the local test bundle does not publish the application there.
 
 The proposed initial package contains the GUI, its libraries, terminal component
 and application metadata. It uses an installed **host Codex CLI** for terminal
-clients and local socket relays, and **host OpenSSH** for SSH connections. myCodex
-is a later host/remote dependency only for its own adapter.
+clients and local socket relays, and **host OpenSSH** for SSH connections. Docker
+and any myCodex-specific tooling are later dependencies only for container
+discovery/integration; a new myCodex command interface is not an adopted dependency.
 
 This keeps the GUI attached to the user's existing tools and SSH configuration.
 It also means the first Flatpak is not a self-contained Codex installation. On
@@ -155,10 +156,17 @@ when a connection ends.
 
 ### myCodex
 
-The eventual adapter invokes a host launcher or a remote launcher through SSH.
-The launcher resolves container execution and the app-server stream. The Flatpak
-does not acquire direct Docker access. This route is designed after the first
-three adapters and may need small myCodex changes.
+The provider identifies the container and its actual app-server endpoint. If the
+physical socket is accessible on the Docker host, reuse the local Unix or native
+SSH-forwarded route above. Container exec relay is an alternative under review;
+a launcher command is not a mandatory step in the byte stream. Terminal client
+placement remains a separate compatibility decision.
+
+Docker discovery runs through the host-command boundary (and SSH remotely),
+without mounting the Docker socket into the Flatpak. No new filesystem grant,
+helper dependency or container mount is selected by this design. See
+[agreed myCodex requirements](mycodex.md) and the separate
+[transport discussion](mycodex-transport-options.md).
 
 ## 5. Process lifetime, credentials and application data
 
