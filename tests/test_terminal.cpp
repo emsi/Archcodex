@@ -89,6 +89,9 @@ class TerminalTests : public QObject {
         area.closeCurrent();
         area.switchRecent();
         QCOMPARE(area.currentKey(), sessionKey("b", "c"));
+        area.closeSession(sessionKey("b", "a")); // Closing a different row preserves the view.
+        QCOMPARE(area.currentKey(), sessionKey("b", "c"));
+        QVERIFY(!area.focusSession(sessionKey("b", "a")));
         area.closeBackend("b");
         area.switchRecent();
         QVERIFY(area.currentKey().isEmpty());

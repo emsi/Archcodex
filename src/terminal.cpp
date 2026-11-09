@@ -297,18 +297,21 @@ void TerminalArea::processExited(int exitCode, bool crashed) {
         }
 }
 void TerminalArea::closeCurrent() {
-    for (auto it = parts.begin(); it != parts.end(); ++it)
-        if (it.value() && it.value()->widget() == stack->currentWidget()) {
-            auto *part = it.value().data();
-            forgetClient(it.key());
-            titles.remove(it.key());
-            exits.remove(it.key());
-            parts.erase(it);
-            stack->setCurrentWidget(empty);
-            delete part;
-            emit currentChanged("No terminal selected");
-            return;
-        }
+    closeSession(currentKey());
+}
+void TerminalArea::closeSession(const QString &key) {
+    auto *part = parts.value(key).data();
+    if (!part)
+        return;
+    const bool current = currentKey() == key;
+    forgetClient(key);
+    titles.remove(key);
+    exits.remove(key);
+    parts.remove(key);
+    if (current)
+        stack->setCurrentWidget(empty);
+    delete part;
+    updateCurrent();
 }
 void TerminalArea::closeBackend(const QString &backend) {
     QList<KParts::ReadOnlyPart *> doomed;

@@ -6,6 +6,7 @@
 #include <QtEndian>
 #include <algorithm>
 #include <limits>
+#include <utility>
 
 namespace Archcodex {
 static QJsonArray sources() {
@@ -61,6 +62,11 @@ void CodexBackend::shutdownProcess() {
     initialized = false;
     listing = false;
     pending.clear();
+    const auto interruptedForks = std::exchange(forking, {});
+    for (const auto &id : interruptedForks)
+        emit sessionForked(id, {},
+                           "Connection lost while forking. The result is unknown; check "
+                           "the session list after reconnecting before trying again.");
     deadlineTimer.stop();
     buffer.clear();
     reads.clear();
@@ -257,7 +263,7 @@ void CodexBackend::message(const QJsonObject &m) {
                      : QString());
         return;
     }
-    // This connection is an observer: never claim, approve, deny or cancel server requests.
+    // Server-initiated requests belong to the TUI: never claim, approve, deny or cancel them.
     if (m.contains("id"))
         return;
     const auto method = m["method"].toString();
@@ -268,8 +274,14 @@ void CodexBackend::message(const QJsonObject &m) {
         return;
     }
     if ((method == "thread/status/changed" || method == "thread/closed") && !id.isEmpty()) {
+        const auto previous = statuses.value(id, sessions.value(id).status);
         statuses[id] =
             method == "thread/closed" ? QJsonObject{{"type", "notLoaded"}} : p["status"].toObject();
+        // Only real activity advances MRU. Inventory reads, duplicate notifications
+        // and closing a thread must not make old history look newly used.
+        if (method == "thread/status/changed" && statuses[id] != previous &&
+            statuses[id]["type"].isString() && statuses[id]["type"] != "notLoaded")
+            activityRecency[id] = QDateTime::currentSecsSinceEpoch();
         if (statuses[id]["type"].isString() && statuses[id]["type"] != "notLoaded") {
             observed.insert(id);
             loaded.insert(id);
@@ -278,6 +290,7 @@ void CodexBackend::message(const QJsonObject &m) {
         if (sessions.contains(id)) {
             auto &s = sessions[id];
             s.status = statuses[id];
+            s.recency = std::max(s.recency, activityRecency.value(id));
             s.known = true;
             if (profile.isContainer()) {
                 s.executionObserved |= observed.contains(id);
@@ -307,6 +320,7 @@ void CodexBackend::message(const QJsonObject &m) {
         sessions.remove(id);
         statuses.remove(id);
         names.remove(id);
+        activityRecency.remove(id);
         emit sessionRemoved(id);
     } else if (method == "thread/unarchived") {
         removed.remove(id);
@@ -323,6 +337,7 @@ void CodexBackend::upsert(QJsonObject t, bool verified) {
     if (names.contains(id))
         t["name"] = names[id];
     auto s = Session::fromThread(profile.id, t);
+    s.recency = std::max({s.recency, sessions.value(id).recency, activityRecency.value(id)});
     // Never trust history fields as execution provenance. This evidence is app-owned.
     s.contextRequired = profile.isContainer();
     s.executionObserved = observed.contains(id);
@@ -485,6 +500,65 @@ void CodexBackend::verifySession(const QString &id) {
                 else
                     readFailure(id, issue);
                 emit sessionVerified(id, issue);
+            });
+}
+void CodexBackend::forkSession(const QString &id, const QString &priorExecutionEnvironment) {
+    if (forking.contains(id))
+        return;
+    if (!initialized || id.isEmpty() || !validText(id, 128)) {
+        emit sessionForked(id, {}, "Connect the session's server before forking.");
+        return;
+    }
+    forking.insert(id);
+    const auto finish = [this, id](const Session &session, const QString &error) {
+        forking.remove(id);
+        emit sessionForked(id, session, error);
+    };
+    // Revalidate on the selected backend, including container execution provenance.
+    // Shared history alone never grants permission to run a fork in another container.
+    request("thread/read", {{"threadId", id}, {"includeTurns", false}},
+            [this, id, finish, priorExecutionEnvironment](const auto &r, const QString &error) {
+                if (!error.isEmpty()) {
+                    readFailure(id, error);
+                    finish({}, error);
+                    return;
+                }
+                const auto thread = r["thread"].toObject();
+                if (thread["id"].toString() != id) {
+                    finish({}, "Server returned metadata for a different session.");
+                    return;
+                }
+                upsert(thread, true);
+                const bool previouslyObserved = !priorExecutionEnvironment.isEmpty() &&
+                                                priorExecutionEnvironment == profile.environmentId;
+                if (profile.isContainer() && !observed.contains(id) && !previouslyObserved) {
+                    finish({}, "This is shared history, not a session observed in this container.");
+                    return;
+                }
+                request("thread/fork", {{"threadId", id}, {"excludeTurns", true}},
+                        [this, id, finish](const auto &reply, const QString &issue) {
+                            if (!issue.isEmpty()) {
+                                finish({}, issue == "Server request timed out."
+                                               ? issue + " The fork result is unknown; check the "
+                                                         "session list before trying again."
+                                               : issue);
+                                return;
+                            }
+                            const auto fork = reply["thread"].toObject();
+                            const auto forkId = fork["id"].toString();
+                            if (forkId.isEmpty() || forkId == id || !validText(forkId, 128) ||
+                                !validText(fork["cwd"].toString()) ||
+                                !fork["cwd"].toString().startsWith('/')) {
+                                finish({}, "Server returned invalid fork metadata. Check the "
+                                           "session list before trying again.");
+                                return;
+                            }
+                            observed.insert(forkId);
+                            loaded.insert(forkId);
+                            activityRecency[forkId] = QDateTime::currentSecsSinceEpoch();
+                            upsert(fork, true);
+                            finish(sessions.value(forkId), {});
+                        });
             });
 }
 void CodexBackend::search(const QString &query, quint64 token) {

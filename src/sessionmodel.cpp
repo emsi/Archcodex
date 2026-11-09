@@ -481,6 +481,7 @@ void SessionModel::resetResults() {
     emit topologyChanged();
 }
 SessionFilter::SessionFilter(QObject *parent) : QSortFilterProxyModel(parent) {
+    setSortRole(RecencyRole);
     setRecursiveFilteringEnabled(true);
     setDynamicSortFilter(true);
     sort(0, Qt::DescendingOrder);

@@ -1,4 +1,4 @@
-# myCodex integration: 0.5.0
+# myCodex integration: 0.5.1
 
 Implemented on 2026-11-09 following the request to adopt direct container
 integration. Existing containers are the primary workflow. No new myCodex
@@ -21,6 +21,10 @@ inside that container. Once initialization identifies a custom server `CODEX_HOM
 the TUI inherits it; subsequent discovery preserves that identity. It does not use the desktop's default Codex server.
 Neither path starts an app-server. Archcodex owns only its observers, proxy
 clients and TUI clients; it never stops an existing server or container.
+The explicit Fork action sends native `thread/fork` on this same protocol
+connection after validating the source in the selected container. It then opens
+the returned ID through the existing TUI path. Shared history without execution
+evidence in that container cannot be forked there. No myCodex command was added.
 
 The small `containers.py` adapter is packaged in Archcodex and supplied to Python
 through argv. It is not installed on the host or added to myCodex. It discovers

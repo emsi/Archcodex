@@ -35,6 +35,14 @@ class BackendPump : public QObject {
                 });
         connect(this, &BackendPump::selected, target, &Backend::sessionChanged);
         connect(this, &BackendPump::verified, target, &Backend::sessionVerified);
+        connect(core, &Backend::sessionForked, this,
+                [this](const QString &id, const Session &session, const QString &error) {
+                    // Deliver metadata before the result, even during a history import.
+                    if (pending.contains(session.id))
+                        emit selected(pending.take(session.id));
+                    emit forked(id, session, error);
+                });
+        connect(this, &BackendPump::forked, target, &Backend::sessionForked);
         connect(this, &BackendPump::batch, target, [target](const QList<Session> &items) {
             emit target->sessionsChanged(items);
             emit target->batchAccepted();
@@ -72,6 +80,7 @@ class BackendPump : public QObject {
     void selected(const Archcodex::Session &session);
     void removed(const QString &id);
     void verified(const QString &id, const QString &error);
+    void forked(const QString &id, const Archcodex::Session &session, const QString &error);
 };
 AsyncBackend::AsyncBackend(BackendProfile p, const QString &bridge, QObject *parent)
     : Backend(std::move(p), parent), state(std::make_shared<State>()),
@@ -104,6 +113,11 @@ void AsyncBackend::search(const QString &q, quint64 token) {
 }
 void AsyncBackend::verifySession(const QString &id) {
     worker->post([s = state, id] { s->pump->core->verifySession(id); });
+}
+void AsyncBackend::forkSession(const QString &id, const QString &priorExecutionEnvironment) {
+    worker->post([s = state, id, priorExecutionEnvironment] {
+        s->pump->core->forkSession(id, priorExecutionEnvironment);
+    });
 }
 } // namespace Archcodex
 #include "asyncbackend.moc"

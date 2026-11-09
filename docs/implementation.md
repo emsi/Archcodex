@@ -801,3 +801,86 @@ Builds, fixture state, helper scripts, screenshots and logs remain under `.build
 trees). Completed code, tests and documentation are committed locally under the
 standing instruction. No push, tag, external release, container modification or
 normal host Flatpak installation was performed.
+
+## 0.5.1 activity ordering and explorer menus
+
+The confirmed ordering defect was in event handling: `thread/status/changed`
+changed state and tab membership but retained the old history timestamp. A saved
+session's metadata was not reread on each transition, so a newly running/waiting
+conversation could stay in its previous position indefinitely. Activity transitions
+now advance recency from event receipt time. Duplicate notifications and thread
+closure do not advance it, and stale metadata replies cannot roll it back. No
+polling or additional status requests were introduced. The proxy explicitly
+declares its recency sort role; host groups keep their established fixed order.
+
+The reported loss of host groups in Waiting was not reproduced in this checkout.
+All five tabs use the same source model and grouping; they do not have independent
+old/new layouts. Regression tests now check actual group ancestry in Waiting and
+Running, including tab changes, disappearing/reappearing activity, local host,
+local myCodex and remote myCodex roots. This does not establish why the user's
+running instance displayed different organization. Its reported runtime version
+and reproduction remain needed if the symptom persists with this bundle.
+
+Right-click menus are scoped to the clicked row. Sessions offer Fork, New and
+Close; directories offer New and Expand All; host/server/container parents offer
+Expand All. They capture backend/thread/path identities rather than indexes that
+can change during a popup. Expansion resolves the branch's current stable key.
+New uses the clicked directory and backend. Close releases just that terminal,
+including retained exit output, without changing another displayed terminal or
+deleting conversation history. It is disabled when no terminal view is open.
+
+Fork is an explicit native `thread/fork` request over the selected backend's
+existing asynchronous connection. The local generated protocol schema confirms
+the request/response contract. A fresh `thread/read` precedes it. myCodex requires
+execution evidence for that container, accepting the same app-owned cached
+environment evidence used by Resume; shared history fields cannot supply it.
+Only `threadId` and `excludeTurns: true` are sent, preserving the server's native
+fork defaults without transferring full conversation history through the GUI.
+The successful result supplies the new ID and execution provenance before its
+TUI opens. Requests for the same source are coalesced while pending. Unsupported
+operations fail explicitly; mutations are never retried automatically. A lost
+connection or fork timeout warns that the outcome may be unknown. A failed TUI
+launch leaves the newly created conversation available in history.
+
+### Decisions not agreed in advance
+
+The user authorized checking/fixing activity views and adding the specified
+menus. The following details were implementation choices for that scope:
+
+| Choice/action | Reason, files and consequences |
+| --- | --- |
+| Use real state transitions and terminal focus for recent-use ordering; retain seconds-based timestamp storage. | `src/backend.*`, `src/sessionmodel.cpp`; avoids polling, snapshot churn and a cache migration. Changes into loaded states promote sessions; closure and duplicate events do not. Root group ordering remains fixed. |
+| Keep the common grouping implementation and add regression coverage rather than an unproven replacement. | `tests/test_model.cpp`, `tests/test_window.cpp`; Waiting/Running group-loss remains unreproduced, with rendered views checked separately. |
+| Fork through native RPC, with a fresh preflight, matching execution provenance and no automatic mutation retries. | `src/backend.*`, `src/asyncbackend.*`, `src/window.*`; requires server support for `thread/fork`. The original conversation is retained, a real new ID is opened, and native configuration/goal behavior is inherited. No CLI/default-server fallback or new myCodex integration command. |
+| Close means close the selected GUI terminal; Expand All means the selected subtree. | `src/terminal.*`, `src/window.*`; closed conversations are not deleted or archived. Unopened Close and unavailable connection-dependent actions are disabled. Synthetic terminal entries cannot be forked before a real ID exists. |
+| Use nonblocking native menus with stable identity captures and revalidate actions at invocation. | `src/window.*`; pushed updates can continue while the menu is open. No dependencies, permissions or persistent preferences added. |
+| Package as 0.5.1 and commit the completed task locally under the standing instruction. | `CMakeLists.txt`, build script, AppStream and documentation; local `dist/Archcodex-0.5.1-x86_64.flatpak` and checksum. No push, tag or external publication. |
+
+Build/test logs, screenshot fixtures and temporary runtime configuration remain
+under `.build/explorer-0.5.1`; SDK/native/runtime trees, local OSTree repository
+and isolated Flatpak installation are reused. The finalized package lives under
+`.build/package-0.5.1`. Packaging uses the previously documented namespace-limited
+SDK/export route, with unchanged runtime and permissions. Full Flatpak sandbox
+execution and actual local/remote myCodex forks require host acceptance testing;
+protocol fixtures do not substitute for those checks.
+
+### Validation
+
+All seven test suites pass: discovery and container Python tests, core protocol,
+asynchronous runtime, model, window and real-Konsole terminal tests. New coverage
+checks recency after pushed transitions and stale reads; grouped activity-view
+ancestry; clicked-row menu routing and subtree expansion; native fork completion
+ordering, duplicate suppression, server errors, matching/obsolete container
+evidence and disconnect handling; and closing a noncurrent terminal. Model
+invariants are exercised with QAbstractItemModelTester. The menu test initially
+held a raw pointer after Qt had closed/deleted the popup; its lifetime tracking
+was corrected to use QPointer before the passing run.
+
+X11 screenshots of Waiting and Running with all three host categories were
+visually reviewed. The staged application reports 0.5.1 and passes its real-PTY
+Konsole smoke test against KDE Platform libraries. The bundle installed into the
+project-local Flatpak installation; installed/staged executable bytes and the
+bundle checksum match. Permissions match 0.5.0 exactly. The three cache-trigger
+namespace warnings reflect the existing build-container restriction, not a
+successful sandbox launch. AppStream still reports the existing missing-homepage
+warning; formatting, whitespace, shell syntax, JSON and desktop-file checks pass.

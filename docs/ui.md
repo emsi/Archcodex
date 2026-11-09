@@ -105,10 +105,35 @@ and search return. Switching views does not activate a terminal. The initial sid
 five labels; existing saved window geometry remains respected.
 
 Rows update only when their values change, with changed roles sent together.
-Status-only events do not change recency. Tooltips are escaped plain metadata
+Changes into running, idle/waiting or other loaded states advance recency using
+the event receipt time. Duplicate status notifications, inventory refreshes and
+thread-close events do not promote old history. A concurrent older metadata read
+cannot roll recency back. Sorting uses the later of this activity timestamp and
+the last terminal focus time; host groups retain their fixed order.
+Tooltips are escaped plain metadata
 rendered beside the navigator, anchored to the hovered row, and remain a stable
 snapshot while visible. This prevents metadata bursts from continually replacing
 hover text. Fresh status is available when the tooltip is opened again.
+
+Right-click menus use the clicked row, independently of the selected terminal:
+
+| Row | Actions |
+| --- | --- |
+| Session | Fork, New, Close |
+| Directory | New, Expand All |
+| Host group or server/container | Expand All |
+
+New uses that backend and exact directory. Fork uses the selected backend's
+native `thread/fork`, then opens its returned conversation ID; it does not infer
+identity from a title or launch against a default server. The backend first
+reads the source's metadata, and myCodex additionally requires execution evidence
+for that container. Unsupported/failed forks report an error without a fallback.
+Pending forks are not retried automatically after a timeout or disconnection.
+Synthetic new-session terminals have no confirmed ID and cannot be forked.
+Close releases only that row's open terminal, including retained exit output;
+it is disabled for conversations without a terminal view. Expand All expands
+the chosen subtree and records that expansion in the current view. Actions that
+need a connection are disabled while disconnected and rechecked when invoked.
 
 ## 3. Existing-session discovery
 

@@ -184,6 +184,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tree->setUniformRowHeights(true);
     tree->setAnimated(false);
     tree->setAccessibleName("Projects and sessions");
+    tree->setContextMenuPolicy(Qt::CustomContextMenu);
+    connect(tree, &QWidget::customContextMenuRequested, this, &Window::sessionContextMenu);
     left->addWidget(tree, 1);
     connect(tree, &QTreeView::activated, this, &Window::activate);
     connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
@@ -289,13 +291,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             error("Select a project first.");
             return;
         }
-        if (!backends[id]->ready()) {
-            error("Connect the selected project's backend first.");
-            return;
-        }
-        QString issue;
-        if (!terminal->newSession(profiles[id], index.data(PathRole).toString(), &issue))
-            error(issue);
+        newSession(id, index.data(PathRole).toString());
     });
     projectsMenu->addAction("Next recent terminal", QKeySequence("Ctrl+Tab"), terminal,
                             [this] { terminal->switchRecent(false); });
@@ -456,6 +452,11 @@ void Window::error(const QString &text) {
     box.exec();
 }
 void Window::attach(const BackendProfile &p, bool start) {
+    for (auto it = pendingForks.begin(); it != pendingForks.end();)
+        if (it->startsWith(p.id + QChar(0x1f)))
+            it = pendingForks.erase(it);
+        else
+            ++it;
     presentProfile(p);
     auto *b =
         new AsyncBackend(p, QCoreApplication::applicationDirPath() + "/archcodex-bridge", this);
@@ -603,10 +604,95 @@ void Window::attach(const BackendProfile &p, bool start) {
                 return;
             }
         });
+    connect(b, &Backend::sessionForked, this,
+            [this, id = p.id](const QString &source, const Session &session, const QString &issue) {
+                if (!pendingForks.remove(sessionKey(id, source)))
+                    return;
+                if (!issue.isEmpty()) {
+                    error("Could not fork the session:\n" + issue);
+                    return;
+                }
+                applySessions({session});
+                QString launchError;
+                if (!terminal->open(profiles[id], sessions.value(sessionKey(id, session.id)),
+                                    &launchError))
+                    error("The fork was created, but its terminal could not open:\n" + launchError);
+            });
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
     else
         connectionStates[p.id] = "Disconnected";
+}
+void Window::newSession(const QString &backend, const QString &path) {
+    if (!profiles.contains(backend) || !backends.value(backend) || !backends[backend]->ready()) {
+        error("Connect the selected project's backend first.");
+        return;
+    }
+    QString issue;
+    if (!terminal->newSession(profiles[backend], path, &issue))
+        error(issue);
+}
+void Window::forkSession(const QString &backend, const QString &thread) {
+    const auto key = sessionKey(backend, thread);
+    if (pendingForks.contains(key))
+        return;
+    if (!profiles.contains(backend) || !backends.value(backend) || !backends[backend]->ready()) {
+        error("Connect the session's backend before forking.");
+        return;
+    }
+    if (thread.isEmpty() || thread.startsWith("new-")) {
+        error("This terminal does not yet have a confirmed session ID to fork.");
+        return;
+    }
+    pendingForks.insert(key);
+    const auto s = sessions.value(key, searchSessions.value(key));
+    backends[backend]->forkSession(thread,
+                                   s.executionObserved ? s.executionEnvironment : QString());
+}
+void Window::sessionContextMenu(const QPoint &position) {
+    const auto index = tree->indexAt(position);
+    if (!index.isValid())
+        return;
+    const auto kind = static_cast<NodeKind>(index.data(KindRole).toInt());
+    const auto key = index.data(KeyRole).toString();
+    const auto backend = index.data(BackendRole).toString();
+    const auto thread = index.data(ThreadRole).toString();
+    const auto path = index.data(PathRole).toString();
+    const bool connected = backends.value(backend) && backends[backend]->ready();
+    auto *menu = new QMenu(tree);
+    menu->setObjectName("sessionContextMenu");
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    // Capture identities, not transient indexes: events can reorder or remove rows
+    // while a menu is open. Expand resolves its key against the current view.
+    if (kind == NodeKind::Session) {
+        const auto s = sessions.value(key, searchSessions.value(key));
+        auto *fork = menu->addAction("Fork", this,
+                                     [this, backend, thread] { forkSession(backend, thread); });
+        fork->setEnabled(connected && !thread.startsWith("new-") && !thread.isEmpty() &&
+                         !s.unavailable && !pendingForks.contains(key) &&
+                         (!s.contextRequired || s.executionObserved));
+    }
+    if (kind == NodeKind::Session || kind == NodeKind::Folder) {
+        auto *create =
+            menu->addAction("New", this, [this, backend, path] { newSession(backend, path); });
+        create->setEnabled(connected && QDir::isAbsolutePath(path) && validText(path));
+    }
+    if (kind == NodeKind::Session) {
+        auto *close =
+            menu->addAction("Close", terminal, [this, key] { terminal->closeSession(key); });
+        close->setEnabled(sessions.value(key).terminalOpen);
+        close->setToolTip("Close this terminal view; keep the saved conversation.");
+    } else {
+        menu->addAction("Expand All", this, [this, key] {
+            walkTree(filter, {}, [&](const QModelIndex &item) {
+                if (item.data(KeyRole).toString() != key)
+                    return;
+                tree->expand(item);
+                walkTree(filter, item, [this](const QModelIndex &child) { tree->expand(child); });
+            });
+        });
+    }
+    menu->popup(tree->viewport()->mapToGlobal(position));
 }
 void Window::expandActivityViews() {
     if (searchingView || !expandsByDefault(tabs->currentIndex()))

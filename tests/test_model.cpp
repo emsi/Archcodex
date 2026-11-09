@@ -7,6 +7,69 @@ using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
+    void groupedActivityViewsKeepAncestryAndResortOnEvents_data() {
+        QTest::addColumn<bool>("running");
+        QTest::newRow("waiting") << false;
+        QTest::newRow("running") << true;
+    }
+    void groupedActivityViewsKeepAncestryAndResortOnEvents() {
+        QFETCH(bool, running);
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        QAbstractItemModelTester tester(&filter,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        QList<Session> sessions;
+        for (const auto &backend : {"local", "container"}) {
+            model.backendGroup(backend, backend, QString("Host %1").arg(backend));
+            model.backendName(backend, backend);
+            for (int i = 0; i < 2; ++i) {
+                auto s = Session::fromThread(backend, {{"id", QString::number(i)},
+                                                       {"cwd", "/work/project"},
+                                                       {"name", "Unchanged title"},
+                                                       {"status", QJsonObject{{"type", "idle"}}}});
+                s.recency = i + 1;
+                sessions << s;
+            }
+        }
+        model.upsertMany(sessions);
+        for (const auto view : {SessionView::Waiting, SessionView::Running, SessionView::All,
+                                running ? SessionView::Running : SessionView::Waiting}) {
+            filter.setView(view);
+            for (int i = 0; i < filter.rowCount(); ++i) {
+                const auto group = filter.index(i, 0);
+                QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
+                QCOMPARE(filter.index(0, 0, group).data(KindRole).toInt(), int(NodeKind::Server));
+            }
+        }
+        for (auto &s : sessions)
+            s.status = {{"type", running ? "active" : "idle"}, {"activeFlags", QJsonArray{}}};
+        model.upsertMany(sessions);
+        QCOMPARE(filter.rowCount(), 2);
+        auto first = [&] {
+            const auto group = filter.index(0, 0);
+            const auto server = filter.index(0, 0, group);
+            const auto folder = filter.index(0, 0, server);
+            return filter.index(0, 0, folder);
+        };
+        QCOMPARE(filter.index(0, 0).data(KindRole).toInt(), int(NodeKind::Group));
+        QCOMPARE(first().data(ThreadRole).toString(), "1");
+        for (auto &s : sessions)
+            if (s.id == "0")
+                s.recency = 100;
+        model.upsertMany(sessions);
+        QCOMPARE(first().data(ThreadRole).toString(), "0");
+        for (auto &s : sessions)
+            s.known = false;
+        model.upsertMany(sessions);
+        QCOMPARE(filter.rowCount(), 0);
+        for (auto &s : sessions)
+            s.known = true;
+        model.upsertMany(sessions);
+        QCOMPARE(filter.rowCount(), 2);
+        QCOMPARE(filter.index(0, 0).data(KindRole).toInt(), int(NodeKind::Group));
+        QCOMPARE(first().data(ThreadRole).toString(), "0");
+    }
     void hostGroupsAggregateReparentAndPreserveBackendRouting() {
         SessionModel model;
         QAbstractItemModelTester tester(&model,

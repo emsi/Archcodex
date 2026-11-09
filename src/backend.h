@@ -23,6 +23,10 @@ class Backend : public QObject {
     virtual void loadMore() = 0;
     virtual void search(const QString &query, quint64 token) = 0;
     virtual void verifySession(const QString &id) = 0;
+    // Prior evidence comes only from the application's saved execution context,
+    // never from shared server history. It lets a previously observed session fork
+    // after an ordinary GUI reconnect, under the same rules as Resume.
+    virtual void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) = 0;
   signals:
     void connectionChanged(const QString &description, bool ready);
     void sessionChanged(const Archcodex::Session &session);
@@ -31,6 +35,8 @@ class Backend : public QObject {
     void loadedInventory(const QSet<QString> &ids);
     void identityReceived(const QJsonObject &identity);
     void sessionVerified(const QString &id, const QString &error);
+    void sessionForked(const QString &sourceId, const Archcodex::Session &session,
+                       const QString &error);
     void moreAvailable(bool available);
     void searchResults(quint64 token, const QList<Archcodex::Session> &sessions,
                        const QString &error, bool complete);
@@ -50,6 +56,7 @@ class CodexBackend : public Backend {
     void loadMore() override;
     void search(const QString &query, quint64 token) override;
     void verifySession(const QString &id) override;
+    void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) override;
 
   protected:
     virtual QStringList bridgeArguments() const = 0;
@@ -67,6 +74,8 @@ class CodexBackend : public Backend {
     QHash<qint64, Pending> pending;
     QHash<QString, QJsonObject> statuses;
     QHash<QString, QString> names;
+    QHash<QString, qint64> activityRecency;
+    QSet<QString> forking;
     QSet<QString> removed;
     QSet<QString> loaded;
     QSet<QString> observed;

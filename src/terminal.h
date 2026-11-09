@@ -19,6 +19,7 @@ class TerminalArea : public QWidget {
     void switchRecent(bool backwards = false);
     QString currentKey() const;
     void closeCurrent();
+    void closeSession(const QString &key);
     void closeBackend(const QString &backend);
     bool smokeTest(QString *error);
   signals:

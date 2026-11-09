@@ -1,7 +1,7 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.5.0** supports **existing local Unix-socket app-servers** and
+Version **0.5.1** supports **existing local Unix-socket app-servers** and
 **myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
 SSH socket profiles remain planned.
 
@@ -20,6 +20,10 @@ Restart rechecks the selected session and uses the current connection profile.
 regardless of history visibility settings. **Ctrl+Tab** switches through recently
 used terminals; **Ctrl+Shift+Tab** reverses direction. Hold Ctrl to cycle through
 the list and release it to make the selected terminal most recent.
+Right-click a session for **Fork**, **New** in the same directory, or **Close**
+its terminal view. Folders offer **New** and **Expand All**; host/server nodes
+offer **Expand All** for their branch. Activity transitions update recent-use
+ordering immediately from server events.
 **View → Hide unsaved sessions** is enabled by default and remembered; open
 terminal entries remain accessible even when their conversation is unsaved.
 **Settings → Configure Archcodex…** organizes preferences into Application and
@@ -43,13 +47,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.5.0-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.5.1-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.5.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.5.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -134,7 +138,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, host groups, expandable projects and
   sessions, and the five session views.
-- [Implementation and testing](docs/implementation.md): what 0.5.0 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.5.1 delivers and
   how to exercise it on your host.
 
 ## Project status

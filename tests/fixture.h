@@ -21,6 +21,8 @@ class Fixture : public QObject {
     QStringList loaded;
     QHash<QString, QString> readErrors;
     QJsonObject threadFields;
+    QJsonObject forkParams;
+    QString forkError;
     QStringList readIds;
     bool delaySnapshot = false;
     bool delayRead = false;
@@ -85,6 +87,16 @@ class Fixture : public QObject {
                                 .toJson()));
                     else
                         reply(m["id"], {{"thread", thread(id)}});
+                } else if (method == "thread/fork") {
+                    forkParams = m["params"].toObject();
+                    if (forkError.isEmpty())
+                        reply(m["id"], {{"thread", thread("fork-1")}});
+                    else
+                        peer->sendTextMessage(QString::fromUtf8(
+                            QJsonDocument(
+                                QJsonObject{{"id", m["id"]},
+                                            {"error", QJsonObject{{"message", forkError}}}})
+                                .toJson()));
                 } else if (method == "thread/search") {
                     const bool second = m["params"].toObject().contains("cursor");
                     reply(m["id"],

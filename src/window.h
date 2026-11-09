@@ -49,6 +49,7 @@ class Window : public QMainWindow {
     QSet<QString> scopeBackends;
     bool scopedSearch = false;
     QString scopePath, pendingOpen;
+    QSet<QString> pendingForks;
     QString localUser, localHost;
     bool localIdentityDiscovered = false;
     QHash<QString, QString> containerHostNames;
@@ -105,6 +106,9 @@ class Window : public QMainWindow {
     void discover();
     void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues);
     void activate(const QModelIndex &index);
+    void sessionContextMenu(const QPoint &position);
+    void newSession(const QString &backend, const QString &path);
+    void forkSession(const QString &backend, const QString &thread);
     void search();
     void clearSearch();
     void updateSummary();

@@ -2,7 +2,7 @@
 
 Status: primary distribution direction adopted; permission baseline and host
 integration below describe the full-project design. The
-[0.5.0 implementation](implementation.md) retains the original host-command permission
+[0.5.1 implementation](implementation.md) retains the original host-command permission
 set and a [buildable manifest](../packaging/io.github.emsi.Archcodex.json).
 Last updated: 2026-11-09.
 

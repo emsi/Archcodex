@@ -13,6 +13,7 @@ static BackendProfile containerProfile(const Fixture &fixture) {
     p.kind = "mycodex";
     p.containerId = QString(64, 'a');
     p.containerEpoch = "epoch-1";
+    p.environmentId = "environment-1";
     p.dockerContext = "default";
     p.runtimeUser = "alice";
     p.runtimeHome = "/home/alice";
@@ -50,6 +51,91 @@ class ProtocolFixtureBackend : public CodexBackend {
 class RuntimeTests : public QObject {
     Q_OBJECT
   private slots:
+    void statusEventsAdvanceRecencyWithoutPollingOrStaleReadRollback() {
+        Fixture f;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy changed(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(!changed.isEmpty() && f.methods.contains("thread/read"));
+        QTRY_COMPARE(qvariant_cast<Session>(changed.last()[0]).recency, 123);
+        const int reads = f.methods.count("thread/read");
+        f.notify("thread/status/changed",
+                 {{"threadId", "thread-1"},
+                  {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        QTRY_VERIFY(qvariant_cast<Session>(changed.last()[0]).isRunning());
+        const auto runningRecency = qvariant_cast<Session>(changed.last()[0]).recency;
+        QVERIFY(runningRecency > 123);
+        f.notify("thread/status/changed",
+                 {{"threadId", "thread-1"}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_VERIFY(qvariant_cast<Session>(changed.last()[0]).isWaiting());
+        QVERIFY(qvariant_cast<Session>(changed.last()[0]).recency >= runningRecency);
+        QCOMPARE(f.methods.count("thread/read"), reads);
+        QSignalSpy verified(&b, &Backend::sessionVerified);
+        b.verifySession("thread-1");
+        QTRY_COMPARE(verified.size(), 1);
+        QVERIFY(qvariant_cast<Session>(changed.last()[0]).recency >= runningRecency);
+        b.disconnectServer();
+    }
+    void forkIsNativeAsyncAndMetadataPrecedesCompletion() {
+        Fixture f;
+        AsyncBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy changed(&b, &Backend::sessionChanged);
+        QSignalSpy forked(&b, &Backend::sessionForked);
+        bool metadataArrived = false, ordered = false;
+        connect(&b, &Backend::sessionChanged, this,
+                [&](const Session &s) { metadataArrived |= s.id == "fork-1"; });
+        connect(&b, &Backend::sessionForked, this, [&] { ordered = metadataArrived; });
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        b.forkSession("thread-1");
+        b.forkSession("thread-1"); // A second click cannot create a concurrent duplicate.
+        QTRY_COMPARE(forked.size(), 1);
+        QVERIFY(ordered);
+        QCOMPARE(forked.last()[0].toString(), "thread-1");
+        QCOMPARE(qvariant_cast<Session>(forked.last()[1]).id, "fork-1");
+        QVERIFY(forked.last()[2].toString().isEmpty());
+        QCOMPARE(f.methods.count("thread/fork"), 1);
+        QCOMPARE(f.forkParams, (QJsonObject{{"threadId", "thread-1"}, {"excludeTurns", true}}));
+        f.forkError = "Fork not supported";
+        b.forkSession("thread-1");
+        QTRY_COMPARE(forked.size(), 2);
+        QCOMPARE(forked.last()[2].toString(), f.forkError);
+        b.disconnectServer();
+    }
+    void forkRejectsSharedHistoryAndLostConnectionsAreNotRetried() {
+        Fixture f;
+        ProtocolFixtureBackend b(containerProfile(f));
+        QSignalSpy changed(&b, &Backend::sessionChanged);
+        QSignalSpy forked(&b, &Backend::sessionForked);
+        b.connectServer();
+        QTRY_VERIFY(!changed.isEmpty() && qvariant_cast<Session>(changed.last()[0]).known);
+        b.forkSession("thread-1");
+        QTRY_COMPARE(forked.size(), 1);
+        QVERIFY(forked.last()[2].toString().contains("shared history"));
+        QVERIFY(!f.methods.contains("thread/fork"));
+        b.forkSession("thread-1", "obsolete-environment");
+        QTRY_COMPARE(forked.size(), 2);
+        QVERIFY(forked.last()[2].toString().contains("shared history"));
+        b.forkSession("thread-1", b.profile.environmentId);
+        QTRY_COMPARE(forked.size(), 3);
+        QVERIFY(forked.last()[2].toString().isEmpty());
+        f.notify("thread/started", {{"thread", f.thread()}});
+        QTRY_VERIFY(qvariant_cast<Session>(changed.last()[0]).executionObserved);
+        b.forkSession("thread-1");
+        QTRY_COMPARE(forked.size(), 4);
+        QVERIFY(forked.last()[2].toString().isEmpty());
+        QVERIFY(qvariant_cast<Session>(forked.last()[1]).executionObserved);
+        f.delayRead = true;
+        b.forkSession("thread-1");
+        QTRY_VERIFY(!f.readId.isUndefined());
+        b.disconnectServer();
+        QCOMPARE(forked.size(), 5);
+        QVERIFY(forked.last()[2].toString().contains("result is unknown"));
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        QCOMPARE(f.methods.count("thread/fork"), 2);
+        b.disconnectServer();
+    }
     void cleanup() {
         QVERIFY(Worker::finishPending());
     }

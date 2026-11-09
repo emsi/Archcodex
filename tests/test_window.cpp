@@ -16,6 +16,7 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -49,6 +50,104 @@ QModelIndex serverNode(QTreeView *tree, int row = 0) {
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void contextMenusUseClickedRowsAndExpandOnlyTheirSubtree() {
+        Fixture first, second;
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            auto a = first.profile(), b = second.profile();
+            a.id = "first";
+            b.id = "second";
+            store.save(a);
+            store.save(b);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
+        for (auto *backend : window.findChildren<Backend *>())
+            backend->connectServer();
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        QTRY_COMPARE(serverNodes(tree).size(), 2);
+        auto server = [&](const QString &id) {
+            for (const auto &item : serverNodes(tree))
+                if (item.data(BackendRole).toString() == id)
+                    return item;
+            return QModelIndex{};
+        };
+        auto folder = [&](const QString &id) { return tree->model()->index(0, 0, server(id)); };
+        auto session = [&](const QString &id) { return tree->model()->index(0, 0, folder(id)); };
+        QTRY_COMPARE(session("first").data(ThreadRole).toString(), "thread-1");
+        QTRY_COMPARE(session("second").data(ThreadRole).toString(), "thread-1");
+        auto menuFor = [&](const QModelIndex &item) {
+            tree->scrollTo(item);
+            tree->customContextMenuRequested(tree->visualRect(item).center());
+            return QPointer<QMenu>(tree->findChild<QMenu *>("sessionContextMenu"));
+        };
+        auto labels = [](QMenu *menu) {
+            QStringList names;
+            for (auto *action : menu->actions())
+                names << action->text();
+            return names;
+        };
+        auto dispose = [](QMenu *menu) {
+            if (!menu)
+                return; // Triggering a popup action can already have closed/deleted it.
+            menu->hide();
+            delete menu;
+        };
+        for (const auto tab : {0, 2, 3}) {
+            if (tab == 2)
+                for (auto *backend : window.findChildren<Backend *>())
+                    backend->sessionChanged(Session::fromThread(
+                        backend->profile.id,
+                        {{"id", "thread-1"},
+                         {"cwd", "/work/project"},
+                         {"status",
+                          QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}}));
+            if (tab == 3)
+                for (auto *backend : window.findChildren<Backend *>())
+                    backend->sessionChanged(
+                        Session::fromThread(backend->profile.id, first.thread()));
+            tabs->setCurrentIndex(tab);
+            tree->expandAll();
+            QCOMPARE(server("first").parent().data(KindRole).toInt(), int(NodeKind::Group));
+            auto menu = menuFor(session("first"));
+            QVERIFY(menu);
+            QCOMPARE(labels(menu), (QStringList{"Fork", "New", "Close"}));
+            QVERIFY(menu->actions()[0]->isEnabled());
+            QVERIFY(menu->actions()[1]->isEnabled());
+            QVERIFY(!menu->actions()[2]->isEnabled());
+            dispose(menu);
+        }
+        tree->collapse(folder("first"));
+        tree->collapse(folder("second"));
+        auto menu = menuFor(folder("first"));
+        QCOMPARE(labels(menu), (QStringList{"New", "Expand All"}));
+        menu->actions().last()->trigger();
+        QVERIFY(tree->isExpanded(folder("first")));
+        QVERIFY(!tree->isExpanded(folder("second")));
+        dispose(menu);
+        for (const auto &parent : {server("first"), server("first").parent()}) {
+            menu = menuFor(parent);
+            QCOMPARE(labels(menu), QStringList{"Expand All"});
+            dispose(menu);
+        }
+        // The selected row differs from the right-clicked row. A preflight must
+        // target only the clicked server, even if its row moves while the menu is open.
+        tree->expandAll();
+        tree->setCurrentIndex(session("second"));
+        first.delayRead = true;
+        const auto reads = first.readIds.size();
+        const auto otherReads = second.readIds.size();
+        menu = menuFor(session("first"));
+        menu->actions().first()->trigger();
+        QTRY_COMPARE(first.readIds.size(), reads + 1);
+        QCOMPARE(second.readIds.size(), otherReads);
+        QVERIFY(!first.methods.contains("thread/fork"));
+        dispose(menu);
+        window.close();
+    }
     void localHostAndContainerHostsHaveSeparateGroupsWithShortLabels() {
         QTemporaryDir data;
         {
@@ -99,17 +198,30 @@ class WindowTests : public QObject {
         QCOMPARE(labels, (QSet<QString>{"alice @ workstation", "myCodex @ workstation",
                                         "myCodex @ remote-machine"}));
         const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
-        if (!screenshots.isEmpty()) {
+        for (const auto tab : {0, 3, 2}) {
             for (auto *backend : window.findChildren<Backend *>())
                 backend->sessionChanged(Session::fromThread(
-                    backend->profile.id, {{"id", "example"},
-                                          {"name", "Example session"},
-                                          {"cwd", "/work"},
-                                          {"path", "/saved/example"},
-                                          {"status", QJsonObject{{"type", "idle"}}}}));
+                    backend->profile.id,
+                    {{"id", "example"},
+                     {"name", "Example session"},
+                     {"cwd", "/work"},
+                     {"path", "/saved/example"},
+                     {"status", QJsonObject{{"type", tab == 2 ? "active" : "idle"},
+                                            {"activeFlags", QJsonArray{}}}}}));
+            window.findChild<QTabBar *>()->setCurrentIndex(tab);
+            QCOMPARE(tree->model()->rowCount(), 3);
+            for (int i = 0; i < 3; ++i) {
+                const auto group = tree->model()->index(i, 0);
+                QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
+                QVERIFY(labels.contains(group.data().toString()));
+                QCOMPARE(tree->model()->index(0, 0, group).data(KindRole).toInt(),
+                         int(NodeKind::Server));
+            }
             tree->expandAll();
-            QApplication::processEvents();
-            QVERIFY(window.grab().save(screenshots + "/host-groups.png"));
+            if (!screenshots.isEmpty()) {
+                QApplication::processEvents();
+                QVERIFY(window.grab().save(screenshots + QString("/host-groups-%1.png").arg(tab)));
+            }
         }
         window.close();
     }
@@ -515,6 +627,9 @@ class WindowTests : public QObject {
         auto folder = [&] { return tree->model()->index(0, 0, root()); };
         for (const auto tab : {2, 3}) {
             tabs->setCurrentIndex(tab);
+            QCOMPARE(root().parent().data(KindRole).toInt(), int(NodeKind::Group));
+            QVERIFY(!root().parent().parent().isValid());
+            QVERIFY(tree->isExpanded(root().parent()));
             QVERIFY(tree->isExpanded(root()));
             QVERIFY(tree->isExpanded(folder()));
             QCOMPARE(folder().data(Qt::DisplayRole).toString(), tab == 2 ? "build" : "Chats");
