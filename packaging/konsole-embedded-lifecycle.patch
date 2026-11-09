@@ -1,0 +1,63 @@
+--- a/src/session/Session.h
++++ b/src/session/Session.h
+@@ -857,6 +857,8 @@
+      * Emitted when the terminal process exits.
+      */
+     void finished(Session *session);
++    // Reports client exit even when the embedding application retains the view.
++    void processExited(int exitCode, bool crashed);
+ 
+     /**
+      * Emitted when one of certain session attributes has been changed.
+--- a/src/session/Session.cpp
++++ b/src/session/Session.cpp
+@@ -1131,6 +1131,7 @@
+     disconnect(_shellProcess, &Konsole::Pty::finished, this, &Konsole::Session::done);
+ #endif
+ 
++    Q_EMIT processExited(exitCode, exitStatus != QProcess::NormalExit);
+     if (!_autoClose) {
+         _userTitle = i18nc("@info:shell This session is done", "Finished");
+         Q_EMIT sessionAttributeChanged();
+--- a/src/Part.h
++++ b/src/Part.h
+@@ -74,6 +74,7 @@
+     Q_INVOKABLE void setContextMenuAdditionalActions(const QList<QAction *> &extension);
+ 
+ public Q_SLOTS:
++    void setAutoClose(bool enabled);
+     /**
+      * creates and run a session using the specified profile and directory
+      *
+@@ -143,6 +144,7 @@
+     bool isBlurEnabled();
+ 
+ Q_SIGNALS:
++    void terminalProcessExited(int exitCode, bool crashed);
+     /**
+      * Emitted when the key sequence for a shortcut, which is also a valid terminal key sequence,
+      * is pressed while the terminal has focus.  By responding to this signal, the
+--- a/src/Part.cpp
++++ b/src/Part.cpp
+@@ -114,6 +114,13 @@
+     activeSession()->run();
+ }
+ 
++void Part::setAutoClose(bool enabled)
++{
++    if (auto *session = activeSession()) {
++        session->setAutoClose(enabled);
++    }
++}
++
+ void Part::openTeletype(int ptyMasterFd, bool runShell)
+ {
+     Q_ASSERT(activeSession());
+@@ -254,6 +261,7 @@
+         session->setInitialWorkingDirectory(directory);
+     }
+ 
++    connect(session, &Session::processExited, this, &Part::terminalProcessExited);
+     auto newView = _viewManager->createView(session);
+     _viewManager->activeContainer()->addView(newView);
+ }

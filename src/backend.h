@@ -26,6 +26,7 @@ class Backend : public QObject {
     void connectionChanged(const QString &description, bool ready);
     void sessionChanged(const Archcodex::Session &session);
     void sessionRemoved(const QString &id);
+    void loadedInventory(const QSet<QString> &ids);
     void moreAvailable(bool available);
     void searchResults(quint64 token, const QList<Archcodex::Session> &sessions,
                        const QString &error, bool complete);
@@ -62,6 +63,7 @@ class CodexBackend : public Backend {
     QHash<QString, QJsonObject> statuses;
     QHash<QString, QString> names;
     QSet<QString> removed;
+    QSet<QString> loaded;
     QHash<QString, Session> sessions;
     QQueue<QString> reads;
     QSet<QString> scheduledReads;

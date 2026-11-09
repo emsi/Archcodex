@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QLabel>
 #include <QMetaObject>
+#include <QPushButton>
 #include <QStackedWidget>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -17,6 +18,18 @@ namespace Archcodex {
 TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStackedWidget(this)) {
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
+    exitBar = new QWidget(this);
+    auto *exitLayout = new QHBoxLayout(exitBar);
+    exitText = new QLabel;
+    exitText->setTextFormat(Qt::PlainText);
+    exitText->setWordWrap(true);
+    exitText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    exitLayout->addWidget(exitText, 1);
+    auto *retry = new QPushButton("Restart client");
+    retry->setObjectName("reconnectTerminal");
+    exitLayout->addWidget(retry);
+    exitBar->hide();
+    layout->addWidget(exitBar);
     layout->addWidget(stack);
     auto *label = new QLabel(
         "Select an existing session\n\nLocal Codex sessions are discovered automatically.\n"
@@ -26,13 +39,14 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     label->setTextFormat(Qt::PlainText);
     empty = label;
     stack->addWidget(empty);
-    connect(stack, &QStackedWidget::currentChanged, this, [this] {
-        for (auto it = parts.begin(); it != parts.end(); ++it)
-            if (it.value() && it.value()->widget() == stack->currentWidget()) {
-                emit currentChanged(titles.value(it.key()));
-                return;
-            }
-        emit currentChanged("No terminal selected");
+    connect(stack, &QStackedWidget::currentChanged, this, &TerminalArea::updateCurrent);
+    connect(retry, &QPushButton::clicked, this, [this] {
+        const auto key = currentKey();
+        if (key.isEmpty() || !exits.contains(key))
+            return;
+        QString error;
+        if (!launch(key, launches.value(key), titles.value(key), &error))
+            exitText->setText(error);
     });
 }
 TerminalArea::~TerminalArea() {
@@ -54,6 +68,16 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
         delete part;
         return nullptr;
     }
+    // Our pinned KPart exposes its existing hold-open facility and the PTY exit
+    // event. Never inspect foreground processes or infer exit from terminal text.
+    if (part->metaObject()->indexOfSignal("terminalProcessExited(int,bool)") < 0 ||
+        !QMetaObject::invokeMethod(part, "setAutoClose", Q_ARG(bool, false))) {
+        *error = "The Konsole component lacks Archcodex's terminal lifecycle support. Reinstall "
+                 "the matching package.";
+        delete part;
+        return nullptr;
+    }
+    connect(part, SIGNAL(terminalProcessExited(int, bool)), this, SLOT(processExited(int, bool)));
     QMetaObject::invokeMethod(part, "setMonitorSilenceEnabled", Q_ARG(bool, false));
     QMetaObject::invokeMethod(part, "setMonitorActivityEnabled", Q_ARG(bool, false));
     const auto disableTracking = [](auto &&self, KXMLGUIClient *client) -> void {
@@ -73,11 +97,12 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
         for (auto it = parts.begin(); it != parts.end();)
             if (it.value().isNull()) {
                 titles.remove(it.key());
+                launches.remove(it.key());
+                exits.remove(it.key());
                 it = parts.erase(it);
             } else
                 ++it;
-        if (stack->currentWidget() == empty)
-            emit currentChanged("No terminal selected");
+        updateCurrent();
     });
     return part;
 }
@@ -87,21 +112,14 @@ bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *erro
         return false;
     }
     const auto key = sessionKey(p.id, s.id);
-    titles[key] = s.title + "  ·  " + p.name + "  ·  " + s.cwd;
+    const auto title = s.title + "  ·  " + p.name + "  ·  " + s.cwd;
     auto *part = parts.value(key).data();
-    if (!part) {
-        part = create(error);
-        if (!part)
-            return false;
-        parts[key] = part;
-        // Konsole handles the Flatpak host boundary itself. The constant shell wrapper
-        // preserves argv exactly and lets the host resolve its configured Codex executable.
-        qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh",
-                                                              terminalArguments(p, s.id));
-    }
+    if (!part)
+        return launch(key, terminalArguments(p, s.id), title, error);
+    titles[key] = title;
     stack->setCurrentWidget(part->widget());
     part->widget()->setFocus();
-    emit currentChanged(s.title + "  ·  " + p.name + "  ·  " + s.cwd);
+    updateCurrent();
     return true;
 }
 bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QString *error) {
@@ -109,25 +127,64 @@ bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QStr
         *error = "Select a project with an absolute working directory.";
         return false;
     }
+    const auto key = sessionKey(p.id, "new-" + QUuid::createUuid().toString());
+    return launch(key,
+                  {"/bin/sh", "-c", "exec \"$@\"", "archcodex", p.executable, "--remote",
+                   p.endpoint(), "--cd", path},
+                  "New session · " + p.name + " · " + path, error);
+}
+bool TerminalArea::launch(const QString &key, const QStringList &arguments, const QString &title,
+                          QString *error) {
     auto *part = create(error);
     if (!part)
         return false;
-    const auto key = sessionKey(p.id, "new-" + QUuid::createUuid().toString());
+    auto *old = parts.value(key).data();
     parts[key] = part;
-    titles[key] = "New session · " + p.name + " · " + path;
-    qobject_cast<TerminalInterface *>(part)->startProgram(
-        "/bin/sh", {"/bin/sh", "-c", "exec \"$@\"", "archcodex", p.executable, "--remote",
-                    p.endpoint(), "--cd", path});
+    titles[key] = title;
+    launches[key] = arguments;
+    exits.remove(key);
+    // Konsole already handles the Flatpak host boundary. Arguments stay separate.
+    qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh", arguments);
     stack->setCurrentWidget(part->widget());
+    delete old;
     part->widget()->setFocus();
-    emit currentChanged("New session · " + p.name + " · " + path);
+    updateCurrent();
     return true;
+}
+QString TerminalArea::currentKey() const {
+    for (auto it = parts.cbegin(); it != parts.cend(); ++it)
+        if (it.value() && it.value()->widget() == stack->currentWidget())
+            return it.key();
+    return {};
+}
+void TerminalArea::updateCurrent() {
+    const auto key = currentKey();
+    exitText->setText(exits.value(key));
+    exitBar->setVisible(exits.contains(key));
+    emit currentChanged(titles.value(key, "No terminal selected"));
+}
+void TerminalArea::processExited(int exitCode, bool crashed) {
+    for (auto it = parts.cbegin(); it != parts.cend(); ++it)
+        if (it.value() == sender()) {
+            const auto key = it.key();
+            exits[key] =
+                crashed ? "Terminal client crashed. Its output is retained below."
+                : exitCode
+                    ? QString("Terminal client exited with code %1. Its output is retained below.")
+                          .arg(exitCode)
+                    : "Terminal client closed. Its output is retained below.";
+            updateCurrent();
+            emit clientExited(key, exitCode, crashed);
+            return;
+        }
 }
 void TerminalArea::closeCurrent() {
     for (auto it = parts.begin(); it != parts.end(); ++it)
         if (it.value() && it.value()->widget() == stack->currentWidget()) {
             auto *part = it.value().data();
             titles.remove(it.key());
+            launches.remove(it.key());
+            exits.remove(it.key());
             parts.erase(it);
             stack->setCurrentWidget(empty);
             delete part;
@@ -140,6 +197,8 @@ void TerminalArea::closeBackend(const QString &backend) {
     for (auto it = parts.begin(); it != parts.end();)
         if (it.key().startsWith(backend + QChar(0x1f))) {
             titles.remove(it.key());
+            launches.remove(it.key());
+            exits.remove(it.key());
             if (it.value())
                 doomed << it.value();
             it = parts.erase(it);

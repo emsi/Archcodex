@@ -36,6 +36,8 @@ struct Session {
     qint64 opened = 0;
     bool known = false;
     bool isActive() const;
+    bool isRunning() const;
+    bool isWaiting() const;
     QString stateText() const;
     int attention() const;
     static Session fromThread(const QString &backend, const QJsonObject &thread);

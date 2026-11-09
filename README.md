@@ -1,13 +1,15 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.2.0** implements the first backend: **existing local Unix-socket
+Version **0.2.1** implements the first backend: **existing local Unix-socket
 app-servers**. Remote TCP, SSH and myCodex are later stages.
 
 Its primary workflow is returning to **existing Codex sessions**. On startup it
 discovers the current user’s host-visible local Codex servers and loads their
 sessions. Projects are working-directory groups; no project creation is needed.
-It provides All/Active views, conversation search and the existing Codex TUI.
+It provides All, Active, Running and Waiting for input views, conversation search
+and the existing Codex TUI. Active includes live sessions at an idle prompt.
+Exited terminal clients retain their output and offer an explicit restart.
 Session and project indicators reflect **server events, without status
 polling**. Multiple local servers can be connected independently.
 
@@ -18,13 +20,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.2.0-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.2.1-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.2.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.2.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -76,7 +78,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 The full native build additionally requires KDE Frameworks 6 and the Konsole
-KPart at runtime. The Flatpak supplies those components.
+KPart with the lifecycle patch in `packaging/` at runtime. The Flatpak supplies
+the matching components; an unpatched system KPart is rejected with an explicit
+capability error.
 
 ## Design documents
 
@@ -88,8 +92,8 @@ KPart at runtime. The Flatpak supplies those components.
   proposed permissions and packaging checks.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
-  sessions, and All/Active navigation tabs.
-- [Implementation and testing](docs/implementation.md): what 0.2.0 delivers and
+  sessions, and the four session filters.
+- [Implementation and testing](docs/implementation.md): what 0.2.1 delivers and
   how to exercise it on your host.
 
 ## Project status

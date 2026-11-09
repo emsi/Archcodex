@@ -391,3 +391,66 @@ tests should verify that an idle connected GUI sends no periodic status RPCs.
 The original documentation milestone made no implementation changes. The later
 [initial implementation](implementation.md) adds application code and Flatpak
 packaging. myCodex remains unchanged.
+
+## 12. Stack reassessment after the first host tests (2026-11-09)
+
+Recommendation: keep C++20 and Qt Widgets for the UI, with narrowly scoped
+Konsole integration. There is no reason in these findings to introduce C as an
+application language or to rewrite the GUI. This is an engineering judgement,
+not a claim that C++ prevents UI bugs.
+
+The reported Active behaviour was a domain-model error: protocol `active` means
+a busy turn, while the product needs a broader live-session view. It would be
+possible to make the same error in Rust or Python. See the corrected predicates
+and edge cases in [UI design](ui.md).
+
+The disappearing terminal was reproduced using a disposable client that exits
+with code 7: the original KPart destroyed its view, exposing the previously open
+view, and produced both reported warning messages. Retaining the KPart's terminal
+on process exit preserves its output and allows an explicit restart. This is an
+embedding/lifecycle problem. The specific reason the user's Codex client exits
+on their host is not established by that reproduction; the retained output is
+needed to diagnose it. The `Finished` warning comes from Konsole's error-exit
+notification using the embedding application's name, which has no such notifyrc.
+The null-disconnect warning was reproduced but its exact internal call site was
+not captured (it did not occur under the debugger). Both warnings are absent in
+the corrected regression case; none are globally filtered out.
+
+The tree also performed redundant icon/data updates. The corrected model emits
+only changed roles, together, and the tooltip remains a stable, escaped snapshot
+anchored beside its row. These are concrete improvements, not proof of the exact
+cause of the user's KDE tooltip flicker: theme/compositor and real pointer testing
+on that host remain relevant. Qt explicitly separates data models, views and
+delegates, and exposes region-anchored tooltips; changing implementation language
+would not change those mechanics. Sources: [Qt model/view documentation](https://doc.qt.io/qt-6/model-view-programming.html),
+[QToolTip](https://doc.qt.io/qt-6/qtooltip.html).
+
+| Option | Fit for this project | Cost and recommendation |
+| --- | --- | --- |
+| C++20 + Qt Widgets/KDE | Direct access to the selected widgets, KParts and terminal interface; one native UI toolchain. | Keep it. Requires careful ownership, event ordering and integration tests. |
+| Rust core + small C++ Qt UI | Useful if protocol, transport or concurrent processing grows; keeps the existing terminal. | A future option, not an immediate requirement. Adds a language boundary and build integration. |
+| Python + PySide6 | Official Qt bindings and quick iteration on ordinary widgets. | Retains Qt's behaviour; KDE/Konsole C++ interfaces still need integration/bindings. It does not automatically remove these bugs. |
+| Rust + GTK/VTE | A credible native Linux alternative with a terminal widget. | Changes the toolkit, KDE integration approach and terminal implementation together. Consider only if those product priorities change. |
+
+Qt's parent ownership and guarded references help manage widget lifetimes, but
+C++ still has memory-safety risks and callback/destruction ordering needs review.
+Keep protocol work asynchronous, store thread identity independently of a view,
+and avoid timers or renderer activity as substitutes for backend events. Use
+actual PTY and GUI regression tests alongside protocol tests; static inspection
+or a successful build cannot prove interaction quality. Source:
+[Qt object ownership](https://doc.qt.io/qt-6/objecttrees.html).
+
+CXX-Qt bridges Rust and Qt rather than supplying a complete one-to-one replacement
+for every KDE C++ API. PySide6 supplies Qt bindings, not an automatic binding for
+an arbitrary KPart plugin interface. These options improve some development
+tradeoffs without eliminating integration work. Sources:
+[CXX-Qt documentation](https://kdab.github.io/cxx-qt/book/),
+[Qt for Python](https://doc.qt.io/qtforpython-6/),
+[VTE GTK4 API](https://gnome.pages.gitlab.gnome.org/vte/gtk4/).
+
+The weakest boundary here is the narrow public Konsole KPart lifecycle API.
+Version 0.2.1 adds a small pinned patch exposing the existing hold-open setting
+and a process-exit signal. This is a maintenance dependency: rebuild the matching
+plugin with the application and review the patch when upgrading Konsole. No
+terminal parser, renderer, shell-output status detector or framework rewrite is
+introduced. No JavaScript/TypeScript UI is introduced.

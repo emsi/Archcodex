@@ -24,6 +24,18 @@ static QIcon dot(int attention) {
 SessionModel::SessionModel(QObject *parent) : QStandardItemModel(parent) {
     setHorizontalHeaderLabels({"Projects and sessions"});
 }
+void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
+    // QStandardItemModel::setItemData emits even for an identical map. Send one
+    // notification containing only actual changes; don't invalidate hover/sort
+    // state for duplicate snapshots or status events.
+    for (auto it = values.begin(); it != values.end();)
+        if (item->data(it.key()) == it.value())
+            it = values.erase(it);
+        else
+            ++it;
+    if (!values.isEmpty())
+        setItemData(item->index(), values);
+}
 void SessionModel::backendName(const QString &id, const QString &name) {
     backendNames[id] = name;
     for (auto *p : projects)
@@ -68,7 +80,7 @@ void SessionModel::project(const Project &p) {
     }
 }
 void SessionModel::aggregate(QStandardItem *p) {
-    int active = 0, waiting = 0, unknown = 0, attention = 0;
+    int active = 0, running = 0, waiting = 0, unknown = 0, attention = 0;
     qint64 recency = 0;
     QSet<QString> backends;
     for (int i = 0; i < p->rowCount(); ++i) {
@@ -77,29 +89,38 @@ void SessionModel::aggregate(QStandardItem *p) {
         const int a = s->data(AttentionRole).toInt();
         attention = std::max(attention, a);
         active += s->data(ActiveRole).toBool();
-        waiting += a == 4;
+        running += s->data(RunningRole).toBool();
+        waiting += s->data(WaitingRole).toBool();
         unknown += a == 0;
         recency = std::max(recency, s->data(RecencyRole).toLongLong());
     }
-    p->setData(active > 0, ActiveRole);
     auto ids = backends.values();
     ids.sort();
-    p->setData(ids, BackendsRole);
-    p->setData(ids.size() == 1 ? ids.first() : QString(), BackendRole);
     const auto location = p->data(EnvironmentRole).toString() == "local-host"
                               ? QString("This host")
                               : backendNames.value(ids.value(0), ids.value(0));
-    p->setText(p->data(ProjectNameRole).toString() + "  ·  " + location);
-    p->setData(recency, RecencyRole);
-    p->setIcon(dot(attention));
-    const auto detail = QString("%1\n%2 sessions · %3 active/last active · %4 waiting · %5 unknown")
-                            .arg(p->data(PathRole).toString())
-                            .arg(p->rowCount())
-                            .arg(active)
-                            .arg(waiting)
-                            .arg(unknown);
-    p->setToolTip(detail);
-    p->setData(detail, Qt::AccessibleDescriptionRole);
+    const auto detail =
+        QString("%1\n%2 sessions · %3 active/last active · %4 running · %5 waiting · %6 unknown")
+            .arg(p->data(PathRole).toString())
+            .arg(p->rowCount())
+            .arg(active)
+            .arg(running)
+            .arg(waiting)
+            .arg(unknown);
+    QMap<int, QVariant> values{
+        {ActiveRole, active > 0},
+        {RunningRole, running > 0},
+        {WaitingRole, waiting > 0},
+        {BackendsRole, ids},
+        {BackendRole, ids.size() == 1 ? ids.first() : QString()},
+        {Qt::DisplayRole, p->data(ProjectNameRole).toString() + "  ·  " + location},
+        {RecencyRole, recency},
+        {AttentionRole, attention},
+        {Qt::ToolTipRole, detail},
+        {Qt::AccessibleDescriptionRole, detail}};
+    if (p->data(AttentionRole) != attention)
+        values[Qt::DecorationRole] = dot(attention);
+    updateItem(p, values);
 }
 void SessionModel::prune(QStandardItem *p) {
     if (p->rowCount())
@@ -113,30 +134,39 @@ void SessionModel::upsert(const Session &s) {
     const auto key = sessionKey(s.backendId, s.id);
     auto *p = ensureProject(s.backendId, s.cwd);
     auto *item = threads.value(key, nullptr);
-    if (!item) {
+    const bool fresh = !item;
+    if (fresh) {
         item = new QStandardItem;
         item->setEditable(false);
-        p->appendRow(item);
         threads[key] = item;
     } else if (item->parent() != p) {
         auto *old = item->parent();
         p->appendRow(old->takeRow(item->row()));
         prune(old);
     }
-    item->setText(s.title);
-    item->setIcon(dot(s.attention()));
-    item->setData(key, KeyRole);
-    item->setData(s.backendId, BackendRole);
-    item->setData(environment(s.backendId), EnvironmentRole);
-    item->setData(s.cwd, PathRole);
-    item->setData(s.id, ThreadRole);
-    item->setData(s.isActive(), ActiveRole);
-    item->setData(std::max(s.opened, s.recency), RecencyRole);
-    item->setData(s.attention(), AttentionRole);
     const auto detail =
         s.stateText() + "\n" + s.cwd + "\n" + backendNames.value(s.backendId) + " · " + s.id;
-    item->setToolTip(detail);
-    item->setData(s.title + " — " + s.stateText(), Qt::AccessibleTextRole);
+    QMap<int, QVariant> values{{Qt::DisplayRole, s.title},
+                               {KeyRole, key},
+                               {BackendRole, s.backendId},
+                               {EnvironmentRole, environment(s.backendId)},
+                               {PathRole, s.cwd},
+                               {ThreadRole, s.id},
+                               {ActiveRole, s.isActive()},
+                               {RunningRole, s.isRunning()},
+                               {WaitingRole, s.isWaiting()},
+                               {RecencyRole, std::max(s.opened, s.recency)},
+                               {AttentionRole, s.attention()},
+                               {Qt::ToolTipRole, detail},
+                               {Qt::AccessibleTextRole, s.title + " — " + s.stateText()}};
+    if (item->data(AttentionRole) != s.attention())
+        values[Qt::DecorationRole] = dot(s.attention());
+    if (fresh) {
+        for (auto it = values.cbegin(); it != values.cend(); ++it)
+            item->setData(it.value(), it.key());
+        p->appendRow(item);
+    } else
+        updateItem(item, values);
     aggregate(p);
 }
 void SessionModel::remove(const QString &backend, const QString &id) {
@@ -165,14 +195,19 @@ SessionFilter::SessionFilter(QObject *parent) : QSortFilterProxyModel(parent) {
     setDynamicSortFilter(true);
     sort(0, Qt::DescendingOrder);
 }
-void SessionFilter::setActiveOnly(bool active) {
-    activeOnly = active;
+void SessionFilter::setView(View value) {
+    if (view == value)
+        return;
+    view = value;
     invalidate();
 }
 bool SessionFilter::filterAcceptsRow(int row, const QModelIndex &parent) const {
-    if (!activeOnly)
+    if (view == View::All)
         return true;
-    return sourceModel()->index(row, 0, parent).data(ActiveRole).toBool();
+    const auto role = view == View::Active    ? ActiveRole
+                      : view == View::Running ? RunningRole
+                                              : WaitingRole;
+    return sourceModel()->index(row, 0, parent).data(role).toBool();
 }
 bool SessionFilter::lessThan(const QModelIndex &a, const QModelIndex &b) const {
     const auto x = a.data(RecencyRole).toLongLong(), y = b.data(RecencyRole).toLongLong();

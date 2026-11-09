@@ -83,6 +83,7 @@ void CodexBackend::connectServer() {
     statuses.clear();
     names.clear();
     removed.clear();
+    loaded.clear();
     nextCursor.clear();
     for (auto &s : sessions) {
         s.known = false;
@@ -225,8 +226,9 @@ void CodexBackend::message(const QJsonObject &m) {
         failed("Server sent an invalid thread identifier.");
         return;
     }
-    if (method == "thread/status/changed" && !id.isEmpty()) {
-        statuses[id] = p["status"].toObject();
+    if ((method == "thread/status/changed" || method == "thread/closed") && !id.isEmpty()) {
+        statuses[id] =
+            method == "thread/closed" ? QJsonObject{{"type", "notLoaded"}} : p["status"].toObject();
         if (sessions.contains(id)) {
             auto &s = sessions[id];
             s.status = statuses[id];
@@ -234,9 +236,13 @@ void CodexBackend::message(const QJsonObject &m) {
             emit sessionChanged(s);
         } else
             readThread(id);
-    } else if (method == "thread/started")
-        upsert(p["thread"].toObject());
-    else if (method == "thread/name/updated" || method == "thread/nameUpdated") {
+    } else if (method == "thread/started") {
+        const auto thread = p["thread"].toObject();
+        const auto startedId = thread["id"].toString();
+        if (thread["status"].isObject())
+            statuses[startedId] = thread["status"].toObject();
+        upsert(thread);
+    } else if (method == "thread/name/updated" || method == "thread/nameUpdated") {
         names[id] = p["threadName"].toString();
         if (sessions.contains(id)) {
             sessions[id].title = names[id];
@@ -309,11 +315,36 @@ void CodexBackend::loadedPage(const QString &cursor) {
                                    true);
             return;
         }
-        for (const auto &id : r["data"].toArray())
+        for (const auto &id : r["data"].toArray()) {
+            loaded.insert(id.toString());
             readThread(id.toString());
+        }
         const auto next = r["nextCursor"].toString();
-        if (!next.isEmpty() && next != cursor)
+        if (!next.isEmpty() && next == cursor) {
+            emit connectionChanged(
+                "Connected — loaded-session inventory repeated a page; coverage is incomplete",
+                true);
+            return;
+        }
+        if (!next.isEmpty())
             loadedPage(next);
+        else {
+            // Only reconcile after the complete inventory, never after an error
+            // or a partial page. Events received during it take precedence.
+            for (auto it = statuses.cbegin(); it != statuses.cend(); ++it) {
+                if (it.value()["type"] == "notLoaded")
+                    loaded.remove(it.key());
+                else
+                    loaded.insert(it.key());
+            }
+            for (auto &s : sessions)
+                if (!s.known && !loaded.contains(s.id)) {
+                    s.status = {{"type", "notLoaded"}};
+                    s.known = true;
+                    emit sessionChanged(s);
+                }
+            emit loadedInventory(loaded);
+        }
     });
 }
 void CodexBackend::readThread(const QString &id) {

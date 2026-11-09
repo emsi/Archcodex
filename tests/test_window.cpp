@@ -1,15 +1,68 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "discovery.h"
 #include "fixture.h"
+#include "sessionmodel.h"
 #include "window.h"
 #include <QComboBox>
+#include <QHelpEvent>
 #include <QLineEdit>
+#include <QTabBar>
+#include <QToolTip>
 #include <QTreeView>
 #include <QtTest>
 
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void viewsFollowEventsAndPreserveNavigation() {
+        Fixture fixture;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        window.show();
+        window.findChild<HostDiscovery *>()->snapshot(
+            {QJsonObject{{"path", fixture.path()}, {"hostEnvironment", true}}}, {});
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        QCOMPARE(tabs->count(), 4);
+        QTRY_COMPARE(tree->model()->rowCount(), 1);
+        auto project = [&] { return tree->model()->index(0, 0); };
+        QTRY_COMPARE(tree->model()->rowCount(project()), 1);
+        tree->expand(project());
+        tree->setCurrentIndex(tree->model()->index(0, 0, project()));
+        tabs->setCurrentIndex(1);
+        QCOMPARE(tree->model()->rowCount(), 1);
+        QVERIFY(tree->isExpanded(project()));
+        QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "thread-1");
+        tabs->setCurrentIndex(2);
+        QCOMPARE(tree->model()->rowCount(), 0);
+        tabs->setCurrentIndex(3);
+        QCOMPARE(tree->model()->rowCount(), 1);
+        fixture.notify(
+            "thread/status/changed",
+            {{"threadId", "thread-1"},
+             {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        QTRY_COMPARE(tree->model()->rowCount(), 0);
+        tabs->setCurrentIndex(2);
+        QCOMPARE(tree->model()->rowCount(), 1);
+        // Tooltips keep a stable snapshot while events arrive under the pointer.
+        const auto pos = tree->visualRect(project()).center();
+        QHelpEvent help(QEvent::ToolTip, pos, tree->viewport()->mapToGlobal(pos));
+        QApplication::sendEvent(tree->viewport(), &help);
+        QVERIFY(QToolTip::isVisible());
+        const auto tip = QToolTip::text();
+        fixture.notify("thread/status/changed",
+                       {{"threadId", "thread-1"}, {"status", QJsonObject{{"type", "idle"}}}});
+        tabs->setCurrentIndex(1);
+        QTRY_VERIFY(tree->model()->index(0, 0, project()).data(WaitingRole).toBool());
+        QApplication::sendEvent(tree->viewport(), &help);
+        QCOMPARE(QToolTip::text(), tip);
+        QToolTip::hideText();
+        fixture.notify("thread/closed", {{"threadId", "thread-1"}});
+        QTRY_COMPARE(tree->model()->rowCount(), 0);
+        tabs->setCurrentIndex(0);
+        QCOMPARE(tree->model()->rowCount(), 1);
+        window.close();
+    }
     void discoveryOpensExistingSessionsWithoutProjectSetup() {
         Fixture first, second;
         first.loaded = {"older-loaded-session"};

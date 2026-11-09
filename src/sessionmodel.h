@@ -12,6 +12,8 @@ enum ModelRole {
     PathRole,
     ThreadRole,
     ActiveRole,
+    RunningRole,
+    WaitingRole,
     RecencyRole,
     AttentionRole,
     ProjectNameRole,
@@ -36,17 +38,19 @@ class SessionModel : public QStandardItemModel {
     QStandardItem *ensureProject(const QString &backend, const QString &path);
     void aggregate(QStandardItem *project);
     void prune(QStandardItem *project);
+    void updateItem(QStandardItem *item, QMap<int, QVariant> values);
 };
 class SessionFilter : public QSortFilterProxyModel {
   public:
+    enum class View { All, Active, Running, Waiting };
     explicit SessionFilter(QObject *parent = nullptr);
-    void setActiveOnly(bool active);
+    void setView(View view);
 
   protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override;
     bool lessThan(const QModelIndex &left, const QModelIndex &right) const override;
 
   private:
-    bool activeOnly = false;
+    View view = View::All;
 };
 } // namespace Archcodex

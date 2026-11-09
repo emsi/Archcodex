@@ -78,7 +78,8 @@ class CoreTests : public QObject {
         QSignalSpy updates(&b, &Backend::sessionChanged);
         b.connectServer();
         QTRY_VERIFY_WITH_TIMEOUT(b.ready() && !updates.isEmpty(), 5000);
-        QCOMPARE(qvariant_cast<Session>(updates.last().at(0)).stateText(), "Idle");
+        QCOMPARE(qvariant_cast<Session>(updates.last().at(0)).stateText(),
+                 "Waiting for input — ready for a prompt");
         f.notify("thread/status/changed",
                  {{"threadId", "thread-1"},
                   {"status", QJsonObject{{"type", "active"},
@@ -109,6 +110,22 @@ class CoreTests : public QObject {
         QVERIFY(qvariant_cast<Session>(updates.last().at(0)).isActive());
         b.disconnectServer();
     }
+    void closedThreadAndRestartOverrideOldSnapshots() {
+        Fixture f;
+        f.delaySnapshot = true;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy updates(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(!f.snapshotId.isUndefined());
+        f.notify("thread/closed", {{"threadId", "thread-1"}});
+        f.reply(f.snapshotId, {{"data", QJsonArray{f.thread()}}});
+        QTRY_VERIFY(!updates.isEmpty());
+        QTest::qWait(100);
+        QVERIFY(!qvariant_cast<Session>(updates.last().at(0)).isActive());
+        f.notify("thread/started", {{"thread", f.thread()}});
+        QTRY_VERIFY(qvariant_cast<Session>(updates.last().at(0)).isWaiting());
+        b.disconnectServer();
+    }
     void removedThreadDoesNotReappearFromSnapshot() {
         Fixture f;
         f.delaySnapshot = true;
@@ -133,6 +150,40 @@ class CoreTests : public QObject {
         QCOMPARE(results[0][0].toULongLong(), 42);
         QCOMPARE(results[1][3].toBool(), true);
         QCOMPARE(f.methods.count("thread/search"), 2);
+        b.disconnectServer();
+    }
+    void reconnectReconcilesOldLiveRows_data() {
+        QTest::addColumn<bool>("inventoryFails");
+        QTest::newRow("complete") << false;
+        QTest::newRow("unavailable") << true;
+    }
+    void reconnectReconcilesOldLiveRows() {
+        QFETCH(bool, inventoryFails);
+        Fixture f;
+        f.loaded = {"old-thread"};
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        Session old;
+        connect(&b, &Backend::sessionChanged, this, [&](const Session &s) {
+            if (s.id == "old-thread")
+                old = s;
+        });
+        b.connectServer();
+        QTRY_VERIFY(old.known && old.isWaiting());
+        b.disconnectServer();
+        QVERIFY(!old.known);
+        QVERIFY(old.isActive());
+        f.loaded.clear();
+        f.failLoadedInventory = inventoryFails;
+        b.connectServer();
+        QTRY_COMPARE(f.methods.count("thread/loaded/list"), 2);
+        if (inventoryFails) {
+            QTest::qWait(100);
+            QVERIFY(!old.known);
+            QVERIFY(old.isActive());
+        } else {
+            QTRY_VERIFY(old.known);
+            QVERIFY(!old.isActive());
+        }
         b.disconnectServer();
     }
     void disconnectMarksUnknown() {

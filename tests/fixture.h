@@ -20,6 +20,7 @@ class Fixture : public QObject {
     QStringList methods;
     QStringList loaded;
     bool delaySnapshot = false;
+    bool failLoadedInventory = false;
     QJsonValue snapshotId = QJsonValue::Undefined;
     Fixture() {
         if (!server.listen(QHostAddress::LocalHost, 0) || !local.listen(path()))
@@ -53,9 +54,18 @@ class Fixture : public QObject {
                     else
                         reply(m["id"],
                               {{"data", QJsonArray{thread()}}, {"nextCursor", QJsonValue::Null}});
-                } else if (method == "thread/loaded/list")
-                    reply(m["id"], {{"data", QJsonArray::fromStringList(loaded)}});
-                else if (method == "thread/read")
+                } else if (method == "thread/loaded/list") {
+                    if (failLoadedInventory)
+                        peer->sendTextMessage(QString::fromUtf8(
+                            QJsonDocument(
+                                QJsonObject{
+                                    {"id", m["id"]},
+                                    {"error", QJsonObject{{"code", -32601},
+                                                          {"message", "Inventory unavailable"}}}})
+                                .toJson()));
+                    else
+                        reply(m["id"], {{"data", QJsonArray::fromStringList(loaded)}});
+                } else if (method == "thread/read")
                     reply(m["id"],
                           {{"thread", thread(m["params"].toObject()["threadId"].toString())}});
                 else if (method == "thread/search") {

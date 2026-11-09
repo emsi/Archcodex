@@ -13,6 +13,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFormLayout>
+#include <QHelpEvent>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
@@ -25,12 +26,47 @@
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabBar>
+#include <QToolTip>
 #include <QTreeView>
 #include <QUuid>
 #include <QVBoxLayout>
 #include <algorithm>
 
 namespace Archcodex {
+namespace {
+// Keep help beside the navigator, anchored to the row rather than the pointer,
+// and keep its text stable while metadata changes underneath it.
+class SessionTree : public QTreeView {
+    QPersistentModelIndex tooltipIndex;
+
+  protected:
+    bool viewportEvent(QEvent *event) override {
+        if (event->type() != QEvent::ToolTip)
+            return QTreeView::viewportEvent(event);
+        auto *help = static_cast<QHelpEvent *>(event);
+        const auto index = indexAt(help->pos());
+        if (!index.isValid()) {
+            QToolTip::hideText();
+            tooltipIndex = QPersistentModelIndex();
+            return true;
+        }
+        if (tooltipIndex != index || !QToolTip::isVisible()) {
+            tooltipIndex = index;
+            const auto rect = visualRect(index);
+            const auto text =
+                index.data(Qt::ToolTipRole).toString().toHtmlEscaped().replace('\n', "<br>");
+            QToolTip::showText(viewport()->mapToGlobal(QPoint(viewport()->width() + 8, rect.top())),
+                               "<p>" + text + "</p>", viewport(), rect);
+        }
+        return true;
+    }
+};
+const QStringList viewDescriptions{
+    "All sessions, including saved history. Hollow dots mean unknown state.",
+    "Live sessions, including idle prompts and errors. Hollow dots mean last-known active.",
+    "Sessions currently executing a turn.",
+    "Live sessions ready for a prompt, an answer or an approval."};
+} // namespace
 Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(directory) {
     if (!QDir(directory).exists()) {
         if (!QDir().mkpath(directory))
@@ -65,6 +101,10 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tabs = new QTabBar;
     tabs->addTab("All");
     tabs->addTab("Active");
+    tabs->addTab("Running");
+    tabs->addTab("Waiting for input");
+    for (int i = 0; i < tabs->count(); ++i)
+        tabs->setTabToolTip(i, viewDescriptions[i]);
     tabs->setExpanding(false);
     left->addWidget(tabs);
     searchBox = new QLineEdit;
@@ -85,7 +125,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     notice->setTextFormat(Qt::PlainText);
     notice->setWordWrap(true);
     left->addWidget(notice);
-    tree = new QTreeView;
+    tree = new SessionTree;
     tree->setModel(filter);
     tree->setHeaderHidden(true);
     tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -102,18 +142,22 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 saved << idx.data(KeyRole).toString();
         }
         expanded[previousTab] = saved;
-        filter->setActiveOnly(index == 1);
+        const auto selectedKey = tree->currentIndex().data(KeyRole).toString();
+        filter->setView(static_cast<SessionFilter::View>(index));
         tree->collapseAll();
         for (int i = 0; i < filter->rowCount(); ++i) {
             auto idx = filter->index(i, 0);
-            if (expanded.value(index).contains(idx.data(KeyRole).toString()))
+            if (expanded.value(index, saved).contains(idx.data(KeyRole).toString()))
                 tree->expand(idx);
+            for (int j = 0; j < filter->rowCount(idx); ++j) {
+                const auto child = filter->index(j, 0, idx);
+                if (child.data(KeyRole).toString() == selectedKey)
+                    tree->setCurrentIndex(child);
+            }
         }
         previousTab = index;
         if (!searchingView)
-            notice->setText(index == 1
-                                ? "Running or waiting for input. Hollow dots mean unknown state."
-                                : "Projects and sessions, most recently used first.");
+            updateSummary();
     });
     loadMore = new QPushButton("Load more history");
     loadMore->setEnabled(false);
@@ -140,7 +184,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     right->addWidget(terminal, 1);
     splitter->addWidget(workspace);
     splitter->setStretchFactor(1, 1);
-    splitter->setSizes({310, 840});
+    splitter->setSizes({390, 760});
     connect(close, &QPushButton::clicked, terminal, &TerminalArea::closeCurrent);
     connect(terminal, &TerminalArea::currentChanged, terminalTitle, &QLabel::setText);
     connections = new QLabel;
@@ -263,6 +307,21 @@ void Window::attach(const BackendProfile &p, bool start) {
     auto *b =
         new LocalBackend(p, QCoreApplication::applicationDirPath() + "/archcodex-bridge", this);
     backends[p.id] = b;
+    connect(b, &Backend::loadedInventory, this, [this, id = p.id](const QSet<QString> &loaded) {
+        // Cached rows outside the first history page also need reconciliation.
+        for (auto &s : sessions)
+            if (s.backendId == id && !s.known && !loaded.contains(s.id)) {
+                s.status = {{"type", "notLoaded"}};
+                s.known = true;
+                model->upsert(s);
+                persist([&] { store->save(s); });
+                const auto key = sessionKey(id, s.id);
+                if (searchSessions.contains(key)) {
+                    searchSessions[key] = s;
+                    results->upsert(s);
+                }
+            }
+    });
     connect(b, &Backend::connectionChanged, this,
             [this, id = p.id](const QString &text, bool ready) {
                 connectionStates[id] = text;
@@ -350,9 +409,8 @@ void Window::updateSummary() {
     connections->setText(QString("%1 / %2 connections ready").arg(count).arg(profiles.size()));
     connections->setToolTip(descriptions.join('\n'));
     if (!searchingView)
-        notice->setText(discoveryMessage.isEmpty()
-                            ? "Projects group existing sessions by working directory."
-                            : discoveryMessage);
+        notice->setText(viewDescriptions[tabs->currentIndex()] +
+                        (discoveryMessage.isEmpty() ? QString() : "\n" + discoveryMessage));
     emit connectionSummaryChanged();
 }
 void Window::editConnection(const QString &id) {
@@ -650,7 +708,7 @@ void Window::search() {
     searchErrors.clear();
     searching.clear();
     filter->setSourceModel(results);
-    filter->setActiveOnly(false);
+    filter->setView(SessionFilter::View::All);
     tabs->setEnabled(false);
     loadMore->setEnabled(false);
     for (auto it = backends.begin(); it != backends.end(); ++it)
@@ -670,7 +728,7 @@ void Window::clearSearch() {
     searchSessions.clear();
     results->resetResults();
     filter->setSourceModel(model);
-    filter->setActiveOnly(tabs->currentIndex() == 1);
+    filter->setView(static_cast<SessionFilter::View>(tabs->currentIndex()));
     tabs->setEnabled(true);
     loadMore->setEnabled(std::any_of(more.begin(), more.end(), [](bool x) { return x; }));
     updateSummary();

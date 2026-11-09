@@ -3,7 +3,7 @@
 Status: rudimentary layout requested by the user; interaction details below are
 the design baseline. The [initial implementation](implementation.md) now delivers
 the two-pane layout and records which refinements remain open.
-Last updated: 2026-11-08.
+Last updated: 2026-11-09.
 
 ## 1. Starting layout
 
@@ -11,10 +11,8 @@ Start with a familiar IDE arrangement: a narrow project navigator on the left
 and a large terminal workspace on the right. Use ordinary native widgets and a
 resizable divider. Keep the first version simple.
 
-The left navigator has horizontal tabs above its content: **All** first, on the
-left, and **Active** immediately beside it. These tabs are views of the same
-project/session data. The structure should allow more views later without
-adding empty placeholder tabs now.
+The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, then **Waiting for input**. These tabs are views of the same
+project/session data. Each view uses a predicate over the same session model.
 
 Projects are the top-level rows. Each project expands to reveal its sessions,
 ordered by recent use. Projects are groups derived from existing sessions; there
@@ -29,7 +27,7 @@ This wireframe expresses arrangement, not final styling or exact dimensions:
 | Session   View   Connections   Help                                   |
 +-------------------------+---------------------------------------------+
 | Projects     [Discover] | Refactor parser                             |
-| [ All ] [ Active ]      | Archcodex / laptop                          |
+| All Active Running Input| Archcodex / laptop                          |
 |-------------------------+---------------------------------------------+
 | Search conversations... |                                             |
 | Scope: All projects  v  |                                             |
@@ -51,38 +49,49 @@ The terminal owns the main workspace. There is no initial requirement for an
 editor, file browser, dashboard, right-hand inspector, terminal splits or
 customizable docking. These are not implied by the IDE resemblance.
 
-## 2. All and Active
+## 2. Session views
 
-**All** is the initial view. It contains projects with known sessions, including
-cached sessions whose backend is currently disconnected. Expanding a project exposes its known sessions. History loading
-can be paginated; the view must not imply that the first loaded page is complete.
+The four views share one model, one connection per backend and one set of pushed
+state updates. Filtering never opens/closes a terminal or resumes/cancels work.
+All is the initial view; search temporarily covers all states and restores the
+selected filter when cleared.
 
-**Active**, provisionally, contains sessions whose server reports an active turn,
-including turns waiting for approval or structured user input. It retains the
-same project hierarchy and hides projects without matching sessions. A terminal
-being open does not by itself make a session active. This is the provisional
-default implemented in 0.2.0; it was not separately confirmed by the user.
+| View | Membership |
+| --- | --- |
+| All | Loaded sessions and saved history, including disconnected cached rows. |
+| Active | Loaded sessions: running, ordinary idle prompts, explicit input/approval requests, errors and other runtime states. |
+| Running | Confirmed active turn with no waiting flags. |
+| Waiting for input | Confirmed idle prompt or active turn waiting for input/approval. |
 
-The Active predicate is separate from the tree and the transport adapters. A
-future view can filter the same model without opening another backend connection
-or keeping another copy of session state.
+Active describes runtime presence, not whether a turn is executing or whether
+Archcodex has opened a terminal. A normal idle session is ready for a new prompt.
+An approval is explicitly labelled as such. Ordinary idle prompts use a quiet
+neutral dot; explicit questions and approvals use amber, so waiting prompts do
+not make every live project look urgent. A loaded server error stays in
+Active without being misclassified as running or waiting. Unrecognized activity
+flags also stay in Active and have an explicit other-activity label.
 
-Proposed edge behavior:
+On disconnect, retain last-known Active membership with a hollow unknown dot.
+Unknown rows never appear in Running or Waiting for input. At reconnect, the
+complete loaded inventory reconciles cached rows outside the history page too;
+partial/failed inventories do not falsely mark them unloaded. Pushed status and
+closed events take priority over older snapshots. `thread/closed` moves a row to
+saved history; it does not delete it. No periodic status request is introduced.
 
-- When a turn becomes idle, its row leaves Active and remains available in All.
-  The terminal stays open if it is being viewed; filtering never closes a client
-  or cancels backend work.
-- If a backend disconnects, retain its last-known active rows with a clear
-  unknown/disconnected indicator until reconnect reconciliation. They are not
-  counted or presented as confirmed active sessions.
-- Empty Active shows "No active sessions". If connection state is unknown, also
-  identify that limitation rather than suggesting that all work is idle.
-- Remember each view's expansion state. Switching views does not change terminal
-  focus or launch a session automatically.
+Loaded does not prove that another terminal is attached: the server may retain
+an unsubscribed idle thread for its unload grace period. This is the observable
+runtime boundary, rather than a guess based on terminal output or process lists.
 
-These rules are updated by initial/reconnect snapshots and pushed events. There
-is no timer refreshing Active, no process inspection and no terminal-output
-heuristic for determining membership.
+Each view remembers expanded groups. The first visit inherits the current
+expansion state, and a selected matching session stays selected. Switching views
+does not activate a terminal. The initial sidebar is wider to accommodate the
+four labels; existing saved window geometry remains respected.
+
+Rows update only when their values change, with changed roles sent together.
+Status-only events do not change recency. Tooltips are escaped plain metadata
+rendered beside the navigator, anchored to the hovered row, and remain a stable
+snapshot while visible. This prevents metadata bursts from continually replacing
+hover text. Fresh status is available when the tooltip is opened again.
 
 ## 3. Existing-session discovery
 
@@ -139,9 +148,9 @@ click selects it. Activating a session opens/focuses its Codex TUI in the main
 workspace and passes the exact backend and thread identity to the terminal
 service. Selecting or expanding a project does not launch a terminal.
 
-Keep one visible terminal pane initially. Version 0.2.0 retains explicitly
+Keep one visible terminal pane initially. Version 0.2.1 retains explicitly
 opened terminal clients until closed, without a terminal tab strip. The
-All/Active tabs are navigation views, not terminal tabs. Only explicitly opened
+session-filter tabs are navigation views, not terminal tabs. Only explicitly opened
 sessions may create terminal widgets, and changing a filter cannot detach or
 cancel the current session.
 
@@ -149,8 +158,14 @@ The workspace header identifies the conversation, project and backend even when
 the session is hidden by a navigation filter. Before any session is opened, show
 a "Select an existing session" empty state, automatic discovery status and the
 Discover/custom-connection actions.
-Connection and launch failures stay associated with the affected backend/session
-and do not replace the entire application with an error screen.
+Client exit retains the terminal buffer and displays an inline exit/crash message.
+An explicit Restart client action creates a fresh terminal for that launch, and
+Close terminal releases the view. Opening other sessions does not discard it.
+The terminal's lifetime is separate from the server conversation's lifetime.
+For an existing conversation, restart uses the same thread ID; for a new-session
+launcher it repeats the new-session action. No automatic restart loop is used.
+A small packaged Konsole extension exposes hold-open and process-exit events;
+Archcodex rejects a component lacking those capabilities with a clear error.
 
 Opening a session transfers keyboard focus deliberately to the terminal. Tree
 navigation and view switching must remain available by keyboard without stealing
@@ -166,7 +181,7 @@ session and backend and open the corresponding conversation.
 
 Searching conversation history is distinct from filtering the Active view. A
 global search should include idle history; its scope must be visible. A simple
-results view can temporarily replace the tree while keeping All/Active state
+results view can temporarily replace the tree while keeping session-filter state
 available when search is cleared. Offline or incomplete coverage is shown as
 such. Final result presentation and keyboard interaction remain open.
 
@@ -177,7 +192,7 @@ concepts. A disconnected backend keeps its saved projects visible in All.
 
 ## 7. First UI validation checklist
 
-- The left pane starts with All, then Active; both preserve project/session
+- The left pane offers All, Active, Running and Waiting for input; all preserve project/session
   hierarchy and distinguish same-named projects on different backends.
 - Existing sessions appear without project setup. Servers in the same host
   working directory share a group while retaining their separate routing.

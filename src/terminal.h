@@ -5,6 +5,7 @@
 #include <QPointer>
 #include <QWidget>
 class QStackedWidget;
+class QLabel;
 namespace Archcodex {
 class TerminalArea : public QWidget {
     Q_OBJECT
@@ -18,12 +19,24 @@ class TerminalArea : public QWidget {
     bool smokeTest(QString *error);
   signals:
     void currentChanged(const QString &title);
+    void clientExited(const QString &key, int exitCode, bool crashed);
+
+  private slots:
+    void processExited(int exitCode, bool crashed);
 
   private:
     QStackedWidget *stack;
     QWidget *empty;
+    QWidget *exitBar;
+    QLabel *exitText;
     QHash<QString, QPointer<KParts::ReadOnlyPart>> parts;
     QHash<QString, QString> titles;
+    QHash<QString, QStringList> launches;
+    QHash<QString, QString> exits;
     KParts::ReadOnlyPart *create(QString *error);
+    bool launch(const QString &key, const QStringList &arguments, const QString &title,
+                QString *error);
+    QString currentKey() const;
+    void updateCurrent();
 };
 } // namespace Archcodex

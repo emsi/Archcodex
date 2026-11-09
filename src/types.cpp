@@ -49,13 +49,29 @@ BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
             o["discovered"].toBool()};
 }
 bool Session::isActive() const {
-    return status["type"].toString() == QStringLiteral("active");
+    // Runtime presence and turn activity are different. Preserve last-known
+    // presence while disconnected, but never claim a current running/waiting state.
+    const auto type = status["type"].toString();
+    return !type.isEmpty() && type != QStringLiteral("notLoaded");
+}
+bool Session::isRunning() const {
+    return known && status["type"] == "active" && status["activeFlags"].toArray().isEmpty();
+}
+bool Session::isWaiting() const {
+    if (!known)
+        return false;
+    const auto flags = status["activeFlags"].toArray();
+    return status["type"] == "idle" ||
+           (status["type"] == "active" &&
+            (flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")));
 }
 int Session::attention() const {
     if (!known)
         return 0;
-    if (isActive())
-        return status["activeFlags"].toArray().isEmpty() ? 2 : 4;
+    if (isWaiting() && status["type"] == "active")
+        return 4;
+    if (isRunning())
+        return 2;
     return status["type"].toString() == QStringLiteral("systemError") ? 3 : 1;
 }
 QString Session::stateText() const {
@@ -69,10 +85,11 @@ QString Session::stateText() const {
             return QStringLiteral("Waiting for approval");
         if (flags.contains("waitingOnUserInput"))
             return QStringLiteral("Waiting for input");
-        return QStringLiteral("Running");
+        return flags.isEmpty() ? QStringLiteral("Running")
+                               : QStringLiteral("Active — other activity");
     }
     if (type == "idle")
-        return QStringLiteral("Idle");
+        return QStringLiteral("Waiting for input — ready for a prompt");
     if (type == "notLoaded")
         return QStringLiteral("Saved / not loaded");
     if (type == "systemError")
