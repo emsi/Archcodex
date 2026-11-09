@@ -5,6 +5,7 @@
 #include "discoverydialog.h"
 #include "launch.h"
 #include "sessionmodel.h"
+#include "settingsdialog.h"
 #include "terminal.h"
 #include <QApplication>
 #include <QCheckBox>
@@ -252,6 +253,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(close, &QPushButton::clicked, terminal, &TerminalArea::closeCurrent);
     connect(terminal, &TerminalArea::currentChanged, terminalTitle, &QLabel::setText);
     connect(terminal, &TerminalArea::clientStateChanged, this, &Window::clientStateChanged);
+    connect(terminal, &TerminalArea::restartRequested, this, &Window::restartTerminal);
     connections = new QLabel;
     connections->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(connections, 1);
@@ -301,6 +303,9 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     hideUnsaved->setChecked(settings.value("hideUnsavedSessions", true).toBool());
     model->setHideUnsaved(hideUnsaved->isChecked());
     results->setHideUnsaved(hideUnsaved->isChecked());
+    const bool workdirOnly = !settings.value("backends/myCodex/showAllSessions", false).toBool();
+    model->setMyCodexWorkdirOnly(workdirOnly);
+    results->setMyCodexWorkdirOnly(workdirOnly);
     hideUnsaved->setToolTip(
         "Hide entries without saved history. Open terminals remain accessible.");
     connect(hideUnsaved, &QAction::toggled, this, [this](bool hide) {
@@ -316,6 +321,10 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                     qOverload<>(&QWidget::setFocus));
     view->addAction("Focus search", QKeySequence("Ctrl+Shift+F"), searchBox,
                     qOverload<>(&QWidget::setFocus));
+    auto *settingsMenu = menuBar()->addMenu("&Settings");
+    auto *configure = settingsMenu->addAction("Configure Archcodex…", QKeySequence::Preferences,
+                                              this, &Window::showSettings);
+    configure->setObjectName("configureArchcodex");
     auto *help = menuBar()->addMenu("&Help");
     help->addAction("About Archcodex", this, [this] {
         QMessageBox::about(
@@ -345,21 +354,25 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             disabledContainerHosts.insert(id);
         addContainerHost(id, host, false);
     }
-    connect(store.get(), &AsyncStore::loaded, this,
-            [this, connectOnStart](const StoreSnapshot &cache) {
-                for (const auto &p : cache.profiles) {
-                    if (profiles.contains(p.id))
-                        continue;
-                    profiles[p.id] = p;
-                    model->backendName(p.id, p.name);
-                    results->backendName(p.id, p.name);
-                    model->backendEnvironment(p.id, p.environmentId);
-                    results->backendEnvironment(p.id, p.environmentId);
-                    attach(p, connectOnStart && p.autoConnect && !p.discovered && !p.isContainer());
+    connect(
+        store.get(), &AsyncStore::loaded, this, [this, connectOnStart](const StoreSnapshot &cache) {
+            for (const auto &p : cache.profiles) {
+                if (profiles.contains(p.id))
+                    continue;
+                profiles[p.id] = p;
+                model->backendName(p.id, p.name);
+                results->backendName(p.id, p.name);
+                model->backendEnvironment(p.id, p.environmentId);
+                results->backendEnvironment(p.id, p.environmentId);
+                if (p.isContainer()) {
+                    model->setContainerWorkdir(p.id, p.identity["containerWorkdir"].toString());
+                    results->setContainerWorkdir(p.id, p.identity["containerWorkdir"].toString());
                 }
-                cachePending = cache.sessions;
-                restoreCache(connectOnStart);
-            });
+                attach(p, connectOnStart && p.autoConnect && !p.discovered && !p.isContainer());
+            }
+            cachePending = cache.sessions;
+            restoreCache(connectOnStart);
+        });
     restoreGeometry(settings.value("geometry").toByteArray());
     splitter->restoreState(settings.value("splitter").toByteArray());
     if (settings.contains("expanded")) {
@@ -552,7 +565,9 @@ void Window::attach(const BackendProfile &p, bool start) {
             const auto key = sessionKey(id, thread);
             if (pendingOpen != key)
                 return;
+            const bool restart = pendingRestart;
             pendingOpen.clear();
+            pendingRestart = false;
             if (!issue.isEmpty()) {
                 error("This server could not open the session:\n" + issue);
                 return;
@@ -568,7 +583,9 @@ void Window::attach(const BackendProfile &p, bool start) {
             s.opened = QDateTime::currentSecsSinceEpoch();
             sessions[key] = s;
             QString launchError;
-            if (!terminal->open(profiles[id], s, &launchError)) {
+            const bool opened = restart ? terminal->restart(profiles[id], s, &launchError)
+                                        : terminal->open(profiles[id], s, &launchError);
+            if (!opened) {
                 error(launchError);
                 return;
             }
@@ -825,6 +842,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                           {"stateMode", c["stateMode"]},
                           {"stateVolume", c["stateVolume"]},
                           {"codexHome", c["codexHome"]},
+                          {"containerWorkdir", c["cwd"]},
                           {"pid", ep["pid"]},
                           {"cwd", ep["cwd"]}};
             p.name = serverLabel(p);
@@ -862,6 +880,8 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             store->save(p);
             model->backendEnvironment(p.id, p.environmentId);
             results->backendEnvironment(p.id, p.environmentId);
+            model->setContainerWorkdir(p.id, c["cwd"].toString());
+            results->setContainerWorkdir(p.id, c["cwd"].toString());
             if (changed)
                 attach(p, p.autoConnect && !paused.contains(p.id));
             else if (!backends[p.id]->ready() && p.autoConnect && !paused.contains(p.id) &&
@@ -933,6 +953,10 @@ void Window::refreshNames() {
 }
 void Window::clientStateChanged(const Session &client) {
     const auto key = sessionKey(client.backendId, client.id);
+    if (!client.terminalOpen && pendingOpen == key) {
+        pendingOpen.clear();
+        pendingRestart = false;
+    }
     auto s = sessions.value(key, client);
     s.terminalOpen = client.terminalOpen;
     s.clientIssue = client.clientIssue;
@@ -949,6 +973,24 @@ void Window::clientStateChanged(const Session &client) {
         searchSessions[key] = s;
         results->upsert(s);
     }
+}
+void Window::restartTerminal(const Session &client) {
+    pendingOpen.clear();
+    pendingRestart = false;
+    const auto id = client.backendId;
+    if (!profiles.contains(id) || !backends.value(id) || !backends[id]->ready()) {
+        error("Connect this backend before restarting its terminal.");
+        return;
+    }
+    if (client.id.startsWith("new-")) {
+        QString issue;
+        if (!terminal->restart(profiles[id], client, &issue))
+            error(issue);
+        return;
+    }
+    pendingOpen = sessionKey(id, client.id);
+    pendingRestart = true;
+    backends[id]->verifySession(client.id);
 }
 void Window::updateSummary() {
     int count = 0;
@@ -982,6 +1024,24 @@ void Window::updateSummary() {
     if (discoveryDialog)
         discoveryDialog->setReport(discoveryReport);
     emit connectionSummaryChanged();
+}
+void Window::showSettings() {
+    auto *hideUnsaved = findChild<QAction *>("hideUnsavedSessions");
+    QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+    SettingsDialog dialog(hideUnsaved->isChecked(),
+                          settings.value("backends/myCodex/showAllSessions", false).toBool(), this);
+    connect(&dialog, &SettingsDialog::settingsApplied, this,
+            [this, hideUnsaved](bool hide, bool showAll) {
+                hideUnsaved->setChecked(hide);
+                QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+                settings.setValue("backends/myCodex/showAllSessions", showAll);
+                settings.sync();
+                model->setMyCodexWorkdirOnly(!showAll);
+                results->setMyCodexWorkdirOnly(!showAll);
+                if (searchingView)
+                    updateSearchSummary();
+            });
+    dialog.exec();
 }
 void Window::showDiscoveryDetails() {
     if (!discoveryDialog) {
@@ -1270,6 +1330,7 @@ void Window::activate(const QModelIndex &index) {
     const auto backend = index.data(BackendRole).toString();
     const auto key = sessionKey(backend, id);
     pendingOpen.clear();
+    pendingRestart = false;
     if (terminal->focusSession(key)) {
         auto &s = sessions[key];
         s.opened = QDateTime::currentSecsSinceEpoch();
@@ -1364,7 +1425,7 @@ void Window::updateSearchSummary() {
     searchNotice->setText(
         QString("%1 results%2%3%4")
             .arg(visible)
-            .arg(hidden ? QString(" (%1 unsaved/unavailable hidden)").arg(hidden) : QString())
+            .arg(hidden ? QString(" (%1 hidden by visibility settings)").arg(hidden) : QString())
             .arg(searching.isEmpty()
                      ? QString()
                      : QString(" — searching %1 connection(s)…").arg(searching.size()))

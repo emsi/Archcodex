@@ -21,7 +21,13 @@ static QIcon dot(int attention) {
     paint.setPen(QPen(color, 2));
     paint.setBrush(attention ? QBrush(color) : Qt::NoBrush);
     paint.drawEllipse(QRectF(3, 3, 10, 10));
-    return QIcon(p);
+    // These colours communicate state. Supplying every mode prevents the style
+    // from tinting an error dot when a row is selected or gains keyboard focus.
+    QIcon icon;
+    for (const auto mode : {QIcon::Normal, QIcon::Selected, QIcon::Active, QIcon::Disabled})
+        for (const auto state : {QIcon::Off, QIcon::On})
+            icon.addPixmap(p, mode, state);
+    return icon;
 }
 static QString folderKey(const QString &backend, const QString &path) {
     return "folder:" + projectKey(backend, path);
@@ -45,6 +51,12 @@ void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
         setItemData(item->index(), values);
 }
 bool SessionModel::visible(const Session &s) const {
+    if (myCodexWorkdirOnly && containerWorkdirs.contains(s.backendId)) {
+        const auto workdir = containerWorkdirs.value(s.backendId);
+        const auto path = normalized(s.cwd);
+        if (workdir.isEmpty() || path.isEmpty() || !within(path, workdir))
+            return false;
+    }
     if (!s.terminalOpen && hideUnsaved && (s.unavailable || (s.persistenceKnown && !s.isSaved())))
         return false;
     switch (view) {
@@ -73,6 +85,21 @@ void SessionModel::setHideUnsaved(bool hide) {
         return;
     hideUnsaved = hide;
     for (const auto &backend : backendNames.keys())
+        rebuild(backend);
+}
+void SessionModel::setContainerWorkdir(const QString &backend, const QString &path) {
+    const auto workdir = normalized(path);
+    if (containerWorkdirs.contains(backend) && containerWorkdirs.value(backend) == workdir)
+        return;
+    containerWorkdirs[backend] = workdir;
+    if (myCodexWorkdirOnly)
+        rebuild(backend);
+}
+void SessionModel::setMyCodexWorkdirOnly(bool enabled) {
+    if (myCodexWorkdirOnly == enabled)
+        return;
+    myCodexWorkdirOnly = enabled;
+    for (const auto &backend : containerWorkdirs.keys())
         rebuild(backend);
 }
 void SessionModel::backendName(const QString &id, const QString &name) {
@@ -358,6 +385,7 @@ void SessionModel::removeBackend(const QString &backend) {
     backendNames.remove(backend);
     details.remove(backend);
     environments.remove(backend);
+    containerWorkdirs.remove(backend);
     emit topologyChanged();
 }
 void SessionModel::resetResults() {

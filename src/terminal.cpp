@@ -44,9 +44,9 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
         const auto key = currentKey();
         if (key.isEmpty() || !exits.contains(key))
             return;
-        QString error;
-        if (!launch(key, launches.value(key), titles.value(key), clients.value(key), &error))
-            exitText->setText(error);
+        // The controller owns current profiles and session evidence. Never retry
+        // a captured command after rediscovery has changed the execution context.
+        emit restartRequested(clients.value(key));
     });
 }
 TerminalArea::~TerminalArea() {
@@ -98,7 +98,6 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
             if (it.value().isNull()) {
                 forgetClient(it.key());
                 titles.remove(it.key());
-                launches.remove(it.key());
                 exits.remove(it.key());
                 it = parts.erase(it);
             } else
@@ -108,25 +107,35 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     return part;
 }
 bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *error) {
-    if (p.isContainer() && (!s.executionObserved || s.executionEnvironment != p.environmentId)) {
+    if (focusSession(sessionKey(p.id, s.id)))
+        return true;
+    return startSession(p, s, error);
+}
+bool TerminalArea::restart(const BackendProfile &p, const Session &s, QString *error) {
+    const auto key = sessionKey(p.id, s.id);
+    if (!parts.value(key) || !exits.contains(key)) {
+        *error = "The terminal is no longer available for restart.";
+        return false;
+    }
+    return startSession(p, s, error);
+}
+bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QString *error) {
+    const bool fresh = s.id.startsWith("new-");
+    if (p.isContainer() && !fresh &&
+        (!s.executionObserved || s.executionEnvironment != p.environmentId)) {
         *error = "This conversation is visible in shared history, but Archcodex has not observed "
                  "it loaded in this container. Open it in its original environment first.";
         return false;
     }
-    if (!p.validate().isEmpty() || s.id.isEmpty() || !validText(s.id, 128)) {
+    if (!p.validate().isEmpty() || s.backendId != p.id || s.id.isEmpty() || !validText(s.id, 128) ||
+        !validText(s.cwd) || (!s.cwd.isEmpty() && !QDir::isAbsolutePath(s.cwd))) {
         *error = "Invalid session or connection configuration.";
         return false;
     }
     const auto key = sessionKey(p.id, s.id);
-    const auto title = s.title + "  ·  " + p.name + "  ·  " + s.cwd;
-    auto *part = parts.value(key).data();
-    if (!part)
-        return launch(key, clientArguments(p, s.id, s.cwd), title, s, error);
-    titles[key] = title;
-    stack->setCurrentWidget(part->widget());
-    part->widget()->setFocus();
-    updateCurrent();
-    return true;
+    const auto title =
+        (fresh ? QString("New session") : s.title) + "  ·  " + p.name + "  ·  " + s.cwd;
+    return launch(key, clientArguments(p, fresh ? QString() : s.id, s.cwd), title, s, error);
 }
 bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QString *error) {
     if (!p.validate().isEmpty() || !validText(path) || !QDir::isAbsolutePath(path)) {
@@ -139,9 +148,7 @@ bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QStr
     s.title = "New session terminal";
     s.cwd = path;
     s.persistenceKnown = true;
-    const auto key = sessionKey(p.id, s.id);
-    return launch(key, clientArguments(p, {}, path), "New session · " + p.name + " · " + path, s,
-                  error);
+    return startSession(p, s, error);
 }
 bool TerminalArea::launch(const QString &key, const QStringList &arguments, const QString &title,
                           const Session &session, QString *error) {
@@ -151,7 +158,6 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     auto *old = parts.value(key).data();
     parts[key] = part;
     titles[key] = title;
-    launches[key] = arguments;
     exits.remove(key);
     auto s = session;
     s.terminalOpen = true;
@@ -218,7 +224,6 @@ void TerminalArea::closeCurrent() {
             auto *part = it.value().data();
             forgetClient(it.key());
             titles.remove(it.key());
-            launches.remove(it.key());
             exits.remove(it.key());
             parts.erase(it);
             stack->setCurrentWidget(empty);
@@ -233,7 +238,6 @@ void TerminalArea::closeBackend(const QString &backend) {
         if (it.key().startsWith(backend + QChar(0x1f))) {
             forgetClient(it.key());
             titles.remove(it.key());
-            launches.remove(it.key());
             exits.remove(it.key());
             if (it.value())
                 doomed << it.value();

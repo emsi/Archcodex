@@ -47,6 +47,7 @@ class Window : public QMainWindow {
     QStringList searchErrors;
     quint64 searchToken = 0;
     QString scopeBackend, scopePath, pendingOpen;
+    bool pendingRestart = false;
     DiscoveryReport discoveryReport;
     QPointer<DiscoveryDialog> discoveryDialog;
     QToolButton *discoveryStatus;
@@ -87,6 +88,8 @@ class Window : public QMainWindow {
     QSet<QString> seenRoots;
     void refreshNames();
     void clientStateChanged(const Session &session);
+    void restartTerminal(const Session &session);
+    void showSettings();
     void attach(const BackendProfile &profile, bool start);
     void connectionsDialog();
     void editConnection(const QString &id = {});

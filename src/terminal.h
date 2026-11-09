@@ -13,6 +13,7 @@ class TerminalArea : public QWidget {
     explicit TerminalArea(QWidget *parent = nullptr);
     ~TerminalArea() override;
     bool open(const BackendProfile &profile, const Session &session, QString *error);
+    bool restart(const BackendProfile &profile, const Session &session, QString *error);
     bool newSession(const BackendProfile &profile, const QString &path, QString *error);
     bool focusSession(const QString &key);
     void closeCurrent();
@@ -22,6 +23,7 @@ class TerminalArea : public QWidget {
     void currentChanged(const QString &title);
     void clientStateChanged(const Archcodex::Session &session);
     void clientExited(const QString &key, int exitCode, bool crashed);
+    void restartRequested(const Archcodex::Session &session);
 
   private slots:
     void processExited(int exitCode, bool crashed);
@@ -33,11 +35,11 @@ class TerminalArea : public QWidget {
     QLabel *exitText;
     QHash<QString, QPointer<KParts::ReadOnlyPart>> parts;
     QHash<QString, QString> titles;
-    QHash<QString, QStringList> launches;
     QHash<QString, QString> exits;
     QHash<QString, Session> clients;
     void forgetClient(const QString &key);
     KParts::ReadOnlyPart *create(QString *error);
+    bool startSession(const BackendProfile &profile, const Session &session, QString *error);
     bool launch(const QString &key, const QStringList &arguments, const QString &title,
                 const Session &session, QString *error);
     QString currentKey() const;

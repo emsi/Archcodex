@@ -1,4 +1,4 @@
-# Implementation: 0.4.0
+# Implementation: 0.4.1
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
@@ -602,3 +602,101 @@ is retained under `.build/mycodex-test/`. Formatting, whitespace, desktop entry,
 manifest JSON and shell checks pass. AppStream retains the existing missing
 homepage warning. Real Docker/SSH and full Flatpak sandbox acceptance remain
 explicitly unverified, as described in [mycodex.md](mycodex.md).
+
+## 0.4.1 container validation and visibility
+
+The container launch fingerprint now canonicalizes mount-list order as well as
+object keys. Docker 29.1.3 can enumerate identical mounts in different orders;
+that must not cause "Container execution context changed". All mount fields
+remain part of the fingerprint, and engine, container lifetime, runtime-user,
+configuration-home and execution-evidence checks remain enforced. Discovery and
+launch use the same calculation. Cached fingerprints are refreshed by normal
+startup discovery; no user data migration or container recreation is required.
+
+Status dots supply explicit Qt icon modes/states, so selection and focus cannot
+turn red into magenta. Failed clients keep their output and remain in Active.
+Closing that view clears its client error and exposes the server's state; it
+does not claim a reconnect succeeded. Distinct forks with identical titles keep
+their distinct thread IDs and rows. The earlier report of an entry disappearing
+from every tab was not independently reproduced; this update does not claim a
+separate cause or speculative deletion fix for it.
+
+Restart client asks the window controller for the current profile and, for an
+existing conversation, runs the same selected-server verification as opening it.
+It no longer retains/replays launch arguments from before rediscovery. A rejected
+restart preserves the old terminal output; a live client cannot be replaced by
+this action. Closing the terminal cancels its pending restart. New-session
+launchers repeat a new-session launch, retaining their synthetic row identity.
+
+myCodex now shows only sessions in the container's Docker `Config.WorkingDir`
+and descendants by default, including in search results and activity views.
+The field is recorded separately as `identity.containerWorkdir`, including for
+SSH containers; the app-server's process cwd is not used as a substitute.
+The shared SessionModel visibility predicate applies before folder compression
+and counts, while retaining hidden records for immediate setting changes.
+Paths use lexical normalization and directory boundaries, not host filesystem
+resolution. A Docker WorkingDir of `/` includes all absolute paths. Older cached
+profiles without WORKDIR remain restricted until discovery provides it.
+This display filter does not grant execution authority or merge conversations.
+
+Settings → Configure Archcodex opens Application and Backends pages with OK,
+Apply and Cancel. It reuses `window.ini`, preserving the existing
+`hideUnsavedSessions` key and View shortcut. The new
+`backends/myCodex/showAllSessions` key defaults to false and covers both local
+and SSH myCodex backends. An open terminal is not closed when its explorer row
+is excluded by WORKDIR filtering. New terminal/backend pages can be added when
+there are actual settings for them.
+
+### Decisions not agreed in advance
+
+The user authorized the fixes, settings dialog and default WORKDIR filter, and
+explicitly chose inclusion of subdirectories. Implementation choices:
+
+| Choice | Reason, affected files and consequences |
+| --- | --- |
+| Sort full mount records by canonical JSON, retaining all fields. | `src/containers.py`; fixes nondeterministic ordering without relaxing validation or adding a dependency. Startup discovery refreshes older fingerprints. |
+| Supply all icon modes/states explicitly. | `src/sessionmodel.cpp`; status colours survive selected, focused, disabled and expanded rendering. Existing status priorities and Active/Running/Waiting meanings are preserved. |
+| Reuse the controller's verification path for explicit retries. | `src/terminal.*`, `src/window.*`; removes cached launch commands, requires a ready backend, retains failed output and cancels pending retries when closed. New-session launchers still start a new session. |
+| Store container WORKDIR in existing profile JSON; filter only display records. | `src/types.cpp`, `src/sessionmodel.*`, `src/window.cpp`; no SQLite schema migration. Missing cached WORKDIR stays hidden until rediscovery; lexical containment avoids touching remote/host paths. Search uses the same rule; hidden history remains cached. |
+| Use a small Qt category-list/stacked-page settings modal. | `src/settingsdialog.*`, `CMakeLists.txt`, `src/window.*`; Application and Backends contain the present settings. No empty Terminal page, public settings framework or new dependency. The existing View shortcut remains synchronized. Apply persists; Cancel discards only unapplied changes. |
+| Package as 0.4.1 with the existing runtime, permissions and Konsole patches. | CMake, script, AppStream and documentation version updates; no myCodex changes, container recreation, new host permission or polling. Local build/test/export files remain under `.build/` and the installable bundle/checksum under `dist/`. |
+
+Regression coverage includes mount permutations in both proxy/TUI validation,
+rejection of actual mount/runtime changes, stable icon colours, independent
+same-title forks, refreshed retry arguments, selected-server retry verification,
+retained PTY output, WORKDIR prefix boundaries and cached local/remote profiles,
+search-model scope preservation, and settings defaults/Apply/Cancel/persistence.
+
+0.4.1 validation: all seven suites passed across the native and KDE environments
+(discovery, containers, core, runtime, model, window and terminal). The real-PTY
+terminal suite passed all eight QtTest cases under X11 using the KDE Platform
+and packaged Konsole libraries, including refreshed-profile retries and repeating
+new-session launchers. The settings/window checks also passed under X11; the
+settings dialog screenshot was visually reviewed. The stripped, staged package
+reported version 0.4.1 and passed the application/Konsole smoke test.
+
+The bundle was exported and installed into `.build/flatpak`, then its checksum
+and effective permissions were verified; permissions match 0.4.0. As before,
+this environment blocks user namespaces: compilation used the existing isolated
+KDE SDK root, export disabled sandboxing only for the local icon validator, and
+installation used a temporary D-Bus session. Sandboxed cache triggers reported
+the namespace restriction, although deployment completed. The normal host
+Flatpak installation and configuration were not changed. Full sandbox execution,
+real Docker/SSH attachment and the reported affected containers still require
+host acceptance. AppStream retains its pre-existing missing-homepage warning;
+formatting, whitespace, manifest JSON, shell and desktop-entry checks pass.
+
+Builds, fixture data, screenshots, temporary helpers and verification logs are
+kept under `.build/fix-0.4.1*` alongside the reused SDK/runtime/package trees.
+The installable bundle and SHA-256 file are in `dist/`. Completed source,
+regression tests and documentation are committed locally under the standing
+repository instruction; no push, tag, external release or host deployment is
+performed.
+
+On the host, install 0.4.1 and let startup discovery refresh container metadata.
+Check both same-title forks in an affected container, including explicit client
+restart and selecting/unselecting an error row. Verify that local and remote
+myCodex roots show only WORKDIR/descendant sessions by default; enable the
+Backends option to reveal other shared history, then disable it again and check
+search and activity views. Previously hidden history must reappear without
+changing execution eligibility or introducing polling.

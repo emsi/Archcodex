@@ -1,4 +1,4 @@
-# myCodex integration: 0.4.0
+# myCodex integration: 0.4.1
 
 Implemented on 2026-11-09 following the request to adopt direct container
 integration. Existing containers are the primary workflow. No new myCodex
@@ -97,6 +97,21 @@ A server listing a saved conversation establishes **history visibility only**.
 It does not establish that its workspace, mounts or tools are suitable for
 resuming it. This applies to both the explorer and global search.
 
+By default, the explorer and search list only sessions whose cwd is the
+container's Docker `Config.WorkingDir` (WORKDIR) or a subdirectory. Container
+WORKDIR is separate from the app-server process cwd and host bind-mount paths.
+Paths are normalized lexically in the container namespace, with directory
+boundaries respected; the desktop does not resolve remote paths or symlinks.
+An empty Docker WorkingDir means `/`. Older cached profiles with no recorded
+WORKDIR hide sessions until discovery supplies it; the root's details show this.
+**Settings → Configure Archcodex… → Backends → Show sessions outside the
+container's working directory** disables this restriction for local and SSH
+myCodex backends. Hidden metadata remains cached, so changing the setting does
+not require refetching or polling. Other backend types are unaffected. An already
+open terminal remains open even if changing this setting hides its explorer row.
+The independent unsaved-session filter still applies. This is a display filter,
+not execution authority; showing shared history does not authorize launching it.
+
 The initial policy deliberately uses one concrete piece of evidence: this
 specific server's loaded-thread inventory or live-session event. Archcodex
 persists that observation bound to its execution-environment fingerprint
@@ -106,7 +121,7 @@ and search results cannot manufacture this app-owned evidence.
 - An observed live conversation can be attached to its server.
 - A previously observed conversation can be resumed in the same established
   environment after it unloads or Archcodex restarts.
-- Other saved conversations remain visible and searchable as **History only**.
+- Other saved conversations within the visibility settings appear as **History only**.
   Opening one explains why this container cannot be selected automatically.
   Open it in its correct environment first; subsequent inventory/events establish
   the association. There is no “resume anywhere” override in 0.4.0.
@@ -115,7 +130,10 @@ and search results cannot manufacture this app-owned evidence.
   cache. A successful metadata read or matching cwd string cannot restore it.
 - Before each proxy/TUI launch, check the selected Docker context is local Unix,
   the actual engine ID, full container ID, running/unpaused state, `StartedAt`
-  lifetime and environment fingerprint. Reject stale requests. The TUI checks
+  lifetime and environment fingerprint. Mount records and their object keys are
+  canonicalized before hashing: Docker's mount-list order is not execution
+  identity, but all mount fields still participate in validation. Reject stale
+  requests. The TUI checks
   and enters the cwd as the runtime user instead of asking Docker to create it.
 
 Observed execution is not proof of original authorship or of unchanged files

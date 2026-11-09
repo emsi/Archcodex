@@ -48,7 +48,10 @@ def descriptor(info):
     codex_home = env.get("CODEX_HOME", home + "/.codex")
     if not home.startswith("/") or not text(home) or not codex_home.startswith("/") or not text(codex_home):
         raise ValueError("Invalid myCodex runtime home")
-    mounts = info.get("Mounts") or []
+    # Docker does not guarantee Mounts order. Canonicalize the list as well as
+    # object keys, retaining every field so real mount changes still invalidate
+    # the execution context. Do not mutate the discovery response.
+    mounts = sorted(info.get("Mounts") or [], key=lambda mount: json.dumps(mount, sort_keys=True))
     volume = next((m.get("Name", "") for m in mounts if m.get("Destination") == home and m.get("Type") == "volume"), "")
     # A project-looking volume name is not proof of private mode on legacy images.
     mode = labels.get("io.infrasecture.mycodex.state-mode")
@@ -58,7 +61,7 @@ def descriptor(info):
     return {"containerId": cid, "containerEpoch": state.get("StartedAt", ""),
             "containerName": info.get("Name", cid[:12]).lstrip("/"), "runtimeUid": uid,
             "runtimeHome": home, "codexHome": codex_home,
-            "cwd": config.get("WorkingDir", "/"), "stateMode": mode,
+            "cwd": config.get("WorkingDir") or "/", "stateMode": mode,
             "stateVolume": volume, "running": bool(state.get("Running")),
             "paused": bool(state.get("Paused")),
             "environment": hashlib.sha256(fingerprint.encode()).hexdigest()}

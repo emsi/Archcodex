@@ -43,6 +43,8 @@ class SessionModel : public QStandardItemModel {
     void removeBackend(const QString &backend);
     void resetResults();
     void setHideUnsaved(bool hide);
+    void setContainerWorkdir(const QString &backend, const QString &path);
+    void setMyCodexWorkdirOnly(bool enabled);
     void setView(SessionView view);
     SessionView currentView() const {
         return view;
@@ -53,8 +55,10 @@ class SessionModel : public QStandardItemModel {
 
   private:
     bool hideUnsaved = true;
+    bool myCodexWorkdirOnly = true;
     SessionView view = SessionView::All;
     QHash<QString, QString> backendNames, details, environments, projectNames;
+    QHash<QString, QString> containerWorkdirs;
     QHash<QString, QStandardItem *> roots, folders, threads;
     QHash<QString, Session> records;
     bool visible(const Session &s) const;

@@ -1,0 +1,85 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#include "settingsdialog.h"
+#include <QCheckBox>
+#include <QDialogButtonBox>
+#include <QLabel>
+#include <QListWidget>
+#include <QPushButton>
+#include <QStackedWidget>
+#include <QVBoxLayout>
+
+namespace Archcodex {
+SettingsDialog::SettingsDialog(bool hide, bool showAll, QWidget *parent) : QDialog(parent) {
+    setWindowTitle("Configure Archcodex");
+    setObjectName("settingsDialog");
+    auto *layout = new QVBoxLayout(this);
+    auto *body = new QHBoxLayout;
+    auto *categories = new QListWidget;
+    categories->setObjectName("settingsCategories");
+    categories->setAccessibleName("Settings categories");
+    categories->setMaximumWidth(170);
+    auto *pages = new QStackedWidget;
+    body->addWidget(categories);
+    body->addWidget(pages, 1);
+    layout->addLayout(body, 1);
+    // Add pages as real settings become available; no plugin/configuration
+    // framework or empty categories are needed for future terminal/backends UI.
+    const auto page = [&](const QString &category, const QString &title) {
+        categories->addItem(category);
+        auto *widget = new QWidget;
+        auto *content = new QVBoxLayout(widget);
+        auto *heading = new QLabel(title);
+        auto font = heading->font();
+        font.setBold(true);
+        heading->setFont(font);
+        content->addWidget(heading);
+        pages->addWidget(widget);
+        return content;
+    };
+    const auto help = [](QVBoxLayout *content, const QString &text) {
+        auto *label = new QLabel(text);
+        label->setWordWrap(true);
+        label->setTextFormat(Qt::PlainText);
+        content->addWidget(label);
+        content->addStretch();
+    };
+    auto *application = page("Application", "Session visibility");
+    hideUnsaved = new QCheckBox("Hide unsaved sessions");
+    hideUnsaved->setObjectName("hideUnsavedSetting");
+    hideUnsaved->setChecked(hide);
+    application->addWidget(hideUnsaved);
+    help(application,
+         "Hide entries without saved history. Open terminals bypass this unsaved-session filter. "
+         "This setting also appears in the View menu.");
+
+    auto *backends = page("Backends", "myCodex");
+    showAllMyCodexSessions =
+        new QCheckBox("Show sessions outside the container's working directory");
+    showAllMyCodexSessions->setObjectName("showAllMyCodexSessions");
+    showAllMyCodexSessions->setChecked(showAll);
+    backends->addWidget(showAllMyCodexSessions);
+    help(backends,
+         "By default, each local or remote myCodex server lists sessions in its container's "
+         "WORKDIR and subdirectories. This applies to every tab and search results. "
+         "Other shared-history sessions stay hidden until you enable this option.\n\n"
+         "Shared-history sessions can be opened only where Archcodex has already observed them "
+         "running. "
+         "The separate unsaved-session setting still applies.");
+    connect(categories, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
+    categories->setCurrentRow(0);
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply |
+                                         QDialogButtonBox::Cancel);
+    layout->addWidget(buttons);
+    connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, this,
+            &SettingsDialog::apply);
+    connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+        apply();
+        accept();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+    resize(720, 360);
+}
+void SettingsDialog::apply() {
+    emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked());
+}
+} // namespace Archcodex

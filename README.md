@@ -1,7 +1,7 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.4.0** supports **existing local Unix-socket app-servers** and
+Version **0.4.1** supports **existing local Unix-socket app-servers** and
 **myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
 SSH socket profiles remain planned.
 
@@ -13,10 +13,17 @@ with process IDs confined to details.
 It provides All, Active, Running and Waiting views, conversation search
 and the existing Codex TUI. Active includes live sessions at an idle prompt.
 Exited terminal clients retain their output, remain in Active, and offer an explicit restart.
+Restart rechecks the selected session and uses the current connection profile.
 **View → Hide unsaved sessions** is enabled by default and remembered; open
 terminal entries remain accessible even when their conversation is unsaved.
+**Settings → Configure Archcodex…** organizes preferences into Application and
+Backends pages. myCodex lists only sessions in each container's WORKDIR and
+subdirectories by default, in every tab and search. Enable **Show sessions outside
+the container's working directory** under Backends to include other shared history.
 Each view compresses its own folder paths. Running and Waiting open expanded;
 waiting sessions use green indicators, running sessions blue.
+Selecting a row preserves its status colour. A red retained-client error clears
+when its terminal closes; the server's waiting state does not prove a successful reconnect.
 Session and project indicators reflect **server events, without status
 polling**. Multiple local and container servers connect independently.
 Discovery issues appear in the status bar; click **Discovery limited** or use
@@ -30,13 +37,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.4.0-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.4.1-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.4.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.4.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -121,7 +128,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
   sessions, and the four session filters.
-- [Implementation and testing](docs/implementation.md): what 0.4.0 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.4.1 delivers and
   how to exercise it on your host.
 
 ## Project status

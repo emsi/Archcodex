@@ -174,7 +174,10 @@ the session is hidden by a navigation filter. Before any session is opened, show
 a "Select an existing session" empty state and the Discover/custom-connection
 actions. Application-wide discovery status belongs in the status bar.
 Client exit retains the terminal buffer and displays an inline exit/crash message.
-An explicit Restart client action creates a fresh terminal for that launch, and
+An explicit Restart client action revalidates an existing conversation against
+its selected server and creates a terminal using the current connection profile.
+The previous terminal and output remain until validation and component creation
+succeed. A live client cannot be replaced through Restart client, and
 Close terminal releases the view. Opening other sessions does not discard it.
 The terminal's lifetime is separate from the server conversation's lifetime.
 A new-session launcher has no conversation ID until Codex creates it. It is
@@ -182,8 +185,24 @@ shown as **New session terminal** until explicitly closed; its independently
 discovered conversation can also appear. Automatic correlation is not guessed
 from titles, cwd or output. For an existing conversation, restart uses the same thread ID; for a new-session
 launcher it repeats the new-session action. No automatic restart loop is used.
+Status dots retain their colours when selected, focused or disabled; selection
+highlighting must not invent a different session state. Closing a failed terminal
+clears its client error and reveals the server state; this is not a reconnect.
 A small packaged Konsole extension exposes hold-open and process-exit events;
 Archcodex rejects a component lacking those capabilities with a clear error.
+
+### Settings
+
+**Settings → Configure Archcodex…** opens a modal with a category list and pages.
+Application contains the saved-session visibility setting, synchronized with the
+existing View menu shortcut. Backends contains myCodex's shared-history visibility
+option: WORKDIR and its subdirectories only by default, with an explicit option
+to show sessions outside it. This applies before tree compression and aggregation
+in every tab and search results. Hidden sessions are not discarded.
+Apply saves without closing; OK saves and closes; Cancel discards unapplied edits.
+The settings use the existing application-specific `window.ini` file. Additional
+backend or terminal pages can be added when they contain actual settings; no empty
+pages, plugin ABI or generalized settings schema are introduced.
 
 Opening a session transfers keyboard focus deliberately to the terminal. Tree
 navigation and view switching must remain available by keyboard without stealing

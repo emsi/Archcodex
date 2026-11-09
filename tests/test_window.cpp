@@ -3,15 +3,19 @@
 #include "discoverydialog.h"
 #include "fixture.h"
 #include "sessionmodel.h"
+#include "settingsdialog.h"
 #include "terminal.h"
 #include "window.h"
 #include <QAction>
+#include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QCryptographicHash>
+#include <QDialogButtonBox>
 #include <QHelpEvent>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
@@ -56,6 +60,7 @@ class WindowTests : public QObject {
                 p.discoveryHost = "local-mycodex";
                 p.socketPath = "/tmp/physical.sock";
                 p.environmentId = digest(key + "mounts");
+                p.identity["containerWorkdir"] = "/workspace";
                 store.save(p);
                 ids << p.id;
                 containers << QJsonObject{
@@ -70,6 +75,7 @@ class WindowTests : public QObject {
                     {"stateMode", "Shared"},
                     {"stateVolume", "codex_state"},
                     {"codexHome", "/home/alice/.codex"},
+                    {"cwd", "/workspace"},
                     {"issues", QJsonArray{}},
                     {"endpoints",
                      QJsonArray{QJsonObject{{"path", p.socketPath}, {"executable", "codex"}}}}};
@@ -126,6 +132,122 @@ class WindowTests : public QObject {
             QVERIFY(window.grab().save(screenshots + "/containers.png"));
         }
         window.close();
+    }
+    void myCodexWorkdirDefaultsAndSettingApplyToCachedLocalAndRemoteServers() {
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            for (const auto &id : {"local", "remote"}) {
+                BackendProfile p{id, id};
+                p.kind = "mycodex";
+                p.autoConnect = false;
+                p.containerId = QString(64, QString(id) == "local" ? 'a' : 'b');
+                p.containerEpoch = "epoch";
+                p.dockerContext = "default";
+                p.runtimeHome = "/home/alice";
+                p.runtimeUser = "alice";
+                p.discoveryHost = QString(id) == "local" ? "local-mycodex" : "remote-mycodex";
+                p.socketPath = "/tmp/codex.sock";
+                p.identity["containerWorkdir"] = QString(id) == "local" ? "/work/a" : "/work/b";
+                p.sshHost = QString(id) == "remote" ? "example-host" : "";
+                QVERIFY2(p.validate().isEmpty(), qPrintable(p.validate()));
+                store.save(p);
+                for (const auto &path : {"/work/a", "/work/a/sub", "/work/b"})
+                    store.save(
+                        Session::fromThread(id, {{"id", path},
+                                                 {"cwd", path},
+                                                 {"name", "Shared history"},
+                                                 {"path", "/saved/file"},
+                                                 {"status", QJsonObject{{"type", "idle"}}}}));
+            }
+        }
+        const auto count = [](QTreeView *tree, const QString &backend) {
+            auto *model = tree->model();
+            for (int i = 0; i < model->rowCount(); ++i) {
+                const auto index = model->index(i, 0);
+                if (index.data(BackendRole) == backend)
+                    return index.data(CountRole).toInt();
+            }
+            return -1;
+        };
+        {
+            Window window(data.path(), false);
+            auto *tree = window.findChild<QTreeView *>();
+            QTRY_COMPARE(count(tree, "local"), 2);
+            QTRY_COMPARE(count(tree, "remote"), 1);
+            QTimer::singleShot(0, &window, [&] {
+                auto *dialog = window.findChild<SettingsDialog *>();
+                QVERIFY(dialog);
+                dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
+                QTest::mouseClick(
+                    dialog->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok),
+                    Qt::LeftButton);
+            });
+            window.findChild<QAction *>("configureArchcodex")->trigger();
+            QCOMPARE(count(tree, "local"), 3);
+            QCOMPARE(count(tree, "remote"), 3);
+            window.close();
+        }
+        Window reopened(data.path(), false);
+        auto *tree = reopened.findChild<QTreeView *>();
+        QTRY_COMPARE(count(tree, "local"), 3);
+        QTRY_COMPARE(count(tree, "remote"), 3);
+        reopened.close();
+    }
+    void settingsDialogAppliesExplicitlyAndPersists() {
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        window.show();
+        auto *action = window.findChild<QAction *>("configureArchcodex");
+        auto *quickSetting = window.findChild<QAction *>("hideUnsavedSessions");
+        QVERIFY(action && quickSetting);
+        // Cancel must not change either setting.
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = window.findChild<SettingsDialog *>();
+            QVERIFY(dialog);
+            dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
+            dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
+            dialog->reject();
+        });
+        action->trigger();
+        QVERIFY(quickSetting->isChecked());
+        QSettings settings(data.path() + "/window.ini", QSettings::IniFormat);
+        QVERIFY(!settings.value("backends/myCodex/showAllSessions", false).toBool());
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = window.findChild<SettingsDialog *>();
+            QVERIFY(dialog);
+            QVERIFY(dialog->findChild<QCheckBox *>("hideUnsavedSetting")->isChecked());
+            QVERIFY(!dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
+            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 2);
+            dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
+            dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
+            auto *buttons = dialog->findChild<QDialogButtonBox *>();
+            QTest::mouseClick(buttons->button(QDialogButtonBox::Apply), Qt::LeftButton);
+            QVERIFY(dialog->isVisible());
+            QVERIFY(!quickSetting->isChecked());
+            const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+            if (!screenshots.isEmpty()) {
+                dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(1);
+                QApplication::processEvents();
+                QVERIFY(dialog->grab().save(screenshots + "/settings.png"));
+            }
+            dialog->reject(); // Explicit Apply survives a later Cancel.
+        });
+        action->trigger();
+        settings.sync();
+        QVERIFY(settings.value("backends/myCodex/showAllSessions").toBool());
+        QVERIFY(!settings.value("hideUnsavedSessions").toBool());
+        window.close();
+        Window reopened(data.path(), false);
+        QVERIFY(!reopened.findChild<QAction *>("hideUnsavedSessions")->isChecked());
+        QTimer::singleShot(0, &reopened, [&] {
+            auto *dialog = reopened.findChild<SettingsDialog *>();
+            QVERIFY(dialog);
+            QVERIFY(dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
+            dialog->reject();
+        });
+        reopened.findChild<QAction *>("configureArchcodex")->trigger();
+        reopened.close();
     }
     void discoveryFeedbackIsActionableAndDoesNotInterrupt() {
         Fixture fixture;
@@ -447,6 +569,15 @@ class WindowTests : public QObject {
         tree->activated(session);
         QTRY_VERIFY(sawError);
         QCOMPARE(first.readIds.size(), 2);
+        QCOMPARE(second.readIds.size(), 1);
+        QCOMPARE(terminalStates.size(), 0);
+        // Restart uses the same selected-server preflight instead of bypassing
+        // verification with the terminal's previously captured arguments.
+        sawError = false;
+        const auto client = Session::fromThread(firstId, first.thread());
+        window.findChild<TerminalArea *>()->restartRequested(client);
+        QTRY_VERIFY(sawError);
+        QCOMPARE(first.readIds.size(), 3);
         QCOMPARE(second.readIds.size(), 1);
         QCOMPARE(terminalStates.size(), 0);
         window.close();

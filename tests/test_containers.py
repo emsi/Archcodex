@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import asyncio
+from copy import deepcopy
 import importlib.util
+from itertools import permutations
 import json
 import os
 from pathlib import Path
@@ -95,6 +97,58 @@ class ContainerTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "context changed"): adapter.launch("proxy", data)
         with patch.object(adapter, "sync_run", side_effect=[b'"unix:///run/docker.sock"', b"different-engine"]):
             with self.assertRaisesRegex(ValueError, "engine identity changed"): adapter.launch("proxy", data)
+
+    def test_mount_order_does_not_change_identity_or_prevent_launch(self):
+        info = container()
+        info["Mounts"] += [
+            {"Type": "bind", "Source": "/projects/example", "Destination": "/workspace", "RW": True},
+            {"Type": "bind", "Source": "/config", "Destination": "/config", "RW": False},
+        ]
+        original = deepcopy(info)
+        desc = adapter.descriptor(info)
+        self.assertEqual(info, original, "Fingerprinting must not reorder the input")
+        data = {"containerId": CID, "containerEpoch": desc["containerEpoch"], "dockerContext": "default",
+                "runtimeUser": "alice", "socket": "/tmp/codex.sock", "thread": "fork-1", "cwd": "/workspace",
+                "identity": {"containerEnvironment": desc["environment"], "dockerEngine": "engine-fixture"}}
+        for mounts in permutations(info["Mounts"]):
+            inspected = deepcopy(info)
+            # Docker object field order is immaterial too.
+            inspected["Mounts"] = [dict(reversed(list(m.items()))) for m in mounts]
+            with self.subTest(mounts=[m["Destination"] for m in mounts]):
+                self.assertEqual(adapter.descriptor(inspected)["environment"], desc["environment"])
+                for mode in ("proxy", "tui"):
+                    with patch.object(adapter, "sync_run", side_effect=[b'"unix:///run/docker.sock"', b"engine-fixture", json.dumps([inspected]).encode()]), \
+                         patch.object(adapter.os, "execvp") as execute:
+                        adapter.launch(mode, data)
+                        execute.assert_called_once()
+
+    def test_real_mount_and_runtime_changes_still_reject_launch(self):
+        info = container()
+        info["Mounts"][0].update(Source="/volumes/codex", RW=True, Mode="rw", Propagation="rprivate", Driver="local")
+        desc = adapter.descriptor(info)
+        data = {"containerId": CID, "containerEpoch": desc["containerEpoch"], "dockerContext": "default",
+                "identity": {"containerEnvironment": desc["environment"], "dockerEngine": "engine-fixture"}}
+        changes = []
+        for field, value in {"Source": "/other", "Destination": "/elsewhere", "Name": "different-volume",
+                             "Type": "bind", "RW": False, "Mode": "ro", "Propagation": "rshared", "Driver": "other"}.items():
+            changed = deepcopy(info)
+            changed["Mounts"][0][field] = value
+            changes.append((field, changed))
+        for env in ("MYCODEX_HOST_UID=1001", "MYCODEX_CONTAINER_HOME=/home/other", "CODEX_HOME=/other/.codex"):
+            changed = deepcopy(info)
+            changed["Config"]["Env"].append(env)
+            changes.append((env.split("=")[0], changed))
+        for label, mounts in (("removed", []), ("added", info["Mounts"] + [{"Type": "tmpfs", "Destination": "/extra"}])):
+            changed = deepcopy(info)
+            changed["Mounts"] = mounts
+            changes.append((label, changed))
+        for label, changed in changes:
+            with self.subTest(change=label), \
+                 patch.object(adapter, "sync_run", side_effect=[b'"unix:///run/docker.sock"', b"engine-fixture", json.dumps([changed]).encode()]), \
+                 patch.object(adapter.os, "execvp") as execute:
+                with self.assertRaisesRegex(ValueError, "context changed"):
+                    adapter.launch("tui", data)
+                execute.assert_not_called()
 
     def test_chunked_command_output_is_not_truncated(self):
         async def check():

@@ -53,6 +53,7 @@ class TerminalTests : public QObject {
         TerminalArea area;
         QSignalSpy exits(&area, &TerminalArea::clientExited);
         QSignalSpy states(&area, &TerminalArea::clientStateChanged);
+        QSignalSpy restarts(&area, &TerminalArea::restartRequested);
         area.resize(800, 500);
         area.show();
         BackendProfile p{"b", "Local", "local-unix", "/unused", script.fileName(), false};
@@ -74,6 +75,9 @@ class TerminalTests : public QObject {
         QVERIFY(!client.clientIssue.isEmpty());
         QVERIFY(!client.isRunning() && !client.isWaiting());
         QVERIFY(area.focusSession(sessionKey("b", "first")));
+        session.id = "first";
+        QVERIFY(!area.restart(p, session, &error)); // Never replace a running client.
+        session.id = "failure";
         QVERIFY(area.focusSession(sessionKey("b", "failure")));
         QCOMPARE(stack->currentWidget(), failed.data());
         bool retainedOutput = false;
@@ -88,14 +92,56 @@ class TerminalTests : public QObject {
         auto *retry = area.findChild<QPushButton *>("reconnectTerminal");
         QVERIFY(retry && retry->isVisible());
         QTest::mouseClick(retry, Qt::LeftButton);
+        QCOMPARE(restarts.size(), 1);
+        QCOMPARE(qvariant_cast<Session>(restarts[0][0]).id, session.id);
+        QCOMPARE(stack->currentWidget(), failed.data()); // Keep output until validation succeeds.
+        auto changed = p;
+        changed.kind = "mycodex";
+        changed.environmentId = "different-environment";
+        QVERIFY(!area.restart(changed, session, &error));
+        QCOMPARE(stack->currentWidget(), failed.data());
+        // The controller supplies a refreshed profile, not the old command.
+        QFile refreshed(dir.path() + "/refreshed-client");
+        QVERIFY(refreshed.open(QIODevice::WriteOnly));
+        refreshed.write("#!/bin/sh\nprintf 'FRESH PROFILE\\n'\nexit 9\n");
+        refreshed.close();
+        QVERIFY(refreshed.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        p.executable = refreshed.fileName();
+        QVERIFY2(area.restart(p, session, &error), qPrintable(error));
         QTRY_COMPARE(exits.size(), 2);
+        QCOMPARE(exits[1][1].toInt(), 9);
         QVERIFY(!failed);
         QVERIFY(stack->currentWidget() != first);
         area.closeCurrent();
         QVERIFY(!qvariant_cast<Session>(states.last()[0]).terminalOpen);
+        QVERIFY(!area.restart(p, session, &error));
         session.id = "first";
         QVERIFY2(area.open(p, session, &error), qPrintable(error));
         QCOMPARE(stack->currentWidget(), first);
+    }
+    void restartingNewSessionRepeatsTheLauncherWithoutResumingItsSyntheticId() {
+        QTemporaryDir dir;
+        QFile script(dir.path() + "/client");
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(
+            "#!/bin/sh\nfor arg; do\ncase \"$arg\" in resume|new-*) exit 8;; esac\ndone\nexit 0\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        TerminalArea area;
+        QSignalSpy exits(&area, &TerminalArea::clientExited);
+        QSignalSpy states(&area, &TerminalArea::clientStateChanged);
+        BackendProfile p{"b", "Local", "local-unix", "/unused", script.fileName(), false};
+        QString error;
+        QVERIFY2(area.newSession(p, dir.path(), &error), qPrintable(error));
+        QTRY_COMPARE(exits.size(), 1);
+        QCOMPARE(exits[0][1].toInt(), 0);
+        const auto client = qvariant_cast<Session>(states.last()[0]);
+        QVERIFY(client.id.startsWith("new-"));
+        QVERIFY2(area.restart(p, client, &error), qPrintable(error));
+        QTRY_COMPARE(exits.size(), 2);
+        QCOMPARE(exits[1][1].toInt(), 0);
+        QCOMPARE(exits[0][0], exits[1][0]);
+        area.closeCurrent();
     }
 };
 QTEST_MAIN(TerminalTests)

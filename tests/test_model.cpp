@@ -331,6 +331,108 @@ class ModelTests : public QObject {
         model.upsert(s);
         QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
     }
+    void statusIconsKeepTheirColoursAcrossSelectionAndFocus() {
+        SessionModel model;
+        auto s = Session::fromThread(
+            "b", {{"id", "fork"}, {"cwd", "/work"}, {"status", QJsonObject{{"type", "idle"}}}});
+        for (const auto type : {"idle", "active", "notLoaded", "systemError"}) {
+            s.status = {{"type", type}};
+            model.upsert(s);
+            for (const auto *item :
+                 {model.item(0), model.item(0)->child(0), model.item(0)->child(0)->child(0)}) {
+                const auto icon = item->icon();
+                const auto expected = icon.pixmap(16, 16, QIcon::Normal).toImage();
+                for (const auto mode : {QIcon::Selected, QIcon::Active, QIcon::Disabled})
+                    for (const auto state : {QIcon::Off, QIcon::On})
+                        QCOMPARE(icon.pixmap(16, 16, mode, state).toImage(), expected);
+            }
+        }
+    }
+    void sameTitleForksRemainIndependentWhenOneClientFails() {
+        SessionModel model;
+        auto first = Session::fromThread("b", {{"id", "fork-1"},
+                                               {"name", "Shared ancestor title"},
+                                               {"cwd", "/work"},
+                                               {"path", "/saved/first.jsonl"},
+                                               {"status", QJsonObject{{"type", "idle"}}}});
+        auto second = first;
+        second.id = "fork-2";
+        model.upsertMany({first, second});
+        first.terminalOpen = true;
+        first.clientIssue = "Terminal client exited with code 1";
+        model.upsert(first);
+        for (const auto view : {SessionView::All, SessionView::Active}) {
+            model.setView(view);
+            QCOMPARE(model.item(0)->data(CountRole).toInt(), 2);
+            QSet<QString> ids;
+            const auto *folder = model.item(0)->child(0);
+            for (int i = 0; i < folder->rowCount(); ++i) {
+                const auto *row = folder->child(i);
+                QCOMPARE(row->text(), first.title);
+                ids.insert(row->data(ThreadRole).toString());
+            }
+            QCOMPARE(ids, (QSet<QString>{first.id, second.id}));
+        }
+        model.setView(SessionView::Waiting);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        QCOMPARE(model.item(0)->child(0)->child(0)->data(ThreadRole).toString(), second.id);
+        first.terminalOpen = false;
+        first.clientIssue.clear();
+        model.upsert(first);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 2);
+        QCOMPARE(model.item(0)->data(WaitingCountRole).toInt(), 2);
+    }
+    void containerWorkdirScopeIsPerBackendAndPreservesHiddenHistory() {
+        SessionModel model;
+        model.backendName("container", "myCodex");
+        model.backendName("other", "Remote myCodex");
+        model.backendName("host", "Host");
+        model.setContainerWorkdir("container", "/workspace/project/");
+        model.setContainerWorkdir("other", "/elsewhere");
+        const QStringList paths{"/workspace/project",
+                                "/workspace/project/sub",
+                                "/workspace/project-other",
+                                "/workspace/project/../other",
+                                "/elsewhere",
+                                "relative"};
+        for (const auto &backend : {"container", "other", "host"})
+            for (qsizetype i = 0; i < paths.size(); ++i)
+                model.upsert(
+                    Session::fromThread(backend, {{"id", QString::number(i)},
+                                                  {"cwd", paths[i]},
+                                                  {"path", "/saved/file"},
+                                                  {"status", QJsonObject{{"type", "idle"}}}}));
+        const auto count = [&](const QString &backend) {
+            for (int i = 0; i < model.rowCount(); ++i)
+                if (model.item(i)->data(BackendRole) == backend)
+                    return model.item(i)->data(CountRole).toInt();
+            return -1;
+        };
+        for (const auto view : {SessionView::All, SessionView::Active, SessionView::Waiting}) {
+            model.setView(view);
+            QCOMPARE(count("container"), 2);
+            QCOMPARE(count("other"), 1);
+            QCOMPARE(count("host"), 6);
+        }
+        model.setMyCodexWorkdirOnly(false);
+        QCOMPARE(count("container"), 6);
+        QCOMPARE(count("other"), 6);
+        model.setMyCodexWorkdirOnly(true);
+        QCOMPARE(count("container"), 2);
+        model.setContainerWorkdir("container", "/elsewhere");
+        QCOMPARE(count("container"), 1);
+        model.setContainerWorkdir("container", ""); // Older cached profiles need rediscovery.
+        QCOMPARE(count("container"), 0);
+        model.setContainerWorkdir("container", "/");
+        QCOMPARE(count("container"), 5); // Root covers absolute paths, not unknown/relative paths.
+        model.setView(SessionView::All);
+        model.resetResults(); // Search clears records but must keep backend scopes.
+        model.upsert(
+            Session::fromThread("other", {{"id", "search"}, {"cwd", "/workspace/project"}}));
+        QCOMPARE(count("other"), 0);
+        model.setMyCodexWorkdirOnly(false);
+        QCOMPARE(count("other"), 1);
+    }
     void manualNamesRemainAndEmptyRootsAreAllowed() {
         SessionModel model;
         model.backendName("b", "Before");

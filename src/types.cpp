@@ -244,6 +244,8 @@ QString serverDetails(const BackendProfile &p) {
     QStringList lines{p.name, "Socket: " + p.endpoint(), "Executable: " + p.executable};
     if (p.isContainer())
         lines << "Docker context: " + p.dockerContext << "Container: " + p.containerId
+              << "Container WORKDIR: " +
+                     p.identity["containerWorkdir"].toString("Unknown until rediscovery")
               << "Runtime user: " + p.runtimeUser << "Container started: " + p.containerEpoch;
     for (const auto &field :
          {"codexHome", "cwd", "user", "host", "pid", "userAgent", "stateMode", "stateVolume"}) {
