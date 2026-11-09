@@ -2,7 +2,7 @@
 
 Status: primary distribution direction adopted; permission baseline and host
 integration below describe the full-project design. The
-[0.3.0 implementation](implementation.md) has a narrower local-only permission
+[0.4.0 implementation](implementation.md) retains the original host-command permission
 set and a [buildable manifest](../packaging/io.github.emsi.Archcodex.json).
 Last updated: 2026-11-09.
 
@@ -29,7 +29,7 @@ versions are not the application's library baseline; the Flatpak runtime is.
 Versions 0.2.0–0.3.0 select KDE 6.11; an explicit upgrade policy remains to be defined.
 A `.deb` is not a primary deliverable in this design.
 
-Version 0.3.0 uses application ID `io.github.emsi.Archcodex` and GPL-3.0-or-later.
+Version 0.4.0 uses application ID `io.github.emsi.Archcodex` and GPL-3.0-or-later.
 The distribution repository remains open. Flathub is a possible publication
 destination; the local test bundle does not publish the application there.
 
@@ -38,8 +38,8 @@ destination; the local test bundle does not publish the application there.
 The proposed initial package contains the GUI, its libraries, terminal component
 and application metadata. It uses an installed **host Codex CLI** for terminal
 clients and local socket relays, and **host OpenSSH** for SSH connections. Docker
-and any myCodex-specific tooling are later dependencies only for container
-discovery/integration; a new myCodex command interface is not an adopted dependency.
+and Python 3 are host dependencies for container discovery/integration. No new
+myCodex command interface is required.
 
 This keeps the GUI attached to the user's existing tools and SSH configuration.
 It also means the first Flatpak is not a self-contained Codex installation. On
@@ -89,7 +89,7 @@ validate the actual package before finalizing the manifest.
 | `--socket=x11` | Include in the initial X11 package. | X11 is mandatory; native Wayland is not an initial dependency. |
 | `--share=ipc` | Include with the initial X11 configuration. | Supports the conventional X11 shared-memory path; verify with the selected Qt runtime. |
 | `--share=network` | Include. | Direct TCP/TLS app-server connections. |
-| `--talk-name=org.freedesktop.Flatpak` | Include. | Host Codex, OpenSSH and later myCodex command execution. |
+| `--talk-name=org.freedesktop.Flatpak` | Include. | Host Codex, OpenSSH and Docker command execution. |
 | `--device=dri` | Retain as a provisional Konsole-derived rendering permission. | Validate its need with the chosen rendering/runtime configuration; it does not promise GPU terminal rendering. |
 | `--socket=wayland` and `--socket=fallback-x11` | Alternative display configuration after native Wayland qualification. | Matches Konsole's current arrangement while preserving operation in an X11 desktop session. |
 | `--talk-name=org.kde.StatusNotifierWatcher` | Only if a tray feature is selected. | Tray integration is pending UI design. |
@@ -156,17 +156,13 @@ when a connection ends.
 
 ### myCodex
 
-The provider identifies the container and its actual app-server endpoint. If the
-physical socket is accessible on the Docker host, reuse the local Unix or native
-SSH-forwarded route above. Container exec relay is an alternative under review;
-a launcher command is not a mandatory step in the byte stream. Terminal client
-placement remains a separate compatibility decision.
-
-Docker discovery runs through the host-command boundary (and SSH remotely),
-without mounting the Docker socket into the Flatpak. No new filesystem grant,
-helper dependency or container mount is selected by this design. See
-[agreed myCodex requirements](mycodex.md) and the separate
-[transport discussion](mycodex-transport-options.md).
+The provider runs packaged Python through the existing host-command boundary,
+locally or over host OpenSSH. It discovers Docker containers and executes their
+native Codex proxy without a PTY. A separate PTY runs the selected container's
+TUI. Docker engine access belongs to the host user; no Docker socket is mounted
+into the Flatpak. No new network, filesystem, SSH-agent or D-Bus grant is added.
+No myCodex command family or host-installed helper is required. See
+[myCodex integration](mycodex.md).
 
 ## 5. Process lifetime, credentials and application data
 

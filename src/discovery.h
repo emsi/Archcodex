@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include "worker.h"
 #include <QDateTime>
 #include <QJsonArray>
 #include <QObject>
@@ -7,6 +8,7 @@
 #include <QTimer>
 
 namespace Archcodex {
+class JsonProcess;
 struct DiscoveryReport {
     QJsonArray issues;
     QString failure;
@@ -26,12 +28,8 @@ class HostDiscovery : public QObject {
     void failed(const QString &error);
 
   private:
-    QProcess process;
-    QTimer startup;
-    QByteArray buffer, stderrTail;
-    QString failureDetails(const QString &summary);
-    QStringList paths;
-    bool stopping = false;
-    void sendRequest();
+    std::shared_ptr<Worker> worker;
+    JsonProcess *runner;
+    bool started = false;
 };
 } // namespace Archcodex

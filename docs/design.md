@@ -1,5 +1,11 @@
 # Project design
 
+Current delivery: 0.4.0 implements direct local/SSH myCodex integration at the
+user's request, ahead of the original TCP → generic SSH → myCodex sequence below.
+The original roadmap remains historical context. [myCodex integration](mycodex.md)
+and [implementation](implementation.md) describe the adopted route and current limits.
+
+
 Status: adopted architectural direction; detailed contracts below are design
 proposals for the full project. The [0.3.0 implementation](implementation.md)
 delivers the local Unix backend and initial UI; that document records tested
@@ -113,8 +119,8 @@ state transitions. No worker thread per conversation is required.
 
 Remote integration must also remove GUI-thread process shutdown waits, isolate
 host failures, bound delivery batches and move persistence out of session-change
-callbacks on the GUI thread. These remain delivery requirements, not claims about
-the current local implementation. See the [myCodex responsiveness contract](mycodex.md#4-responsiveness-and-failure-isolation).
+callbacks on the GUI thread. Version 0.4.0 moves protocol/discovery parsing and persistence to workers,
+with bounded delivery to GUI models; real host qualification remains necessary. See the [myCodex responsiveness contract](mycodex.md#4-responsiveness-and-failure-isolation).
 
 The GUI does not need an always-running companion daemon. Closing it ends its
 notification reception. Backend work continues because the app-server has an
@@ -398,10 +404,11 @@ tests should verify that an idle connected GUI sends no periodic status RPCs.
 - Default offline search caching and realistic saved-history dataset size.
 - Whether future releases need explicit server lifecycle controls or a native
   conversation view.
-- myCodex physical socket exposure versus an exec relay, terminal placement and
-  legacy-container support; see [transport options](mycodex-transport-options.md).
-- Reliable resume-context provenance and presentation of shared/unassigned
-  history; shared files never make containers interchangeable execution targets.
+- Optional future physical socket publication; 0.4.0 adopts exec/native proxy
+  and container-local TUI placement. See [myCodex integration](mycodex.md).
+- Broader provenance, explicit context overrides and deduplicated history UI;
+  0.4.0 uses observed execution bound to environment identity, with History only
+  rows for unestablished contexts. Shared files never select execution targets.
 
 The original documentation milestone made no implementation changes. The later
 [initial implementation](implementation.md) adds application code and Flatpak

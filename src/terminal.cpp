@@ -108,6 +108,11 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     return part;
 }
 bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *error) {
+    if (p.isContainer() && (!s.executionObserved || s.executionEnvironment != p.environmentId)) {
+        *error = "This conversation is visible in shared history, but Archcodex has not observed "
+                 "it loaded in this container. Open it in its original environment first.";
+        return false;
+    }
     if (!p.validate().isEmpty() || s.id.isEmpty() || !validText(s.id, 128)) {
         *error = "Invalid session or connection configuration.";
         return false;
@@ -116,7 +121,7 @@ bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *erro
     const auto title = s.title + "  ·  " + p.name + "  ·  " + s.cwd;
     auto *part = parts.value(key).data();
     if (!part)
-        return launch(key, terminalArguments(p, s.id), title, s, error);
+        return launch(key, clientArguments(p, s.id, s.cwd), title, s, error);
     titles[key] = title;
     stack->setCurrentWidget(part->widget());
     part->widget()->setFocus();
@@ -135,10 +140,8 @@ bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QStr
     s.cwd = path;
     s.persistenceKnown = true;
     const auto key = sessionKey(p.id, s.id);
-    return launch(key,
-                  {"/bin/sh", "-c", "exec \"$@\"", "archcodex", p.executable, "--remote",
-                   p.endpoint(), "--cd", path},
-                  "New session · " + p.name + " · " + path, s, error);
+    return launch(key, clientArguments(p, {}, path), "New session · " + p.name + " · " + path, s,
+                  error);
 }
 bool TerminalArea::launch(const QString &key, const QStringList &arguments, const QString &title,
                           const Session &session, QString *error) {

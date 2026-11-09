@@ -15,6 +15,11 @@ struct BackendProfile {
     QString environmentId; // Shared only when discovery establishes a common host namespace.
     bool discovered = false;
     QJsonObject identity; // Non-secret server/discovery metadata; never configuration contents.
+    QString sshHost, dockerContext, containerId, containerEpoch, runtimeUser, runtimeHome;
+    QString discoveryHost;
+    bool isContainer() const {
+        return kind == QStringLiteral("mycodex");
+    }
     QString validate() const;
     QString endpoint() const {
         return QStringLiteral("unix://") + socketPath;
@@ -39,6 +44,9 @@ struct Session {
     bool persistenceKnown = false;
     bool unavailable = false;
     bool terminalOpen = false; // UI lifetime; deliberately not persisted.
+    bool contextRequired = false;
+    bool executionObserved = false; // Evidence from this backend's loaded inventory/events only.
+    QString executionEnvironment;   // Bind cached evidence to the container/mount identity.
     QString clientIssue;
     qint64 recency = 0;
     qint64 opened = 0;
@@ -56,6 +64,8 @@ QString sessionKey(const QString &backend, const QString &thread);
 QString projectKey(const QString &backend, const QString &path);
 bool validText(const QString &text, int maxLength = 4096);
 QStringList terminalArguments(const BackendProfile &profile, const QString &threadId);
+QStringList clientArguments(const BackendProfile &profile, const QString &threadId,
+                            const QString &cwd = {});
 QString serverLabel(const BackendProfile &profile);
 QString serverDetails(const BackendProfile &profile);
 } // namespace Archcodex

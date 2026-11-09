@@ -38,6 +38,7 @@ class SessionModel : public QStandardItemModel {
     QString environment(const QString &backend) const;
     void project(const Project &project);
     void upsert(const Session &session);
+    void upsertMany(const QList<Session> &sessions);
     void remove(const QString &backend, const QString &thread);
     void removeBackend(const QString &backend);
     void resetResults();

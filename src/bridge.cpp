@@ -114,19 +114,23 @@ class Bridge {
             ::waitpid(child, nullptr, 0);
         }
     }
-    int run(const std::string &path, const std::string &codex, bool host) {
-        if (host || path.empty()) {
+    int run(const std::string &path, const std::string &codex, bool host,
+            std::vector<std::string> command = {}) {
+        if (!command.empty() || host || path.empty()) {
             int fds[2];
             if (::socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds))
                 throw std::runtime_error("socketpair failed");
-            std::vector<std::string> args;
-            if (host)
-                args = {"/usr/bin/flatpak-spawn", "--watch-bus", "--host", codex};
-            else
-                args = {codex};
-            args.insert(args.end(), {"app-server", "proxy"});
-            if (!path.empty())
-                args.insert(args.end(), {"--sock", path});
+            std::vector<std::string> args = std::move(command);
+            // Explicit provider argv needs no shell expansion.
+            if (args.empty()) {
+                if (host)
+                    args = {"/usr/bin/flatpak-spawn", "--watch-bus", "--host", codex};
+                else
+                    args = {codex};
+                args.insert(args.end(), {"app-server", "proxy"});
+                if (!path.empty())
+                    args.insert(args.end(), {"--sock", path});
+            }
             std::vector<char *> argv;
             for (auto &a : args)
                 argv.push_back(a.data());
@@ -174,9 +178,14 @@ int main(int argc, char **argv) {
     ::signal(SIGPIPE, SIG_IGN);
     std::string path, codex = "codex";
     bool host = false;
+    std::vector<std::string> command;
     for (int i = 1; i < argc; ++i) {
         const std::string arg = argv[i];
-        if (arg == "--host-proxy")
+        if (arg == "--exec" && i + 1 < argc) {
+            for (++i; i < argc; ++i)
+                command.emplace_back(argv[i]);
+            break;
+        } else if (arg == "--host-proxy")
             host = true;
         else if (arg == "--socket" && i + 1 < argc)
             path = argv[++i];
@@ -189,7 +198,7 @@ int main(int argc, char **argv) {
     }
     try {
         Bridge b;
-        return b.run(path, codex, host);
+        return b.run(path, codex, host, std::move(command));
     } catch (const std::exception &) {
         std::cerr << "Cannot connect to the configured app-server socket.\n";
         return 1;

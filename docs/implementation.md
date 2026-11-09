@@ -1,4 +1,4 @@
-# Implementation: 0.3.2
+# Implementation: 0.4.0
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
@@ -7,6 +7,8 @@ application UI.
 
 ## Delivered behavior
 
+- Local and SSH myCodex discovery/attachment, container-native proxy/TUI launches,
+  and conservative shared-history routing. See [myCodex integration](mycodex.md).
 - Multiple named connections to existing local Unix-socket app-servers. A blank
   socket selects Codex's host default; explicit socket paths remain supported.
 - Startup discovery of existing host-visible local Codex servers, with inotify
@@ -88,7 +90,7 @@ The application-specific permissions are:
 - Access to `org.freedesktop.Flatpak` for host commands.
 
 The KDE runtime also provides its normal desktop-settings integration. This
-local-only package does not add direct network, DRI, home/host filesystem, SSH
+package does not add direct network, DRI, home/host filesystem, SSH
 agent, Docker socket or unrestricted bus access. Later backends must justify any
 additional permission.
 
@@ -195,7 +197,8 @@ independent-server persistence requirement.
 
 ## Current limits and defaults
 
-- TCP, SSH and myCodex adapters are not implemented. Native Wayland is not
+- Direct TCP and generic SSH socket profiles remain unimplemented; local/SSH
+  myCodex containers are supported by the new provider. Native Wayland is not
   qualified; the initial package uses X11/XWayland.
 - Conversation search requires the server's experimental search API. Failure is
   reported explicitly; there is no silent title-only fallback or local FTS index.
@@ -206,8 +209,8 @@ independent-server persistence requirement.
 - Folders map to lexical working-directory paths within each server. Shared
   filesystems do not merge server roots. Linked-worktree grouping is future work.
 - Host discovery requires Python 3 and readable same-user procfs metadata. Custom
-  sockets outside watched locations may require Discover; private container sockets
-  require future integration or a separately configured exposed endpoint.
+  sockets outside watched locations may require Discover. Container sockets are
+  discovered separately through the myCodex provider.
 - Terminal views are retained until explicitly closed; they are not evicted in
   the background. A new-session TUI has no thread ID at launch, so reopening its
   subsequently discovered row can create an additional client to the same server
@@ -540,3 +543,62 @@ reported version 0.3.2. The bundle imported into the isolated project-local
 Flatpak installation; cache triggers reported the existing namespace restriction.
 Effective package metadata/permissions match 0.3.1. Optional real Codex integration
 tests were not run; no model turn was initiated. No normal user installation or host configuration was changed.
+
+
+## 0.4.0 direct myCodex integration
+
+The user authorized implementation of the direct-container design. The resulting
+routes, requirements and routing policy are documented in [mycodex.md](mycodex.md).
+No myCodex changes are required. Direct TCP and generic SSH forwarding remain
+future adapters; the user's current request brings myCodex ahead of them.
+
+### Decisions not agreed in advance
+
+- `src/containers.py`, `src/containerdiscovery.*`, `src/launch.*`: use an
+  Archcodex-owned Python standard-library adapter, supplied through argv with no
+  installed helper or public myCodex command. Docker CLI and Python 3 are required
+  on selected hosts; Python 3 and compatible Codex are required in containers.
+  Existing Compose labels/UID/home metadata identify eligible containers. Missing
+  metadata fails visibly; private-mode names are not guessed. Local discovery is
+  on by default, configurable through the host dialog. No containers are created,
+  updated, stopped or recreated.
+- `src/window.*`, `src/types.*`: persist SSH aliases and enablement in window.ini;
+  keep friendly container/host roots within the existing server tree. Empty
+  containers remain in All. Explicit host registration prevents automatic access
+  to remote Docker contexts. Background SSH requires existing non-interactive
+  authentication; no graphical key/password setup is added.
+- `src/backend.*`, `src/types.*`, `src/terminal.cpp`: require observed execution
+  before normal container resume; retain unknown history with a History only
+  suffix. Evidence is cached against execution-environment identity and checked
+  at both UI and terminal boundaries. Engine/lifetime/mount/cwd checks reject
+  stale targets. No override or automatic migration between containers is added.
+- `src/worker.*`, `src/asyncbackend.*`, `src/jsonprocess.*`, `src/asyncstore.*`,
+  `src/discovery.*`, `src/sessionmodel.*`, `src/main.cpp`: move process/JSON/SQLite
+  work off the GUI, bound/coalesce model delivery, restore cache in chunks and
+  drain owned workers at application exit. Shared workers are grouped by host,
+  with separate discovery and database loops. Request deadlines are scoped to
+  operations; failed subscriptions use bounded reconnect backoff, never idle
+  status polling. Cleanup affects only owned clients and watchers.
+- `tests/test_containers.py`, `tests/test_runtime.cpp`, model/window/terminal
+  regressions: add controlled fixtures for security, routing, event behavior,
+  bulk updates and failure isolation. They do not replace real Docker/SSH and
+  full host Flatpak acceptance. No credentials or model turns are needed.
+- `CMakeLists.txt`, `data/`, `scripts/build-flatpak.sh`, README and design docs:
+  version 0.4.0, same runtime and permissions. A local x86_64 Flatpak and checksum
+  are generated under ignored dist/. Cached SDK/runtime roots and isolated
+  .build/ packaging/test artifacts are reused because namespaces are disabled
+  in this container. No host application installation, public tag, push or
+  release is part of this task. Source changes are committed under the user's
+  standing instruction; artifact build provenance is recorded in dist/BUILD-INFO.txt.
+
+0.4.0 validation: native discovery/container/core/runtime suites pass; KDE SDK
+container/core/runtime/model/window suites pass. Core/runtime also pass ASan and
+UBSan with leak detection disabled. The final window suite completes in about a
+second after fixing an already-finished-worker shutdown race. X11 tests using the
+packaged KDE Platform and patched Konsole libraries pass all terminal lifecycle
+cases, including history/environment launch guards. The staged application passes
+its real-PTY smoke test; a synthetic container/shared-history explorer screenshot
+is retained under `.build/mycodex-test/`. Formatting, whitespace, desktop entry,
+manifest JSON and shell checks pass. AppStream retains the existing missing
+homepage warning. Real Docker/SSH and full Flatpak sandbox acceptance remain
+explicitly unverified, as described in [mycodex.md](mycodex.md).

@@ -1,9 +1,15 @@
-# myCodex transport options: open discussion
+# myCodex transport options and adopted route
 
-Status: analysis, not an adopted transport or implementation plan. Updated
-2026-11-09. The [agreed integration requirements](mycodex.md) are independent of
-the outcome. No commands, mounts, containers or installed versions were changed
-or exercised to produce this analysis.
+Status: the implementation request adopts direct container integration for 0.4.0.
+Use Docker exec and native `codex app-server proxy` without a PTY for protocol
+traffic; launch the container's Codex TUI with a PTY. Remote hosts use the same
+route through host OpenSSH. No mandatory myCodex integration command, container
+recreation, new mount or public helper protocol is introduced.
+
+Published physical Unix sockets and native SSH socket forwarding remain future
+optimizations. The analysis below records the alternatives considered; unresolved
+wording there describes that earlier discussion. The current implementation,
+requirements and restrictions are authoritative in [mycodex.md](mycodex.md).
 
 ## 1. Separate discovery from connection
 

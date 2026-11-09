@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "window.h"
+#include "worker.h"
 #include <QApplication>
 #include <QCommandLineParser>
 #include <QDebug>
@@ -59,6 +60,13 @@ int main(int argc, char **argv) {
                          : QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
     try {
         InstanceLock lock(dir);
+        struct FinishWorkers {
+            ~FinishWorkers() {
+                if (!Archcodex::Worker::finishPending())
+                    qWarning()
+                        << "Worker shutdown exceeded 10 seconds; metadata cache may be incomplete.";
+            }
+        } finishWorkers;
         Archcodex::Window window(dir, !parser.isSet("smoke-test"));
         window.show();
         if (parser.isSet("smoke-test")) {

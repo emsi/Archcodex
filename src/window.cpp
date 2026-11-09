@@ -1,13 +1,16 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "window.h"
+#include "asyncbackend.h"
 #include "discovery.h"
 #include "discoverydialog.h"
+#include "launch.h"
 #include "sessionmodel.h"
 #include "terminal.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -15,6 +18,8 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHelpEvent>
+#include <QInputDialog>
+#include <QJsonDocument>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -22,6 +27,7 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -106,7 +112,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             throw std::runtime_error("Cannot create the application data directory.");
         QFile::setPermissions(directory, QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner);
     }
-    store = std::make_unique<Store>(directory + "/metadata.sqlite");
+    store = std::make_unique<AsyncStore>(directory + "/metadata.sqlite");
+    connect(store.get(), &AsyncStore::failed, this, [this](const QString &message) {
+        storageFailed = true;
+        statusBar()->showMessage("Metadata cache: " + message);
+    });
     setWindowTitle("Archcodex");
     setWindowIcon(QIcon::fromTheme("io.github.emsi.Archcodex"));
     resize(1150, 760);
@@ -250,6 +260,13 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     discoveryStatus->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     discoveryStatus->setAutoRaise(true);
     statusBar()->addPermanentWidget(discoveryStatus);
+    containerStatus = new QToolButton;
+    containerStatus->setObjectName("containerDiscoveryStatus");
+    containerStatus->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    containerStatus->setAutoRaise(true);
+    containerStatus->setText("myCodex hosts…");
+    statusBar()->addPermanentWidget(containerStatus);
+    connect(containerStatus, &QToolButton::clicked, this, &Window::containerHostsDialog);
     connect(discoveryStatus, &QToolButton::clicked, this, &Window::showDiscoveryDetails);
     auto *projectsMenu = menuBar()->addMenu("&Session");
     projectsMenu->addAction("New session in selected project", this, [this] {
@@ -275,6 +292,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connectionMenu->addAction("Discover local sessions", this, &Window::discover);
     connectionMenu->addAction("Manage connections…", this, &Window::connectionsDialog);
     connectionMenu->addAction("Discovery details…", this, &Window::showDiscoveryDetails);
+    connectionMenu->addAction("myCodex hosts…", this, &Window::containerHostsDialog);
     auto *view = menuBar()->addMenu("&View");
     auto *hideUnsaved = view->addAction("Hide unsaved sessions");
     hideUnsaved->setObjectName("hideUnsavedSessions");
@@ -306,22 +324,6 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                     "event-driven status · Konsole terminal\nGPL-3.0-or-later")
                 .arg(ARCHCODEX_VERSION));
     });
-    for (const auto &p : store->backends()) {
-        profiles[p.id] = p;
-        model->backendName(p.id, p.name);
-        results->backendName(p.id, p.name);
-        model->backendEnvironment(p.id, p.environmentId);
-        results->backendEnvironment(p.id, p.environmentId);
-    }
-    refreshNames();
-    for (const auto &p : store->projects())
-        model->project(p);
-    for (const auto &s : store->sessions()) {
-        sessions[sessionKey(s.backendId, s.id)] = s;
-        model->upsert(s);
-    }
-    for (const auto &p : profiles)
-        attach(p, connectOnStart && p.autoConnect && !p.discovered);
     discovery = new HostDiscovery(this);
     connect(discovery, &HostDiscovery::snapshot, this, &Window::applyDiscovery);
     connect(discovery, &HostDiscovery::failed, this, [this](const QString &message) {
@@ -331,8 +333,33 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         discoveryReport.checked = QDateTime::currentDateTime();
         updateSummary();
     });
-    if (connectOnStart)
-        QTimer::singleShot(0, this, &Window::discover);
+    auto hosts = QJsonDocument::fromJson(settings.value("containerHosts").toByteArray()).array();
+    if (hosts.isEmpty())
+        hosts.append(QJsonObject{{"id", "local-mycodex"}, {"ssh", ""}, {"enabled", true}});
+    for (const auto &value : hosts) {
+        const auto h = value.toObject();
+        const auto id = h["id"].toString(), host = h["ssh"].toString();
+        if (id.isEmpty() || !validText(id, 128) || (!host.isEmpty() && !validSshHost(host)))
+            continue;
+        if (!h["enabled"].toBool(true))
+            disabledContainerHosts.insert(id);
+        addContainerHost(id, host, false);
+    }
+    connect(store.get(), &AsyncStore::loaded, this,
+            [this, connectOnStart](const StoreSnapshot &cache) {
+                for (const auto &p : cache.profiles) {
+                    if (profiles.contains(p.id))
+                        continue;
+                    profiles[p.id] = p;
+                    model->backendName(p.id, p.name);
+                    results->backendName(p.id, p.name);
+                    model->backendEnvironment(p.id, p.environmentId);
+                    results->backendEnvironment(p.id, p.environmentId);
+                    attach(p, connectOnStart && p.autoConnect && !p.discovered && !p.isContainer());
+                }
+                cachePending = cache.sessions;
+                restoreCache(connectOnStart);
+            });
     restoreGeometry(settings.value("geometry").toByteArray());
     splitter->restoreState(settings.value("splitter").toByteArray());
     if (settings.contains("expanded")) {
@@ -341,13 +368,47 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     }
     updateSummary();
 }
+void Window::restoreCache(bool connectOnStart) {
+    QList<Session> batch;
+    for (int i = 0; i < 64 && !cachePending.isEmpty(); ++i) {
+        auto s = cachePending.takeLast();
+        const auto key = sessionKey(s.backendId, s.id);
+        if (!profiles.contains(s.backendId))
+            continue;
+        s.contextRequired = profiles[s.backendId].isContainer();
+        if (s.contextRequired && s.executionEnvironment != profiles[s.backendId].environmentId)
+            s.executionObserved = false;
+        if (sessions.contains(key))
+            continue; // New events take precedence over cache.
+        sessions[key] = s;
+        batch << s;
+    }
+    model->upsertMany(batch);
+    if (!cachePending.isEmpty()) {
+        QTimer::singleShot(0, this, [this, connectOnStart] { restoreCache(connectOnStart); });
+        return;
+    }
+    refreshNames();
+    QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+    if (settings.contains("expanded")) {
+        tree->collapseAll();
+        restoreTree(tree, settings.value("expanded").toStringList(), {});
+    }
+    if (connectOnStart)
+        discover();
+}
 Window::~Window() {
     discovery->disconnect(this);
-    discovery->stop();
+    delete discovery;
     for (auto *b : backends) {
         b->disconnect(this);
-        b->disconnectServer();
+        delete b;
     }
+    for (auto *d : containerDiscovery) {
+        d->disconnect(this);
+        delete d;
+    }
+    terminal->disconnect(this);
 }
 bool Window::persist(const std::function<void()> &op) {
     try {
@@ -369,41 +430,47 @@ void Window::error(const QString &text) {
 }
 void Window::attach(const BackendProfile &p, bool start) {
     auto *b =
-        new LocalBackend(p, QCoreApplication::applicationDirPath() + "/archcodex-bridge", this);
+        new AsyncBackend(p, QCoreApplication::applicationDirPath() + "/archcodex-bridge", this);
     backends[p.id] = b;
     connect(b, &Backend::loadedInventory, this, [this, id = p.id](const QSet<QString> &loaded) {
         // Cached rows outside the first history page also need reconciliation.
+        QList<Session> updates, matches;
         for (auto &s : sessions)
             if (s.backendId == id && !s.id.startsWith("new-") && !s.known &&
                 !loaded.contains(s.id)) {
                 s.status = {{"type", "notLoaded"}};
                 s.known = true;
-                model->upsert(s);
+                updates << s;
                 persist([&] { store->save(s); });
                 const auto key = sessionKey(id, s.id);
                 if (searchSessions.contains(key)) {
                     searchSessions[key] = s;
-                    results->upsert(s);
+                    matches << s;
                 }
             }
+        model->upsertMany(updates);
+        results->upsertMany(matches);
     });
     connect(b, &Backend::connectionChanged, this,
             [this, id = p.id](const QString &text, bool ready) {
                 connectionStates[id] = text;
                 connectionReady[id] = ready;
                 if (!ready) {
+                    QList<Session> updates, matches;
                     if (pendingOpen.startsWith(id + QChar(0x1f)))
                         pendingOpen.clear();
                     for (auto it = sessions.begin(); it != sessions.end(); ++it)
                         if (it->backendId == id) {
                             it->known = false;
-                            model->upsert(*it);
+                            updates << *it;
                         }
                     for (auto it = searchSessions.begin(); it != searchSessions.end(); ++it)
                         if (it->backendId == id) {
                             it->known = false;
-                            results->upsert(*it);
+                            matches << *it;
                         }
+                    model->upsertMany(updates);
+                    results->upsertMany(matches);
                     if (searchingView && searching.remove(id)) {
                         searchErrors
                             << profiles.value(id).name + ": Search interrupted by disconnection.";
@@ -412,21 +479,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                 }
                 updateSummary();
             });
-    connect(b, &Backend::sessionChanged, this, [this](Session s) {
-        const auto key = sessionKey(s.backendId, s.id);
-        s.opened = sessions.value(key).opened;
-        s.terminalOpen = sessions.value(key).terminalOpen;
-        s.clientIssue = sessions.value(key).clientIssue;
-        sessions[key] = s;
-        model->upsert(s);
-        persist([&] { store->save(s); });
-        if (searchSessions.contains(key)) {
-            searchSessions[key] = s;
-            results->upsert(s);
-            if (searchingView)
-                updateSearchSummary();
-        }
-    });
+    connect(b, &Backend::sessionChanged, this, [this](const Session &s) { applySessions({s}); });
+    connect(b, &Backend::sessionsChanged, this, &Window::applySessions);
     connect(b, &Backend::sessionRemoved, this, [this, id = p.id](const QString &thread) {
         const auto key = sessionKey(id, thread);
         if (sessions.value(key).terminalOpen) {
@@ -458,6 +512,7 @@ void Window::attach(const BackendProfile &p, bool start) {
                               bool complete) {
                 if (token != searchToken || !searchingView)
                     return;
+                QList<Session> updates;
                 for (auto s : matches) {
                     if (!scopeBackend.isEmpty() &&
                         (s.backendId != scopeBackend ||
@@ -470,8 +525,9 @@ void Window::attach(const BackendProfile &p, bool start) {
                     else
                         s.known = false;
                     searchSessions[key] = s;
-                    results->upsert(s);
+                    updates << s;
                 }
+                results->upsertMany(updates);
                 if (!error.isEmpty())
                     searchErrors << profiles.value(id).name + ": " + error;
                 if (complete)
@@ -485,29 +541,39 @@ void Window::attach(const BackendProfile &p, bool start) {
         auto &profile = profiles[id];
         for (auto it = identity.begin(); it != identity.end(); ++it)
             profile.identity[it.key()] = it.value();
+        if (profile.isContainer() && identity["codexHome"].isString())
+            profile.identity["serverCodexHome"] = identity["codexHome"];
         refreshNames();
         persist([&] { store->save(profile); });
     });
-    connect(b, &Backend::sessionVerified, this,
-            [this, id = p.id](const QString &thread, const QString &issue) {
-                const auto key = sessionKey(id, thread);
-                if (pendingOpen != key)
-                    return;
-                pendingOpen.clear();
-                if (!issue.isEmpty()) {
-                    error("This server could not open the session:\n" + issue);
-                    return;
-                }
-                auto s = sessions.value(key);
-                s.opened = QDateTime::currentSecsSinceEpoch();
-                sessions[key] = s;
-                QString launchError;
-                if (!terminal->open(profiles[id], s, &launchError)) {
-                    error(launchError);
-                    return;
-                }
-                persist([&] { store->save(s); });
-            });
+    connect(
+        b, &Backend::sessionVerified, this,
+        [this, id = p.id](const QString &thread, const QString &issue) {
+            const auto key = sessionKey(id, thread);
+            if (pendingOpen != key)
+                return;
+            pendingOpen.clear();
+            if (!issue.isEmpty()) {
+                error("This server could not open the session:\n" + issue);
+                return;
+            }
+            auto s = sessions.value(key);
+            if (profiles[id].isContainer() &&
+                (!s.executionObserved || s.executionEnvironment != profiles[id].environmentId)) {
+                error("This is shared history. Archcodex has not observed this conversation "
+                      "loaded in this container. Open it in its original environment first; "
+                      "it will then become available here through server events.");
+                return;
+            }
+            s.opened = QDateTime::currentSecsSinceEpoch();
+            sessions[key] = s;
+            QString launchError;
+            if (!terminal->open(profiles[id], s, &launchError)) {
+                error(launchError);
+                return;
+            }
+            persist([&] { store->save(s); });
+        });
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
     else
@@ -522,6 +588,323 @@ void Window::expandActivityViews() {
         if (filter->rowCount(index))
             tree->setExpanded(index, !closed.contains(index.data(KeyRole).toString()));
     });
+}
+void Window::applySessions(const QList<Session> &items) {
+    QList<Session> updates, matches;
+    for (auto s : items) {
+        if (!profiles.contains(s.backendId))
+            continue;
+        const auto key = sessionKey(s.backendId, s.id);
+        const auto old = sessions.value(key);
+        s.opened = old.opened;
+        s.terminalOpen = old.terminalOpen;
+        s.clientIssue = old.clientIssue;
+        s.contextRequired = profiles[s.backendId].isContainer();
+        if (s.contextRequired) {
+            const auto environment = profiles[s.backendId].environmentId;
+            s.executionObserved =
+                (s.executionObserved && s.executionEnvironment == environment) ||
+                (old.executionObserved && old.executionEnvironment == environment);
+            s.executionEnvironment = environment;
+        }
+        sessions[key] = s;
+        updates << s;
+        store->save(s);
+        if (searchSessions.contains(key)) {
+            searchSessions[key] = s;
+            matches << s;
+        }
+    }
+    model->upsertMany(updates);
+    results->upsertMany(matches);
+    if (searchingView && !matches.isEmpty())
+        updateSearchSummary();
+}
+void Window::addContainerHost(const QString &id, const QString &host, bool start) {
+    if (containerDiscovery.contains(id))
+        return;
+    containerHosts[id] = host;
+    auto *d = new ContainerDiscovery(id, host, this);
+    containerDiscovery[id] = d;
+    containerFeedback[id] = disabledContainerHosts.contains(id) ? "Disabled" : "Not connected";
+    connect(d, &ContainerDiscovery::snapshot, this,
+            [this, id](const QJsonObject &data) { applyContainers(id, data); });
+    connect(d, &ContainerDiscovery::failed, this, [this, id](const QString &error) {
+        if (disabledContainerHosts.contains(id))
+            return;
+        containerFeedback[id] = error;
+        containerProblems.insert(id);
+        updateContainerSummary();
+    });
+    if (start) {
+        containerFeedback[id] = "Discovering…";
+        d->refresh();
+    }
+    updateContainerSummary();
+}
+void Window::saveContainerHosts() {
+    QJsonArray data;
+    for (auto it = containerHosts.begin(); it != containerHosts.end(); ++it)
+        data.append(QJsonObject{{"id", it.key()},
+                                {"ssh", it.value()},
+                                {"enabled", !disabledContainerHosts.contains(it.key())}});
+    QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+    settings.setValue("containerHosts", QJsonDocument(data).toJson(QJsonDocument::Compact));
+}
+void Window::updateContainerSummary() {
+    QStringList details;
+    for (auto it = containerHosts.begin(); it != containerHosts.end(); ++it)
+        details << (it.value().isEmpty() ? "This computer" : it.value()) + ": " +
+                       containerFeedback.value(it.key());
+    containerStatus->setToolTip(details.join('\n'));
+    containerStatus->setText(containerProblems.isEmpty() ? "myCodex hosts…"
+                                                         : "myCodex connection issues…");
+    containerStatus->setIcon(
+        QIcon::fromTheme(containerProblems.isEmpty() ? "network-server" : "dialog-warning"));
+    emit connectionSummaryChanged();
+}
+void Window::containerHostsDialog() {
+    QDialog dialog(this);
+    dialog.setWindowTitle("myCodex hosts");
+    auto *layout = new QVBoxLayout(&dialog);
+    auto *description =
+        new QLabel("Local containers are discovered automatically. Remote discovery uses "
+                   "host OpenSSH and requires a known host key and non-interactive authentication "
+                   "(for example, "
+                   "your SSH agent). Docker and Python 3 must be available on each host.");
+    description->setWordWrap(true);
+    layout->addWidget(description);
+    auto *list = new QListWidget;
+    list->setObjectName("containerHosts");
+    layout->addWidget(list);
+    auto populate = [&] {
+        const auto current =
+            list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
+        list->clear();
+        for (auto it = containerHosts.begin(); it != containerHosts.end(); ++it) {
+            const auto label = (it.value().isEmpty() ? "This computer" : it.value()) + " — " +
+                               containerFeedback.value(it.key());
+            auto *item = new QListWidgetItem(label, list);
+            item->setData(Qt::UserRole, it.key());
+            item->setToolTip(label);
+            if (it.key() == current)
+                list->setCurrentItem(item);
+        }
+    };
+    populate();
+    connect(this, &Window::connectionSummaryChanged, &dialog, populate);
+    auto *row = new QHBoxLayout;
+    layout->addLayout(row);
+    auto button = [&](const QString &text, auto action) {
+        auto *b = new QPushButton(text);
+        row->addWidget(b);
+        connect(b, &QPushButton::clicked, &dialog, action);
+    };
+    button("Add SSH host…", [&] {
+        bool ok = false;
+        const auto host =
+            QInputDialog::getText(&dialog, "Add myCodex host", "SSH alias or user@host",
+                                  QLineEdit::Normal, {}, &ok)
+                .trimmed();
+        if (!ok)
+            return;
+        if (!validSshHost(host)) {
+            error("Enter an SSH alias or user@host without command options.");
+            return;
+        }
+        if (containerHosts.values().contains(host)) {
+            error("This host is already configured.");
+            return;
+        }
+        addContainerHost(QUuid::createUuid().toString(QUuid::WithoutBraces), host, true);
+        saveContainerHosts();
+    });
+    button("Connect / retry", [&] {
+        if (!list->currentItem())
+            return;
+        const auto id = list->currentItem()->data(Qt::UserRole).toString();
+        disabledContainerHosts.remove(id);
+        containerFeedback[id] = "Discovering…";
+        containerDiscovery[id]->refresh();
+        saveContainerHosts();
+        updateContainerSummary();
+    });
+    button("Disable", [&] {
+        if (!list->currentItem())
+            return;
+        const auto id = list->currentItem()->data(Qt::UserRole).toString();
+        disabledContainerHosts.insert(id);
+        containerDiscovery[id]->stop();
+        containerFeedback[id] = "Disabled";
+        containerProblems.remove(id);
+        for (const auto &p : profiles)
+            if (p.discoveryHost == id)
+                backends[p.id]->disconnectServer();
+        saveContainerHosts();
+        updateContainerSummary();
+    });
+    button("Remove", [&] {
+        if (!list->currentItem())
+            return;
+        const auto id = list->currentItem()->data(Qt::UserRole).toString();
+        if (containerHosts[id].isEmpty()) {
+            error("The local host can be disabled, but not removed.");
+            return;
+        }
+        delete containerDiscovery.take(id);
+        containerHosts.remove(id);
+        containerFeedback.remove(id);
+        containerProblems.remove(id);
+        disabledContainerHosts.remove(id);
+        for (const auto &p : profiles)
+            if (p.discoveryHost == id)
+                backends[p.id]->disconnectServer();
+        saveContainerHosts();
+        updateContainerSummary();
+    });
+    auto *close = new QDialogButtonBox(QDialogButtonBox::Close);
+    connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    layout->addWidget(close);
+    dialog.resize(850, 390);
+    dialog.exec();
+}
+void Window::applyContainers(const QString &hostId, const QJsonObject &inventory) {
+    if (!containerHosts.contains(hostId) || disabledContainerHosts.contains(hostId))
+        return;
+    QSet<QString> present, empty;
+    QStringList issues;
+    for (const auto &issue : inventory["issues"].toArray())
+        issues << issue.toObject()["summary"].toString();
+    const auto containers = inventory["containers"].toArray();
+    if (containers.size() > 512) {
+        containerFeedback[hostId] = "Container inventory exceeds the 512-container limit.";
+        containerProblems.insert(hostId);
+        updateContainerSummary();
+        return;
+    }
+    for (const auto &value : containers) {
+        const auto c = value.toObject();
+        const auto cid = c["containerId"].toString(), engine = c["engine"].toString();
+        if (!QRegularExpression("^[a-f0-9]{64}$").match(cid).hasMatch() || !validText(engine, 256))
+            continue;
+        const auto key = hostId + QChar(0x1f) + engine + QChar(0x1f) + cid;
+        const auto digest = [](const QString &s) {
+            return QString::fromLatin1(
+                QCryptographicHash::hash(s.toUtf8(), QCryptographicHash::Sha256).toHex());
+        };
+        const auto rootId = "container:" + hostId + ":" + digest(key);
+        auto endpoints = c["endpoints"].toArray();
+        for (const auto &i : c["issues"].toArray())
+            issues << c["containerName"].toString() + ": " + i.toObject()["summary"].toString();
+        bool hasServer = false;
+        if (endpoints.size() > 4096) {
+            issues << "Container endpoint inventory exceeds its limit.";
+            endpoints = {};
+        }
+        for (const auto &entry : endpoints) {
+            const auto ep = entry.toObject();
+            BackendProfile p;
+            p.id = "mc-" + digest(key + QChar(0x1f) + ep["path"].toString());
+            if (ignoredSockets.contains(p.id))
+                continue;
+            p.kind = "mycodex";
+            p.containerId = cid;
+            p.containerEpoch = c["containerEpoch"].toString();
+            p.dockerContext = c["dockerContext"].toString();
+            p.sshHost = containerHosts[hostId];
+            p.discoveryHost = hostId;
+            p.runtimeUser = c["runtimeUser"].toString();
+            p.runtimeHome = c["runtimeHome"].toString();
+            p.socketPath = ep["path"].toString();
+            p.executable = ep["executable"].toString("codex");
+            p.environmentId = digest(key + c["environment"].toString());
+            p.discovered = true;
+            p.identity = {{"containerName", c["containerName"]},
+                          {"containerEnvironment", c["environment"]},
+                          {"dockerEngine", engine},
+                          {"stateMode", c["stateMode"]},
+                          {"stateVolume", c["stateVolume"]},
+                          {"codexHome", c["codexHome"]},
+                          {"pid", ep["pid"]},
+                          {"cwd", ep["cwd"]}};
+            p.name = serverLabel(p);
+            if (!p.validate().isEmpty()) {
+                issues << p.name + ": " + p.validate();
+                continue;
+            }
+            present.insert(p.id);
+            hasServer = true;
+            const auto old = profiles.value(p.id);
+            const bool changed =
+                !backends.contains(p.id) || old.containerEpoch != p.containerEpoch ||
+                old.environmentId != p.environmentId || old.executable != p.executable ||
+                old.dockerContext != p.dockerContext || old.runtimeUser != p.runtimeUser;
+            if (!changed && old.identity.contains("serverCodexHome")) {
+                p.identity["serverCodexHome"] = old.identity["serverCodexHome"];
+                p.identity["codexHome"] = old.identity["serverCodexHome"];
+            }
+            if (profiles.contains(p.id))
+                p.autoConnect = old.autoConnect;
+            if (changed && backends.contains(p.id)) {
+                auto *b = backends.take(p.id);
+                b->disconnect(this);
+                delete b;
+                if (old.environmentId != p.environmentId)
+                    for (auto &s : sessions)
+                        if (s.backendId == p.id) {
+                            s.executionObserved = false;
+                            s.known = false;
+                            model->upsert(s);
+                            store->save(s);
+                        }
+            }
+            profiles[p.id] = p;
+            store->save(p);
+            model->backendEnvironment(p.id, p.environmentId);
+            results->backendEnvironment(p.id, p.environmentId);
+            if (changed)
+                attach(p, p.autoConnect && !paused.contains(p.id));
+            else if (!backends[p.id]->ready() && p.autoConnect && !paused.contains(p.id) &&
+                     !discoveredPresent.contains(p.id))
+                backends[p.id]->connectServer();
+            discoveredPresent.insert(p.id);
+        }
+        if (!hasServer) {
+            empty.insert(rootId);
+            model->backendName(
+                rootId,
+                "myCodex · " + c["containerName"].toString() + " · " +
+                    (containerHosts[hostId].isEmpty() ? "This computer" : containerHosts[hostId]));
+            model->backendDetails(
+                rootId, c["paused"].toBool() ? "Container paused"
+                                             : "Running container — no accessible Codex server.\n" +
+                                                   issues.join('\n'));
+        }
+    }
+    for (const auto &id : emptyContainers)
+        if (id.startsWith("container:" + hostId + ":") && !empty.contains(id))
+            model->removeBackend(id);
+    for (auto it = emptyContainers.begin(); it != emptyContainers.end();)
+        if (it->startsWith("container:" + hostId + ":"))
+            it = emptyContainers.erase(it);
+        else
+            ++it;
+    emptyContainers.unite(empty);
+    if (inventory["complete"].toBool())
+        for (const auto &p : profiles)
+            if (p.discoveryHost == hostId && !present.contains(p.id)) {
+                backends[p.id]->disconnectServer();
+                discoveredPresent.remove(p.id);
+            }
+    refreshNames();
+    containerFeedback[hostId] =
+        QString("%1 containers, %2 servers").arg(containers.size()).arg(present.size()) +
+        (issues.isEmpty() ? QString() : "\n" + issues.join('\n'));
+    if (issues.isEmpty())
+        containerProblems.remove(hostId);
+    else
+        containerProblems.insert(hostId);
+    updateContainerSummary();
 }
 void Window::refreshNames() {
     // Distinguish otherwise identical automatic labels with stable profile order,
@@ -614,6 +997,11 @@ void Window::showDiscoveryDetails() {
 }
 void Window::editConnection(const QString &id) {
     BackendProfile p = profiles.value(id);
+    if (p.isContainer()) {
+        error("Container endpoints are discovered automatically. Manage their host in Connections "
+              "→ myCodex hosts.");
+        return;
+    }
     if (id.isEmpty()) {
         p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
         p.name = "Local Codex";
@@ -675,7 +1063,7 @@ void Window::editConnection(const QString &id) {
 }
 void Window::connectionsDialog() {
     QDialog dialog(this);
-    dialog.setWindowTitle("Connections — local Unix sockets");
+    dialog.setWindowTitle("Connections — Codex servers");
     auto *layout = new QVBoxLayout(&dialog);
     auto *list = new QListWidget;
     layout->addWidget(list);
@@ -740,7 +1128,8 @@ void Window::connectionsDialog() {
             return;
         if (!persist([&] { store->removeBackend(id); }))
             return;
-        ignoredSockets.insert(discoveredPaths.value(id, profiles[id].socketPath));
+        ignoredSockets.insert(
+            profiles[id].isContainer() ? id : discoveredPaths.value(id, profiles[id].socketPath));
         if (auto *b = backends.take(id)) {
             b->disconnectServer();
             b->deleteLater();
@@ -770,11 +1159,17 @@ void Window::connectionsDialog() {
 void Window::discover() {
     QStringList paths;
     for (const auto &p : profiles)
-        if (!p.socketPath.isEmpty())
+        if (!p.isContainer() && !p.socketPath.isEmpty())
             paths << p.socketPath;
     discoveryReport.inProgress = true;
     updateSummary();
     discovery->refresh(paths);
+    for (auto it = containerDiscovery.begin(); it != containerDiscovery.end(); ++it)
+        if (!disabledContainerHosts.contains(it.key())) {
+            containerFeedback[it.key()] = "Discovering…";
+            it.value()->refresh();
+        }
+    updateContainerSummary();
 }
 void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues) {
     QSet<QString> present;
@@ -786,8 +1181,8 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
         QString id;
         const auto aliases = item["aliases"].toArray();
         for (const auto &p : profiles)
-            if (p.socketPath == path || aliases.contains(p.socketPath) ||
-                (p.socketPath.isEmpty() && item["default"].toBool())) {
+            if (!p.isContainer() && (p.socketPath == path || aliases.contains(p.socketPath) ||
+                                     (p.socketPath.isEmpty() && item["default"].toBool()))) {
                 id = p.id;
                 break;
             }
@@ -853,8 +1248,11 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
     refreshNames();
     if (issues.isEmpty()) {
         for (const auto &id : discoveredPresent - present)
-            if (profiles.contains(id) && profiles[id].discovered)
+            if (profiles.contains(id) && profiles[id].discovered && !profiles[id].isContainer())
                 backends[id]->disconnectServer();
+        for (const auto &id : discoveredPresent)
+            if (profiles.value(id).isContainer())
+                present.insert(id);
         discoveredPresent = present;
     } else
         discoveredPresent.unite(present);

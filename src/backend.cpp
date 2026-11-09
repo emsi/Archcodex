@@ -22,11 +22,28 @@ static QJsonArray sources() {
 }
 CodexBackend::CodexBackend(BackendProfile p, const QString &path, QObject *parent)
     : Backend(std::move(p), parent), bridgePath(path) {
+    reconnectTimer.setParent(this);
+    deadlineTimer.setParent(this);
     reconnectTimer.setSingleShot(true);
     deadlineTimer.setSingleShot(true);
     connect(&reconnectTimer, &QTimer::timeout, this, &CodexBackend::connectServer);
-    connect(&deadlineTimer, &QTimer::timeout, this,
-            [this] { failed(QStringLiteral("Server request timed out. Reconnecting…")); });
+    connect(&deadlineTimer, &QTimer::timeout, this, [this] {
+        QList<Reply> expired;
+        const auto now = QDateTime::currentMSecsSinceEpoch();
+        for (auto it = pending.begin(); it != pending.end();)
+            if (it->deadline <= now) {
+                expired << std::move(it->reply);
+                it = pending.erase(it);
+            } else
+                ++it;
+        const auto epoch = generation;
+        for (const auto &reply : expired) {
+            if (epoch != generation)
+                break;
+            reply({}, "Server request timed out.");
+        }
+        armDeadline();
+    });
 }
 CodexBackend::~CodexBackend() {
     wanted = false;
@@ -85,6 +102,8 @@ void CodexBackend::connectServer() {
     names.clear();
     removed.clear();
     loaded.clear();
+    observed.clear();
+    loadedKnown = false;
     nextCursor.clear();
     for (auto &s : sessions) {
         s.known = false;
@@ -97,6 +116,7 @@ void CodexBackend::connectServer() {
         return;
     }
     emit connectionChanged(QStringLiteral("Connecting…"), false);
+    stderrTail.clear();
     process = new QProcess(this);
     const auto epoch = generation;
     const auto args = bridgeArguments();
@@ -104,7 +124,7 @@ void CodexBackend::connectServer() {
     // Never accumulate or surface unbounded helper stderr (which can contain host details).
     connect(process, &QProcess::readyReadStandardError, this, [this] {
         if (process)
-            process->readAllStandardError();
+            stderrTail = (stderrTail + process->readAllStandardError()).right(4096);
     });
     connect(process, &QProcess::errorOccurred, this, [this, epoch](QProcess::ProcessError error) {
         if (epoch == generation && error == QProcess::FailedToStart)
@@ -114,7 +134,9 @@ void CodexBackend::connectServer() {
             [this, epoch](int, QProcess::ExitStatus) {
                 if (epoch == generation)
                     failed(QStringLiteral(
-                        "Connection closed. Check the host Codex executable and socket."));
+                               "Connection closed. Check the selected environment and socket.") +
+                           (stderrTail.isEmpty() ? QString()
+                                                 : "\n" + QString::fromUtf8(stderrTail).trimmed()));
             });
     connect(process, &QProcess::started, this, [this] {
         request("initialize",
@@ -188,7 +210,20 @@ void CodexBackend::receive() {
     if (!process)
         return;
     buffer += process->readAllStandardOutput();
+    if (buffer.size() > 32 * 1024 * 1024) {
+        failed("Incoming event buffer exceeded its limit.");
+        return;
+    }
+    int frames = 0;
     while (buffer.size() >= 4) {
+        if (++frames > 64) {
+            const auto epoch = generation;
+            QTimer::singleShot(0, this, [this, epoch] {
+                if (epoch == generation)
+                    receive();
+            });
+            return;
+        }
         const auto n = qFromBigEndian<quint32>(buffer.constData());
         if (n > 16 * 1024 * 1024) {
             failed("Server message exceeded 16 MiB.");
@@ -235,10 +270,19 @@ void CodexBackend::message(const QJsonObject &m) {
     if ((method == "thread/status/changed" || method == "thread/closed") && !id.isEmpty()) {
         statuses[id] =
             method == "thread/closed" ? QJsonObject{{"type", "notLoaded"}} : p["status"].toObject();
+        if (statuses[id]["type"].isString() && statuses[id]["type"] != "notLoaded") {
+            observed.insert(id);
+            loaded.insert(id);
+        } else
+            loaded.remove(id);
         if (sessions.contains(id)) {
             auto &s = sessions[id];
             s.status = statuses[id];
             s.known = true;
+            if (profile.isContainer()) {
+                s.executionObserved |= observed.contains(id);
+                s.executionEnvironment = profile.environmentId;
+            }
             emit sessionChanged(s);
             if (!s.isSaved())
                 readThread(id, true); // Persistence may have materialized with this turn.
@@ -247,6 +291,8 @@ void CodexBackend::message(const QJsonObject &m) {
     } else if (method == "thread/started") {
         const auto thread = p["thread"].toObject();
         const auto startedId = thread["id"].toString();
+        observed.insert(startedId);
+        loaded.insert(startedId);
         if (thread["status"].isObject())
             statuses[startedId] = thread["status"].toObject();
         upsert(thread, true);
@@ -277,6 +323,14 @@ void CodexBackend::upsert(QJsonObject t, bool verified) {
     if (names.contains(id))
         t["name"] = names[id];
     auto s = Session::fromThread(profile.id, t);
+    // Never trust history fields as execution provenance. This evidence is app-owned.
+    s.contextRequired = profile.isContainer();
+    s.executionObserved = observed.contains(id);
+    s.executionEnvironment = profile.environmentId;
+    if (profile.isContainer() && !statuses.contains(id) && !loaded.contains(id)) {
+        s.status = {{"type", "notLoaded"}};
+        s.known = loadedKnown;
+    }
     if (!validText(s.cwd))
         return;
     s.unavailable = !verified && sessions.value(id).unavailable;
@@ -328,6 +382,7 @@ void CodexBackend::loadedPage(const QString &cursor) {
         }
         for (const auto &id : r["data"].toArray()) {
             loaded.insert(id.toString());
+            observed.insert(id.toString());
             readThread(id.toString());
         }
         const auto next = r["nextCursor"].toString();
@@ -340,6 +395,7 @@ void CodexBackend::loadedPage(const QString &cursor) {
         if (!next.isEmpty())
             loadedPage(next);
         else {
+            loadedKnown = true;
             // Only reconcile after the complete inventory, never after an error
             // or a partial page. Events received during it take precedence.
             for (auto it = statuses.cbegin(); it != statuses.cend(); ++it) {
@@ -349,9 +405,15 @@ void CodexBackend::loadedPage(const QString &cursor) {
                     loaded.insert(it.key());
             }
             for (auto &s : sessions)
-                if (!s.known && !loaded.contains(s.id)) {
+                if ((!s.known || profile.isContainer()) && !loaded.contains(s.id)) {
                     s.status = {{"type", "notLoaded"}};
                     s.known = true;
+                    emit sessionChanged(s);
+                }
+            if (profile.isContainer())
+                for (auto &s : sessions) {
+                    s.executionObserved |= observed.contains(s.id);
+                    s.executionEnvironment = profile.environmentId;
                     emit sessionChanged(s);
                 }
             emit loadedInventory(loaded);
@@ -457,6 +519,11 @@ void CodexBackend::searchPage(const QString &query, const QString &cursor, quint
                 for (const auto &v : r["data"].toArray()) {
                     auto t = v.toObject()["thread"].toObject();
                     auto s = Session::fromThread(profile.id, t);
+                    s.contextRequired = profile.isContainer();
+                    s.executionObserved = observed.contains(s.id);
+                    s.executionEnvironment = profile.environmentId;
+                    if (profile.isContainer() && !loaded.contains(s.id))
+                        s.status = {{"type", "notLoaded"}};
                     if (!s.id.isEmpty() && validText(s.id, 128) && validText(s.cwd))
                         matches.append(s);
                 }

@@ -8,6 +8,7 @@
 #include <QAction>
 #include <QClipboard>
 #include <QComboBox>
+#include <QCryptographicHash>
 #include <QHelpEvent>
 #include <QLabel>
 #include <QLineEdit>
@@ -24,6 +25,108 @@
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void cleanup() {
+        QVERIFY(Worker::finishPending());
+    }
+    void containersHaveSeparateRootsAndSharedHistoryDoesNotBecomeLive() {
+        QTemporaryDir data;
+        const auto digest = [](const QString &value) {
+            return QString::fromLatin1(
+                QCryptographicHash::hash(value.toUtf8(), QCryptographicHash::Sha256).toHex());
+        };
+        QJsonArray containers;
+        QStringList ids;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            for (const auto letter : {'a', 'b'}) {
+                const QString cid(64, letter);
+                const auto key =
+                    "local-mycodex" + QString(QChar(0x1f)) + "engine" + QChar(0x1f) + cid;
+                BackendProfile p;
+                p.id = "mc-" + digest(key + QChar(0x1f) + "/tmp/physical.sock");
+                p.name = QString("myCodex %1").arg(letter);
+                p.kind = "mycodex";
+                p.autoConnect = false; // This UI fixture must never contact a real Docker engine.
+                p.discovered = true;
+                p.containerId = cid;
+                p.containerEpoch = "epoch";
+                p.runtimeHome = "/home/alice";
+                p.runtimeUser = "alice";
+                p.dockerContext = "default";
+                p.discoveryHost = "local-mycodex";
+                p.socketPath = "/tmp/physical.sock";
+                p.environmentId = digest(key + "mounts");
+                store.save(p);
+                ids << p.id;
+                containers << QJsonObject{
+                    {"containerId", cid},
+                    {"containerEpoch", "epoch"},
+                    {"engine", "engine"},
+                    {"containerName", QString("project-%1").arg(letter)},
+                    {"runtimeHome", p.runtimeHome},
+                    {"runtimeUser", p.runtimeUser},
+                    {"dockerContext", "default"},
+                    {"environment", "mounts"},
+                    {"stateMode", "Shared"},
+                    {"stateVolume", "codex_state"},
+                    {"codexHome", "/home/alice/.codex"},
+                    {"issues", QJsonArray{}},
+                    {"endpoints",
+                     QJsonArray{QJsonObject{{"path", p.socketPath}, {"executable", "codex"}}}}};
+            }
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
+        auto *discovery = window.findChild<ContainerDiscovery *>();
+        discovery->snapshot(
+            {{"containers", containers}, {"issues", QJsonArray{}}, {"complete", true}});
+        auto *tree = window.findChild<QTreeView *>();
+        QCOMPARE(tree->model()->rowCount(), 2);
+        for (auto *b : window.findChildren<Backend *>()) {
+            QVERIFY(!b->ready());
+            auto s = Session::fromThread(
+                b->profile.id,
+                {{"id", "same-shared-thread"},
+                 {"cwd", "/workspace"},
+                 {"name", "Shared conversation"},
+                 {"path", "/history.jsonl"},
+                 {"status",
+                  QJsonObject{{"type", b->profile.id == ids[0] ? "idle" : "notLoaded"}}}});
+            s.executionObserved = b->profile.id == ids[0];
+            s.executionEnvironment = b->profile.environmentId;
+            b->sessionsChanged({s});
+        }
+        auto *tabs = window.findChild<QTabBar *>();
+        tabs->setCurrentIndex(1);
+        QCOMPARE(tree->model()->rowCount(), 1);
+        QCOMPARE(tree->model()->index(0, 0).data(BackendRole).toString(), ids[0]);
+        tabs->setCurrentIndex(0);
+        auto empty = containers[0].toObject();
+        empty["containerId"] = QString(64, 'c');
+        empty["containerName"] = "empty-container";
+        empty["endpoints"] = QJsonArray{};
+        containers << empty;
+        discovery->snapshot(
+            {{"containers", containers}, {"issues", QJsonArray{}}, {"complete", true}});
+        QCOMPARE(tree->model()->rowCount(), 3);
+        bool found = false;
+        for (int i = 0; i < tree->model()->rowCount(); ++i) {
+            const auto root = tree->model()->index(i, 0);
+            if (root.data(Qt::DisplayRole).toString().contains("empty-container")) {
+                found = true;
+                QCOMPARE(root.data(CountRole).toInt(), 0);
+            }
+        }
+        QVERIFY(found);
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty()) {
+            tree->expandAll();
+            QApplication::processEvents();
+            QVERIFY(window.grab().save(screenshots + "/containers.png"));
+        }
+        window.close();
+    }
     void discoveryFeedbackIsActionableAndDoesNotInterrupt() {
         Fixture fixture;
         QTemporaryDir data;
@@ -184,6 +287,7 @@ class WindowTests : public QObject {
         }
         Window window(data.path(), false);
         window.show();
+        QTRY_VERIFY(window.findChild<Backend *>());
         auto *backend = window.findChild<Backend *>();
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "types.h"
+#include "launch.h"
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QRegularExpression>
 
 namespace Archcodex {
 bool validText(const QString &text, int maxLength) {
@@ -18,8 +20,21 @@ QString BackendProfile::validate() const {
         return QStringLiteral("Invalid connection ID.");
     if (name.trimmed().isEmpty() || !validText(name, 160))
         return QStringLiteral("Enter a connection name.");
-    if (kind != QStringLiteral("local-unix"))
-        return QStringLiteral("This version supports local Unix sockets only.");
+    if (kind != "local-unix" && !isContainer())
+        return QStringLiteral("Unsupported connection type.");
+    if (isContainer()) {
+        static const QRegularExpression cid("^[a-f0-9]{64}$");
+        if (!cid.match(containerId).hasMatch() || containerEpoch.isEmpty() ||
+            !validText(containerEpoch, 80) || (!sshHost.isEmpty() && !validSshHost(sshHost)) ||
+            dockerContext.isEmpty() || dockerContext.startsWith('-') ||
+            !validText(dockerContext, 256) || runtimeUser.isEmpty() ||
+            runtimeUser.startsWith('-') || !validText(runtimeUser, 128) ||
+            !runtimeHome.startsWith('/') || !validText(runtimeHome) ||
+            !validText(discoveryHost, 128) || discoveryHost.isEmpty())
+            return QStringLiteral("Invalid container identity or execution context.");
+        if (socketPath.isEmpty())
+            return QStringLiteral("Select an explicitly discovered container server.");
+    }
     if (!validText(environmentId, 128))
         return QStringLiteral("Invalid execution environment ID.");
     if (!validText(socketPath) || (!socketPath.isEmpty() && !QDir::isAbsolutePath(socketPath)))
@@ -38,7 +53,14 @@ QJsonObject BackendProfile::json() const {
             {"autoConnect", autoConnect},
             {"environment", environmentId},
             {"discovered", discovered},
-            {"identity", identity}};
+            {"identity", identity},
+            {"sshHost", sshHost},
+            {"dockerContext", dockerContext},
+            {"containerId", containerId},
+            {"containerEpoch", containerEpoch},
+            {"runtimeUser", runtimeUser},
+            {"runtimeHome", runtimeHome},
+            {"discoveryHost", discoveryHost}};
 }
 BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
     return {o["id"].toString(),
@@ -49,7 +71,14 @@ BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
             o["autoConnect"].toBool(true),
             o["environment"].toString(),
             o["discovered"].toBool(),
-            o["identity"].toObject()};
+            o["identity"].toObject(),
+            o["sshHost"].toString(),
+            o["dockerContext"].toString(),
+            o["containerId"].toString(),
+            o["containerEpoch"].toString(),
+            o["runtimeUser"].toString(),
+            o["runtimeHome"].toString(),
+            o["discoveryHost"].toString()};
 }
 bool Session::isSaved() const {
     // Paginated history lives in the server's store and need not have a rollout file.
@@ -89,6 +118,8 @@ QString Session::stateText() const {
         return clientIssue;
     if (unavailable)
         return QStringLiteral("Saved session unavailable on this server");
+    if (contextRequired && !executionObserved)
+        return QStringLiteral("Shared history — execution context not established here");
     if (!known)
         return isActive() ? QStringLiteral("Unknown — last known active")
                           : QStringLiteral("Unknown / disconnected");
@@ -126,6 +157,9 @@ Session Session::fromThread(const QString &backend, const QJsonObject &t) {
     s.ephemeral = t["ephemeral"].toBool();
     s.persistenceKnown = t.contains("path") || s.ephemeral || t.contains("historyMode");
     s.unavailable = t["unavailable"].toBool();
+    s.contextRequired = t["archcodexContextRequired"].toBool();
+    s.executionObserved = t["archcodexExecutionObserved"].toBool();
+    s.executionEnvironment = t["archcodexExecutionEnvironment"].toString();
     s.known = !s.status.isEmpty();
     s.recency = t["recencyAt"].toVariant().toLongLong();
     if (!s.recency)
@@ -134,9 +168,15 @@ Session Session::fromThread(const QString &backend, const QJsonObject &t) {
 }
 QJsonObject Session::metadata() const {
     // Persist only the list metadata, never complete turns or authentication data.
-    auto data =
-        QJsonObject{{"id", id},         {"cwd", cwd},           {"name", title},
-                    {"status", status}, {"recencyAt", recency}, {"unavailable", unavailable}};
+    auto data = QJsonObject{{"id", id},
+                            {"cwd", cwd},
+                            {"name", title},
+                            {"status", status},
+                            {"recencyAt", recency},
+                            {"unavailable", unavailable},
+                            {"archcodexContextRequired", contextRequired},
+                            {"archcodexExecutionObserved", executionObserved},
+                            {"archcodexExecutionEnvironment", executionEnvironment}};
     if (persistenceKnown) {
         data["path"] =
             rolloutPath.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(rolloutPath);
@@ -152,21 +192,34 @@ QString projectKey(const QString &backend, const QString &path) {
     return backend + QChar(0x1f) + path;
 }
 QStringList terminalArguments(const BackendProfile &p, const QString &id) {
+    return clientArguments(p, id);
+}
+QStringList clientArguments(const BackendProfile &p, const QString &id, const QString &cwd) {
+    if (p.isContainer())
+        return QStringList{"/bin/sh", "-c", "exec \"$@\"", "archcodex"} +
+               containerCommand(p, "tui", id, cwd);
     // Constant script; every variable is a separate argv entry. Konsole includes argv[0].
-    return {QStringLiteral("/bin/sh"),
-            QStringLiteral("-c"),
-            QStringLiteral("exec \"$@\""),
-            QStringLiteral("archcodex"),
-            p.executable,
-            QStringLiteral("--remote"),
-            p.endpoint(),
-            QStringLiteral("resume"),
-            QStringLiteral("--"),
-            id};
+    auto args = QStringList{QStringLiteral("/bin/sh"),
+                            QStringLiteral("-c"),
+                            QStringLiteral("exec \"$@\""),
+                            QStringLiteral("archcodex"),
+                            p.executable,
+                            QStringLiteral("--remote"),
+                            p.endpoint()};
+    if (id.isEmpty())
+        args << "--cd" << cwd;
+    else
+        args << "resume" << "--" << id;
+    return args;
 }
 QString serverLabel(const BackendProfile &p) {
     if (!p.discovered)
         return p.name;
+    if (p.isContainer())
+        return ("myCodex · " + p.identity["containerName"].toString() + " · " +
+                (p.sshHost.isEmpty() ? "This computer" : p.sshHost) + " · " +
+                p.identity["stateMode"].toString("Unknown storage"))
+            .left(150);
     const auto home = p.identity["codexHome"].toString();
     const auto ownerHome = p.identity["ownerHome"].toString();
     QString label;
@@ -189,7 +242,11 @@ QString serverLabel(const BackendProfile &p) {
 }
 QString serverDetails(const BackendProfile &p) {
     QStringList lines{p.name, "Socket: " + p.endpoint(), "Executable: " + p.executable};
-    for (const auto &field : {"codexHome", "cwd", "user", "host", "pid", "userAgent"}) {
+    if (p.isContainer())
+        lines << "Docker context: " + p.dockerContext << "Container: " + p.containerId
+              << "Runtime user: " + p.runtimeUser << "Container started: " + p.containerEpoch;
+    for (const auto &field :
+         {"codexHome", "cwd", "user", "host", "pid", "userAgent", "stateMode", "stateVolume"}) {
         const auto value = p.identity[field].toVariant().toString();
         if (!value.isEmpty())
             lines << QString::fromLatin1(field) + ": " + value;

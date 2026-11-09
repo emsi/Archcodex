@@ -109,25 +109,27 @@ void SessionModel::updateSession(QStandardItem *item, const Session &s) {
                              : s.persistenceKnown ? "Unsaved session"
                                                   : "Persistence unknown";
     const auto text = s.stateText() + "\n" + s.cwd + "\n" + persistence + "\n" + s.id;
-    QMap<int, QVariant> values{{Qt::DisplayRole, s.title},
-                               {KeyRole, sessionKey(s.backendId, s.id)},
-                               {KindRole, int(NodeKind::Session)},
-                               {BackendRole, s.backendId},
-                               {EnvironmentRole, environment(s.backendId)},
-                               {PathRole, s.cwd},
-                               {ThreadRole, s.id},
-                               {ActiveRole, s.isActive()},
-                               {RunningRole, s.isRunning()},
-                               {WaitingRole, s.isWaiting()},
-                               {RecencyRole, std::max(s.opened, s.recency)},
-                               {AttentionRole, s.attention()},
-                               {CountRole, 1},
-                               {ActiveCountRole, int(s.isActive())},
-                               {RunningCountRole, int(s.isRunning())},
-                               {WaitingCountRole, int(s.isWaiting())},
-                               {UnknownCountRole, int(!s.known)},
-                               {Qt::ToolTipRole, text},
-                               {Qt::AccessibleTextRole, s.title + " — " + s.stateText()}};
+    QMap<int, QVariant> values{
+        {Qt::DisplayRole,
+         s.title + (s.contextRequired && !s.executionObserved ? " · History only" : "")},
+        {KeyRole, sessionKey(s.backendId, s.id)},
+        {KindRole, int(NodeKind::Session)},
+        {BackendRole, s.backendId},
+        {EnvironmentRole, environment(s.backendId)},
+        {PathRole, s.cwd},
+        {ThreadRole, s.id},
+        {ActiveRole, s.isActive()},
+        {RunningRole, s.isRunning()},
+        {WaitingRole, s.isWaiting()},
+        {RecencyRole, std::max(s.opened, s.recency)},
+        {AttentionRole, s.attention()},
+        {CountRole, 1},
+        {ActiveCountRole, int(s.isActive())},
+        {RunningCountRole, int(s.isRunning())},
+        {WaitingCountRole, int(s.isWaiting())},
+        {UnknownCountRole, int(!s.known)},
+        {Qt::ToolTipRole, text},
+        {Qt::AccessibleTextRole, s.title + " — " + s.stateText()}};
     if (item->data(AttentionRole) != s.attention())
         values[Qt::DecorationRole] = dot(s.attention());
     updateItem(item, values);
@@ -305,6 +307,40 @@ void SessionModel::upsert(const Session &s) {
 void SessionModel::remove(const QString &backend, const QString &id) {
     if (records.remove(sessionKey(backend, id)))
         rebuild(backend);
+}
+void SessionModel::upsertMany(const QList<Session> &items) {
+    QSet<QString> structural;
+    for (const auto &s : items) {
+        const auto key = sessionKey(s.backendId, s.id);
+        const auto old = records.value(key);
+        if (!records.contains(key) || normalized(old.cwd) != normalized(s.cwd) ||
+            visible(old) != visible(s))
+            structural.insert(s.backendId);
+        records[key] = s;
+        if (!backendNames.contains(s.backendId))
+            backendNames[s.backendId] = s.backendId;
+    }
+    for (const auto &backend : structural)
+        rebuild(backend);
+    QSet<QStandardItem *> parents;
+    for (const auto &s : items)
+        if (!structural.contains(s.backendId))
+            if (auto *item = threads.value(sessionKey(s.backendId, s.id))) {
+                updateSession(item, s);
+                for (auto *p = item->parent(); p; p = p->parent())
+                    parents.insert(p);
+            }
+    auto ordered = parents.values();
+    auto depth = [](QStandardItem *item) {
+        int d = 0;
+        for (; item; item = item->parent())
+            ++d;
+        return d;
+    };
+    std::sort(ordered.begin(), ordered.end(),
+              [&](auto *a, auto *b) { return depth(a) > depth(b); });
+    for (auto *p : ordered)
+        aggregate(p);
 }
 void SessionModel::removeBackend(const QString &backend) {
     emit topologyAboutToChange();

@@ -1,8 +1,9 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.3.2** implements the first backend: **existing local Unix-socket
-app-servers**. Remote TCP, SSH and myCodex are later stages.
+Version **0.4.0** supports **existing local Unix-socket app-servers** and
+**myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
+SSH socket profiles remain planned.
 
 Its primary workflow is returning to **existing Codex sessions**. On startup it
 discovers the current user’s host-visible local Codex servers and loads their
@@ -17,7 +18,7 @@ terminal entries remain accessible even when their conversation is unsaved.
 Each view compresses its own folder paths. Running and Waiting open expanded;
 waiting sessions use green indicators, running sessions blue.
 Session and project indicators reflect **server events, without status
-polling**. Multiple local servers can be connected independently.
+polling**. Multiple local and container servers connect independently.
 Discovery issues appear in the status bar; click **Discovery limited** or use
 **Connections → Discovery details** for explanations, technical details and
 retry/add-connection/copy-report actions. Discovery never opens a popup on its own.
@@ -29,13 +30,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.3.2-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.4.0-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.3.2-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.4.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -59,8 +60,21 @@ used for protocol validation. Archcodex does not install or update Codex.
 Discovery requires **host Python 3** at `/usr/bin/python3`, using only its standard
 library. It inspects same-user socket/process metadata and waits for Linux
 inotify events; session state comes exclusively from app-server notifications.
-It does not read account credentials. Private container sockets and other users'
-processes are outside automatic discovery. See [local discovery](docs/discovery.md).
+It does not read account credentials. Container discovery uses a separate Docker adapter; other users' host
+processes remain outside host discovery. See [local discovery](docs/discovery.md).
+
+Local myCodex containers are detected automatically. Use **Connections → myCodex
+hosts…** to add an SSH alias, retry a connection or disable discovery. Docker CLI
+access and Python 3 are required on each host; remote background connections need
+an accepted host key and non-interactive authentication through host OpenSSH.
+No myCodex update, container recreation or additional Flatpak permission is required.
+
+The proxy and TUI run **inside the selected container**, using its discovered
+Codex executable and explicit server socket. A shared conversation appears as
+**History only** unless Archcodex has observed it loaded in that execution
+environment. Shared files alone never authorize resuming it there. Private
+storage without explicit mode metadata is labeled **Custom storage**.
+See [myCodex integration](docs/mycodex.md) for requirements and boundaries.
 
 See [implementation and host testing](docs/implementation.md) for scope,
 permissions, tested behavior and known limitations.
@@ -96,7 +110,8 @@ capability error.
 - [Project design](docs/design.md): requirements, architecture, event handling,
   session lifetime, search, technology choices and validation.
 - [Backend design](docs/backends.md): adapter contracts and the implementation
-  sequence: existing local Unix sockets, remote TCP, SSH, then myCodex.
+  roadmap. Local Unix and local/SSH myCodex are implemented; direct TCP and
+  generic SSH socket profiles remain planned.
 - [myCodex integration](docs/mycodex.md): agreed identity, discovery,
   responsiveness and shared-history requirements.
 - [myCodex transport discussion](docs/mycodex-transport-options.md): volume/socket
@@ -106,7 +121,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
   sessions, and the four session filters.
-- [Implementation and testing](docs/implementation.md): what 0.3.2 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.4.0 delivers and
   how to exercise it on your host.
 
 ## Project status

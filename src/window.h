@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include "asyncstore.h"
 #include "backend.h"
+#include "containerdiscovery.h"
 #include "discovery.h"
 #include "store.h"
 #include <QMainWindow>
@@ -34,7 +36,7 @@ class Window : public QMainWindow {
     void closeEvent(QCloseEvent *event) override;
 
   private:
-    std::unique_ptr<Store> store;
+    std::unique_ptr<AsyncStore> store;
     QString dataDirectory;
     QHash<QString, BackendProfile> profiles;
     QHash<QString, Backend *> backends;
@@ -48,6 +50,18 @@ class Window : public QMainWindow {
     DiscoveryReport discoveryReport;
     QPointer<DiscoveryDialog> discoveryDialog;
     QToolButton *discoveryStatus;
+    QToolButton *containerStatus;
+    QHash<QString, ContainerDiscovery *> containerDiscovery;
+    QHash<QString, QString> containerHosts, containerFeedback;
+    QSet<QString> disabledContainerHosts, emptyContainers, containerProblems;
+    void containerHostsDialog();
+    void addContainerHost(const QString &id, const QString &host, bool start);
+    void saveContainerHosts();
+    void applyContainers(const QString &host, const QJsonObject &inventory);
+    void updateContainerSummary();
+    void applySessions(const QList<Session> &items);
+    QList<Session> cachePending;
+    void restoreCache(bool connectOnStart);
     void showDiscoveryDetails();
     QSet<QString> paused, ignoredSockets, discoveredPresent;
     QHash<QString, QString> discoveredPaths;

@@ -1,7 +1,7 @@
 # Backend design
 
-Status: target contracts for the adopted architecture. The local Unix adapter is
-implemented in [0.3.0](implementation.md); TCP, SSH and myCodex remain planned.
+Status: target contracts for the adopted architecture. Local Unix and local/SSH myCodex adapters are
+implemented in [0.4.0](implementation.md); direct TCP and generic SSH socket profiles remain planned.
 Last updated: 2026-11-09.
 
 ## 1. Separation of responsibilities
@@ -10,8 +10,7 @@ A **backend** identifies an execution environment and an app-server endpoint. It
 is not a terminal tab, a project directory, or a copy of conversation storage.
 Several backends can be configured on one host, and a backend can contain many
 projects and conversations. Each local server has a separate explorer root.
-Future adapters will provide meaningful SSH host or myCodex container context
-for those roots; the shared tree keeps paths and sessions scoped to the backend.
+Container roots include the friendly container name and local/SSH host; the shared tree keeps paths and sessions scoped to the backend.
 
 Keep three concerns separate:
 
@@ -168,8 +167,8 @@ a PTY; only the interactive TUI gets one.
 
 ## 6. Stage four: myCodex
 
-myCodex comes after the three direct connection adapters. It composes their
-transport and protocol machinery with container/environment discovery and
+The current implementation request brings myCodex forward ahead of the remaining
+direct adapters. It composes native proxy transport and shared protocol machinery with container/environment discovery and
 terminal launch behavior. Docker and myCodex dependencies must not leak into
 other adapters or into the shared UI model.
 
@@ -184,13 +183,12 @@ execution and established resume context separate. Never select a container by
 shared volume, thread ID or cwd alone. Existing saved-session filtering and a
 successful metadata read do not establish execution eligibility.
 
-Connection mechanics remain an [open transport discussion](mycodex-transport-options.md).
-An actual host-accessible container socket can reuse the local Unix adapter or
-native SSH forwarding. An advertised symlink in a shared home may instead point
-to a private container runtime directory. A non-PTY container exec relay is one
-alternative; `myCodex integration` or other new launcher commands are not an
-adopted requirement. Discovery metadata and TUI placement are separate decisions
-from byte transport.
+The adopted route uses `docker exec -i` and native `codex app-server proxy`
+inside the selected container. The TUI uses a separate `docker exec -it` there.
+Remote containers use host OpenSSH with the same commands. The provider is owned
+by Archcodex and requires no new public myCodex command. Published physical sockets
+may later reuse local Unix or native SSH forwarding. See the
+[transport comparison](mycodex-transport-options.md).
 
 Discovery uses Docker lifecycle events plus endpoint events and initial/recovery
 snapshots. List running myCodex containers even when they have no app-server;

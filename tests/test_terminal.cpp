@@ -12,6 +12,22 @@ using namespace Archcodex;
 class TerminalTests : public QObject {
     Q_OBJECT
   private slots:
+    void containerHistoryAndChangedEnvironmentCannotLaunch() {
+        TerminalArea area;
+        BackendProfile p{"container", "Container"};
+        p.kind = "mycodex";
+        p.environmentId = "current-environment";
+        Session s;
+        s.backendId = p.id;
+        s.id = "shared-thread";
+        s.contextRequired = true;
+        QString error;
+        QVERIFY(!area.open(p, s, &error));
+        QVERIFY(!error.isEmpty());
+        s.executionObserved = true;
+        s.executionEnvironment = "old-environment";
+        QVERIFY(!area.open(p, s, &error));
+    }
     void failedClientDoesNotSwitchBack_data() {
         QTest::addColumn<QByteArray>("command");
         QTest::addColumn<int>("exitCode");

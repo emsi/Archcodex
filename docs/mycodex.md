@@ -1,198 +1,168 @@
-# myCodex integration: agreed direction
+# myCodex integration: 0.4.0
 
-Status: design only, recorded on 2026-11-09 after discussion of local and remote
-myCodex environments. Archcodex 0.3.2 implements local host Unix connections;
-these requirements do not claim implemented container support. The connection
-mechanism, helper interface and terminal placement remain open in the separate
-[transport analysis](mycodex-transport-options.md).
+Implemented on 2026-11-09 following the request to adopt direct container
+integration. Existing containers are the primary workflow. No new myCodex
+command, image update, container recreation, socket mount or permanent service
+is required. The [transport comparison](mycodex-transport-options.md) records why
+sharing a home volume alone does not expose a container's physical Unix listener.
 
-## 1. Scope and boundaries
+## Connection and execution
 
-Support private and shared-state myCodex containers on the local machine and on
-explicitly configured SSH hosts. Existing containers, app-servers and sessions
-are the primary workflow. Projects remain derived groups; users need not create
-projects to discover or attach to existing work.
+```text
+Local protocol:  Archcodex bridge → host Docker exec -i → container Codex proxy → explicit Unix socket
+Remote protocol: Archcodex bridge → host SSH -T → remote Docker exec -i → container Codex proxy → explicit Unix socket
+Terminal:        Konsole PTY → [host SSH -tt] → Docker exec -it → container Codex --remote unix://PATH
+```
 
-Reuse the common Codex protocol client, session model and event/reconnect
-contract. Container discovery and execution context belong to the provider;
-socket transport belongs to the existing transport adapters. Docker commands,
-SSH commands and container paths must not leak into the UI model. This does not
-require a public plugin ABI, permanent management daemon or container orchestrator.
+The native proxy carries raw WebSocket bytes, without a PTY. The existing Beast
+bridge handles WebSocket framing; the shared Codex client handles inventory,
+search and notifications. The TUI uses the executable and socket discovered
+inside that container. Once initialization identifies a custom server `CODEX_HOME`,
+the TUI inherits it; subsequent discovery preserves that identity. It does not use the desktop's default Codex server.
+Neither path starts an app-server. Archcodex owns only its observers, proxy
+clients and TUI clients; it never stops an existing server or container.
 
-Attaching or discovering must not implicitly install/update software, create or
-recreate containers, start replacement app-servers, resume historical threads or
-start turns. Optional lifecycle operations require separate explicit actions.
-Keep the established backend delivery order: local Unix, TCP, SSH, then myCodex.
+The small `containers.py` adapter is packaged in Archcodex and supplied to Python
+through argv. It is not installed on the host or added to myCodex. It discovers
+metadata, constructs checked launch arguments and manages event subscriptions.
+It does not introduce a separate session-management protocol.
 
-## 2. Execution identity and shared history
+## Requirements and defaults
 
-Keep these identities separate:
+- Local discovery is enabled by default. Use **Connections → myCodex hosts…**
+  to disable it, retry it or add/remove an SSH host. Host entries are persisted
+  in Archcodex's `window.ini`; discovered server profiles and metadata use SQLite.
+- Each selected Docker host needs `/usr/bin/python3` and the Docker CLI in PATH,
+  with existing engine access as the SSH/local user. There is no automatic sudo.
+  The selected container also needs Python 3 and a compatible Codex CLI with
+  native `app-server proxy`, Unix remote TUI support and the protocol APIs used
+  by Archcodex. No fallback installs or upgrades them.
+- SSH uses the host's OpenSSH configuration, aliases, agent and known-host files.
+  Background connections use `BatchMode=yes`, a 10-second connect timeout and no
+  PTY. Set up/verify SSH authentication in a host terminal first. Keys and account
+  credentials are never copied into the Flatpak; agent forwarding is not enabled.
+  TUI connections use a separate SSH PTY and may prompt interactively.
+- Enumerate local Unix Docker contexts on each selected host, deduplicated by
+  Docker engine ID. Do not automatically follow TCP/SSH Docker contexts. Context
+  additions need an explicit refresh. Rootless Unix contexts are eligible under
+  the same access rules; actual rootless-host qualification remains outstanding.
+- Identify existing myCodex containers using the Compose label
+  `io.infrasecture.mycodex.gui`, independent of its value. Read the runtime UID
+  and home from the existing myCodex environment metadata; resolve its real
+  account name inside the container. Missing UID/home produces a diagnostic,
+  never an automatic root fallback. Generic or unlabeled containers are excluded.
+- Explicit Private/Shared/Custom mode metadata is used when present. For legacy
+  containers, volume `codex_state` identifies the conventional shared mode;
+  other storage is labeled **Custom storage**, rather than guessing private mode
+  from a project-looking volume name. This label never grants resume permission.
 
-| Object | Meaning |
-| --- | --- |
-| Host | Local machine or configured SSH host; paths belong to that host. |
-| Docker engine | The particular accessible engine on that host; aliases need not identify different engines. |
-| Container environment | Actual container ID and current lifetime, plus friendly name and optional stable logical instance identity. |
-| App-server | Actual endpoint in that environment, with a connection/server generation. |
-| Live session | App-server identity plus Codex thread ID. |
-| History store | Shared persistent files, when a common store is positively identified; never an execution target. |
+These legacy fields were checked against the existing
+[myCodex Compose source](https://github.com/emsi/myCodex/blob/ec3133efb53795586232aad0305aa10ca53dfd10/docker-compose.yaml).
+Actual containers with modified configuration may report incomplete discovery.
+No Flatpak permissions or myCodex repository files were changed for this release.
+Existing 0.3.x data loads without migration. Older binaries do not understand
+new container profiles; use a separate `--data-dir` when testing a downgrade.
 
-Container names, PIDs, identical paths and equal `CODEX_HOME` values are not
-sufficient identity. Recreating a container or restarting a server invalidates
-old live handles. A logical instance name must not silently transfer running
-state to its replacement.
+## Discovery and recovery
 
-**A server reporting a saved conversation proves visibility of history, not
-that the conversation belongs to or can be resumed in that container.**
-
-For example, containers A and B share history. A has `/work/compiler` mounted;
-B has `/work/reports`. Both servers may list a compiler conversation, but B is
-not thereby a valid restart target. Even an identical cwd string on B is
-insufficient: it may name different files, a different worktree or a different
-toolchain. Neither a successful metadata read nor the saved-session flag proves
-execution eligibility.
-
-Distinguish three questions in application metadata and behavior:
-
-1. **Visible history:** which servers can read the saved conversation?
-2. **Live execution:** which server currently has that thread loaded/running,
-   according to that server's inventory and events?
-3. **Resume context:** which environment has been established as an appropriate
-   target for continuing the historical conversation?
-
-Do not derive the second or third answer from the first. If two servers really
-load the same thread ID, retain two execution identities; do not collapse them
-or route commands by thread ID alone. Loading also does not prove that a server
-originally created the conversation.
-
-The routing requirement is agreed; the precise provenance schema and history UI
-are still to be designed. A minimal candidate is application-owned metadata
-recording observed execution environments separately from history visibility.
-Old history with no reliable provenance remains unknown. Do not invent provenance
-from filename, title, cwd, shared volume or the first server returning a result.
-Observed provenance is evidence of previous execution, not a guarantee that all
-mounts, permissions and tools still work after an environment changes.
-
-Normal opening should attach to the known live execution or use an established
-resume context. A history-only row must not silently resume through whichever
-container returned it. An explicitly chosen alternative environment, if later
-supported, is a separate action with target validation. Do not probe eligibility
-by resuming the conversation or sending a turn.
-
-Global search can find history even when no suitable runtime is available. Keep
-that result readable and explain its execution availability. Presentation-level
-deduplication may use verified common storage identity, but must retain the
-distinct live execution targets and never deduplicate solely by thread ID.
-The exact placement of shared/unassigned history in the explorer remains open.
-
-Private/shared/custom storage mode is descriptive metadata, independent of the
-connection method. Preserve the current authentication arrangement; never read,
-copy or mount host account credentials as part of this integration.
-
-## 3. Discovery and events
-
-Automatically enumerate running myCodex containers on accessible local Docker
-engines, including containers with no running app-server. Report inaccessible
-engines or incomplete endpoint coverage instead of claiming complete discovery.
-Do not list unrelated workloads as myCodex or acquire additional privileges.
-
-On a configured SSH host, perform equivalent discovery in that host's context.
-Adding an SSH host is explicit; connecting remote Docker contexts discovered in
-local configuration is not an automatic side effect of local discovery.
-
-| Layer | Initial/recovery action | Normal-operation source |
+| Layer | Initial/recovery action | Normal operation |
 | --- | --- | --- |
-| Containers | Snapshot running instances and reconcile buffered lifecycle events. | Docker lifecycle event stream. |
-| Servers | Discover actual reachable control endpoints and their environment association. | Socket filesystem events or an equivalent endpoint event source. |
-| Sessions | Read inventory, loaded threads and supported status after connection. | Codex protocol notifications. |
+| Docker engines | Enumerate accessible Unix contexts and identify engines. | Keep one lifecycle event subscription per engine. |
+| Containers | List/inspect running labeled containers; reconcile on lifecycle events. | React to start, die, destroy, pause, unpause, rename and restart. Ignore exec events generated by our own helpers. |
+| App-servers | Run the existing endpoint-discovery code inside the actual runtime namespace. | Inotify socket events; snapshots after invalidation, overflow or explicit refresh. |
+| Sessions | Read history and loaded-thread inventory after connection. | Codex notifications; no periodic status requests. |
 
-Subscribe and reconcile without a gap between the inventory and event stream.
-Reconnect, event loss/overflow and explicit refresh permit new snapshots.
-There is no periodic container listing, process scan or session-status query.
-Discovery must not use terminal silence, CPU use or tmux output as session state.
-Avoid self-triggering loops from discovery helpers' own Docker exec events.
+Subscribe with Docker event replay overlapping startup, then reconcile the
+inventory. Docker replay is bounded, so recovery always obtains a new inventory.
+Running containers with no accessible server remain visible in All with an
+explanation. Paused/inaccessible containers and failed hosts report coverage
+limits; partial results remain usable.
 
-The location of the socket watcher depends on the unresolved exposure mechanism.
-Published host-visible sockets can be watched on the Docker host; private
-sockets need observation within the container namespace. On remote hosts,
-endpoint events must be carried over a separate SSH event channel. Forwarding a
-single socket alone does not enumerate containers or report new endpoints.
+Failed transports/watchers retry with backoff from 1 to 30 seconds. This is
+reconnection of a failed subscription, not a timer querying healthy sessions.
+Disable/disconnect cancels the relevant retry path. Normal idle discovery sends
+no repeated Docker list/inspect commands. Failure detection uses stream closure,
+request deadlines and the user's SSH liveness settings; a silent network
+partition may not be detected immediately.
 
-Docker's event history is bounded, so reconnect recovery must not assume replay
-is durable. See [Docker events](https://docs.docker.com/reference/cli/docker/system/events/).
+## Shared history and resume authority
 
-## 4. Responsiveness and failure isolation
+Keep the host, engine, actual container ID, container lifetime, server endpoint
+and thread ID separate. Labels and container names are display metadata. A live
+handle is backend plus thread ID; equal conversation IDs on separate servers are
+never merged. Roots show container name, host and storage mode, with compact
+per-filter folder trees underneath. IDs and socket details remain in details.
 
-Remote latency or failure must never impose a blocking wait on the GUI. This
-also applies to local Docker calls, JSON decoding, large inventories and database
-contention. Merely launching SSH through `QProcess` is insufficient.
+A server listing a saved conversation establishes **history visibility only**.
+It does not establish that its workspace, mounts or tools are suitable for
+resuming it. This applies to both the explorer and global search.
 
-- Run protocol parsing and bulk work outside the GUI thread. Isolate hosts so
-  one stalled host cannot occupy another host's execution context.
-- Give database work an owned execution context and connection. Update Qt models
-  only on the GUI thread, using bounded batches and affected-branch updates.
-- Bound message sizes, accumulated buffers, pending requests and update queues.
-  Coalesce replaceable status updates without losing lifecycle/input events;
-  invalidate and reconcile if a stream cannot be processed reliably.
-- Use asynchronous, cancellable connection setup and cleanup. No GUI-thread
-  `waitForFinished` or equivalent synchronous remote/process operation.
-- Scope timeouts and errors to the operation/backend. A slow history search
-  should not routinely tear down an otherwise healthy status connection.
-- Limit connection concurrency. Maintain a protocol connection per server, not
-  per conversation, and create TUI clients only when needed.
-- Show cached content immediately. Connect hosts independently. Search produces
-  progressive results with explicit incomplete/offline coverage and ignores
-  replies from cancelled generations.
-- Present background failures inline at their host/container. Do not open a
-  cascade of modal dialogs or require every host to finish before navigation.
+The initial policy deliberately uses one concrete piece of evidence: this
+specific server's loaded-thread inventory or live-session event. Archcodex
+persists that observation bound to its execution-environment fingerprint
+(container, UID, home and mount metadata, scoped to host/engine). Metadata reads
+and search results cannot manufacture this app-owned evidence.
 
-Exact worker/thread topology and numerical performance budgets remain
-implementation choices to validate. A thread per session and a custom SSH
-multiplexing protocol are not requirements. Full offline conversation indexing
-is also outside the initial integration; metadata caching cannot provide it.
+- An observed live conversation can be attached to its server.
+- A previously observed conversation can be resumed in the same established
+  environment after it unloads or Archcodex restarts.
+- Other saved conversations remain visible and searchable as **History only**.
+  Opening one explains why this container cannot be selected automatically.
+  Open it in its correct environment first; subsequent inventory/events establish
+  the association. There is no “resume anywhere” override in 0.4.0.
+- Recreation creates a new container identity. Changed mount/environment identity
+  invalidates cached execution evidence, including across a partially written
+  cache. A successful metadata read or matching cwd string cannot restore it.
+- Before each proxy/TUI launch, check the selected Docker context is local Unix,
+  the actual engine ID, full container ID, running/unpaused state, `StartedAt`
+  lifetime and environment fingerprint. Reject stale requests. The TUI checks
+  and enters the cwd as the runtime user instead of asking Docker to create it.
 
-Current 0.3.2 still has GUI-thread parsing/persistence and synchronous shutdown
-waits in `src/backend.cpp`, `src/discovery.cpp` and `src/window.cpp`. This section
-is a delivery requirement, not a claim that those paths have been fixed.
+Observed execution is not proof of original authorship or of unchanged files
+inside a mount. It is a conservative routing rule, not a complete workspace
+provenance system. An explicit alternative-environment workflow and a deduplicated
+shared-history library can be designed later.
 
-## 5. Presentation and lifetime
+## Responsiveness and limits
 
-Use friendly host and container names. Display private/shared mode as context;
-put container IDs, PIDs, socket paths and image/runtime details in details.
-Represent multiple app-servers in one container without merging their sessions.
-An empty running container remains discoverable in All, with an explanation
-that no Codex server is available. Exact nesting is a UI design detail.
+Protocol/discovery QProcesses and JSON decoding run on worker event loops grouped
+by host, with discovery separate from protocol work. SQLite has its own worker
+and connection. The GUI consumes coalesced session batches of at most 64 rows;
+cache restoration is also chunked. Qt models are updated only on the GUI thread.
+No Docker/SSH operation or database lock is waited on by the GUI.
 
-Preserve All/Active/Running/Waiting semantics, compression within each filter,
-green Waiting and blue Running indicators, and retained failed terminal output.
-Container connectivity and conversation activity are separate states. A lost
-connection makes activity unknown; cached status is not current status.
+One protocol connection serves all conversations on a server. Terminals are
+created on demand. Discovery starts up to eight container watchers concurrently;
+metadata reads have four requests in flight per backend. Full snapshots are
+coalesced while the GUI handles its current update. Protocol messages, discovery
+output, pending events and write queues have explicit bounds. Per-request
+failures do not routinely disconnect an otherwise healthy backend.
 
-Archcodex owns its clients, watchers and tunnels. It does not own the lifetime of
-existing containers or app-servers. GUI exit and SSH loss must not terminate
-their work. Container stop/recreation is a different boundary and may end work;
-do not promise that a saved conversation preserves an executing process.
+Closing facades queues cleanup to workers. Owned watcher stdin is closed, then
+remaining helpers are terminated/killed after a grace period. Application exit
+services completion events for up to ten seconds to flush accepted cache writes;
+a deadline violation is reported rather than silently treated as a clean flush.
+The window itself closes without waiting on remote SSH or Docker.
 
-Preserve host SSH aliases, host-key verification, agent and jump-host settings.
-No key copies into the Flatpak or automatic agent forwarding are required.
-Transport errors, request deadlines and configured SSH liveness behavior detect
-failure; a silent idle network partition is not always detected immediately.
-None of this permits a background session-status polling loop.
+Remote hosts fail independently. Background failures stay in host status/details;
+interactive launch failures retain terminal output. Existing All/Active/Running/
+Waiting semantics, blue Running and green Waiting indicators are preserved.
 
-## 6. Qualification and unresolved decisions
+## Validation and remaining host acceptance
 
-Before claiming support, test private/shared containers, identical history IDs
-on multiple servers, known and unknown resume contexts, missing or misleading
-cwd mappings, zero/multiple servers, restart/recreation and event recovery.
-Verify no discovery/attach side effects and no idle status polling.
+Automated fixtures cover Docker lifecycle updates without idle polling, watcher
+cleanup, changed lifetime/mount/engine rejection, shell argument boundaries, raw
+proxy transport, separate container roots, empty containers, shared history,
+80 live records, stalled SSH and blocked database responsiveness. Native and KDE
+SDK tests cover protocol/model/window behavior; actual Konsole PTY checks use the
+packaged KDE libraries under X11.
 
-Exercise 40–80 sessions while an SSH host is unreachable, Docker is restarting,
-history arrives in bulk or one stream is noisy. Local typing, navigation,
-cancellation and window close must stay responsive. Validate the actual Flatpak
-on X11, including terminal resize, clipboard and task continuity.
+This development environment has no accessible Docker daemon and cannot launch
+a full Flatpak sandbox. Therefore real private/shared myCodex containers, remote
+SSH authentication/jump hosts, rootless engines, resize/clipboard under remote
+PTYs, and active task survival across disconnect still need host qualification.
+No credential files or live model turns were used in automated tests.
 
-Still open: socket exposure versus exec relay; whether any myCodex command is
-needed; legacy-container compatibility; client location/version policy; socket
-directory lifetime; provenance storage and shared-history presentation. See the
-[separate transport analysis](mycodex-transport-options.md). No helper command,
-new host dependency, permission change or mount configuration is adopted here.
+Direct TCP and generic SSH-forwarded host socket profiles remain future adapters.
+Published container socket directories are an optional future optimization;
+`codex app-server daemon` is not needed to connect to an already-running server.

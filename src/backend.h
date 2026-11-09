@@ -26,6 +26,7 @@ class Backend : public QObject {
   signals:
     void connectionChanged(const QString &description, bool ready);
     void sessionChanged(const Archcodex::Session &session);
+    void sessionsChanged(const QList<Archcodex::Session> &sessions);
     void sessionRemoved(const QString &id);
     void loadedInventory(const QSet<QString> &ids);
     void identityReceived(const QJsonObject &identity);
@@ -62,12 +63,14 @@ class CodexBackend : public Backend {
     QString bridgePath;
     QProcess *process = nullptr;
     QTimer reconnectTimer, deadlineTimer;
-    QByteArray buffer;
+    QByteArray buffer, stderrTail;
     QHash<qint64, Pending> pending;
     QHash<QString, QJsonObject> statuses;
     QHash<QString, QString> names;
     QSet<QString> removed;
     QSet<QString> loaded;
+    QSet<QString> observed;
+    bool loadedKnown = false;
     QHash<QString, Session> sessions;
     QQueue<QString> reads;
     QSet<QString> scheduledReads, dirtyReads;
