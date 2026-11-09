@@ -14,11 +14,13 @@ class TerminalArea : public QWidget {
     ~TerminalArea() override;
     bool open(const BackendProfile &profile, const Session &session, QString *error);
     bool newSession(const BackendProfile &profile, const QString &path, QString *error);
+    bool focusSession(const QString &key);
     void closeCurrent();
     void closeBackend(const QString &backend);
     bool smokeTest(QString *error);
   signals:
     void currentChanged(const QString &title);
+    void clientStateChanged(const Archcodex::Session &session);
     void clientExited(const QString &key, int exitCode, bool crashed);
 
   private slots:
@@ -33,9 +35,11 @@ class TerminalArea : public QWidget {
     QHash<QString, QString> titles;
     QHash<QString, QStringList> launches;
     QHash<QString, QString> exits;
+    QHash<QString, Session> clients;
+    void forgetClient(const QString &key);
     KParts::ReadOnlyPart *create(QString *error);
     bool launch(const QString &key, const QStringList &arguments, const QString &title,
-                QString *error);
+                const Session &session, QString *error);
     QString currentKey() const;
     void updateCurrent();
 };

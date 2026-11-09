@@ -45,7 +45,7 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
         if (key.isEmpty() || !exits.contains(key))
             return;
         QString error;
-        if (!launch(key, launches.value(key), titles.value(key), &error))
+        if (!launch(key, launches.value(key), titles.value(key), clients.value(key), &error))
             exitText->setText(error);
     });
 }
@@ -96,6 +96,7 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     connect(part, &QObject::destroyed, this, [this] {
         for (auto it = parts.begin(); it != parts.end();)
             if (it.value().isNull()) {
+                forgetClient(it.key());
                 titles.remove(it.key());
                 launches.remove(it.key());
                 exits.remove(it.key());
@@ -115,7 +116,7 @@ bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *erro
     const auto title = s.title + "  ·  " + p.name + "  ·  " + s.cwd;
     auto *part = parts.value(key).data();
     if (!part)
-        return launch(key, terminalArguments(p, s.id), title, error);
+        return launch(key, terminalArguments(p, s.id), title, s, error);
     titles[key] = title;
     stack->setCurrentWidget(part->widget());
     part->widget()->setFocus();
@@ -127,14 +128,20 @@ bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QStr
         *error = "Select a project with an absolute working directory.";
         return false;
     }
-    const auto key = sessionKey(p.id, "new-" + QUuid::createUuid().toString());
+    Session s;
+    s.backendId = p.id;
+    s.id = "new-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    s.title = "New session terminal";
+    s.cwd = path;
+    s.persistenceKnown = true;
+    const auto key = sessionKey(p.id, s.id);
     return launch(key,
                   {"/bin/sh", "-c", "exec \"$@\"", "archcodex", p.executable, "--remote",
                    p.endpoint(), "--cd", path},
-                  "New session · " + p.name + " · " + path, error);
+                  "New session · " + p.name + " · " + path, s, error);
 }
 bool TerminalArea::launch(const QString &key, const QStringList &arguments, const QString &title,
-                          QString *error) {
+                          const Session &session, QString *error) {
     auto *part = create(error);
     if (!part)
         return false;
@@ -143,6 +150,11 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     titles[key] = title;
     launches[key] = arguments;
     exits.remove(key);
+    auto s = session;
+    s.terminalOpen = true;
+    s.clientIssue.clear();
+    clients[key] = s;
+    emit clientStateChanged(s);
     // Konsole already handles the Flatpak host boundary. Arguments stay separate.
     qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh", arguments);
     stack->setCurrentWidget(part->widget());
@@ -150,6 +162,23 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     part->widget()->setFocus();
     updateCurrent();
     return true;
+}
+bool TerminalArea::focusSession(const QString &key) {
+    auto *part = parts.value(key).data();
+    if (!part)
+        return false;
+    stack->setCurrentWidget(part->widget());
+    part->widget()->setFocus();
+    updateCurrent();
+    return true;
+}
+void TerminalArea::forgetClient(const QString &key) {
+    auto s = clients.take(key);
+    if (s.id.isEmpty())
+        return;
+    s.terminalOpen = false;
+    s.clientIssue.clear();
+    emit clientStateChanged(s);
 }
 QString TerminalArea::currentKey() const {
     for (auto it = parts.cbegin(); it != parts.cend(); ++it)
@@ -173,6 +202,8 @@ void TerminalArea::processExited(int exitCode, bool crashed) {
                     ? QString("Terminal client exited with code %1. Its output is retained below.")
                           .arg(exitCode)
                     : "Terminal client closed. Its output is retained below.";
+            clients[key].clientIssue = exits[key];
+            emit clientStateChanged(clients[key]);
             updateCurrent();
             emit clientExited(key, exitCode, crashed);
             return;
@@ -182,6 +213,7 @@ void TerminalArea::closeCurrent() {
     for (auto it = parts.begin(); it != parts.end(); ++it)
         if (it.value() && it.value()->widget() == stack->currentWidget()) {
             auto *part = it.value().data();
+            forgetClient(it.key());
             titles.remove(it.key());
             launches.remove(it.key());
             exits.remove(it.key());
@@ -196,6 +228,7 @@ void TerminalArea::closeBackend(const QString &backend) {
     QList<KParts::ReadOnlyPart *> doomed;
     for (auto it = parts.begin(); it != parts.end();)
         if (it.key().startsWith(backend + QChar(0x1f))) {
+            forgetClient(it.key());
             titles.remove(it.key());
             launches.remove(it.key());
             exits.remove(it.key());

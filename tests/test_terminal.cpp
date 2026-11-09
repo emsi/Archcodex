@@ -36,6 +36,7 @@ class TerminalTests : public QObject {
         QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         TerminalArea area;
         QSignalSpy exits(&area, &TerminalArea::clientExited);
+        QSignalSpy states(&area, &TerminalArea::clientStateChanged);
         area.resize(800, 500);
         area.show();
         BackendProfile p{"b", "Local", "local-unix", "/unused", script.fileName(), false};
@@ -52,6 +53,12 @@ class TerminalTests : public QObject {
         QCOMPARE(exits[0][1].toInt(), exitCode);
         QCOMPARE(exits[0][2].toBool(), crashed);
         QVERIFY(failed);
+        auto client = qvariant_cast<Session>(states.last()[0]);
+        QVERIFY(client.terminalOpen && client.isActive());
+        QVERIFY(!client.clientIssue.isEmpty());
+        QVERIFY(!client.isRunning() && !client.isWaiting());
+        QVERIFY(area.focusSession(sessionKey("b", "first")));
+        QVERIFY(area.focusSession(sessionKey("b", "failure")));
         QCOMPARE(stack->currentWidget(), failed.data());
         bool retainedOutput = false;
         for (auto *widget : failed->findChildren<QWidget *>()) {
@@ -69,6 +76,7 @@ class TerminalTests : public QObject {
         QVERIFY(!failed);
         QVERIFY(stack->currentWidget() != first);
         area.closeCurrent();
+        QVERIFY(!qvariant_cast<Session>(states.last()[0]).terminalOpen);
         session.id = "first";
         QVERIFY2(area.open(p, session, &error), qPrintable(error));
         QCOMPARE(stack->currentWidget(), first);

@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 import select
 import socket
 import subprocess
@@ -49,6 +50,7 @@ class DiscoveryTests(unittest.TestCase):
         (proc / "ns").mkdir()
         (proc / "ns/mnt").symlink_to(f"mnt:[{namespace}]")
         (proc / "exe").symlink_to(self.executable)
+        (proc / "cwd").symlink_to(self.root / "workspace")
         (proc / "cmdline").write_bytes(b"codex\0app-server\0" +
                                         (b"daemon\0pid-update-loop\0" if updater else b"--listen\0unix://\0"))
         (proc / "fd/7").symlink_to(f"socket:[{pid}]")
@@ -65,12 +67,18 @@ class DiscoveryTests(unittest.TestCase):
         (self.proc / "400/cmdline").write_bytes(b"codex\0app-server\0-c\0a=1\0daemon\0pid-update-loop\0")
         advertised = self.root / "advertised.sock"
         advertised.symlink_to(first)
-        result, warnings = discovery.snapshot(self.proc, default=str(advertised))
+        with patch.object(discovery.pwd, "getpwuid", return_value=SimpleNamespace(
+                pw_name="alice", pw_dir="/home/alice")):
+            result, warnings = discovery.snapshot(self.proc, default=str(advertised))
         self.assertEqual(warnings, [])
         self.assertEqual({x["path"] for x in result}, {first, second})
         default = next(x for x in result if x["default"])
         self.assertIn(str(advertised), default["aliases"])
         self.assertTrue(default["hostEnvironment"])
+        self.assertEqual(default["pid"], 100)
+        self.assertEqual(default["cwd"], str(self.root / "workspace"))
+        self.assertEqual(default["host"], socket.gethostname())
+        self.assertEqual(default["user"], "alice")
 
     def test_bound_before_listen_remains_discoverable(self):
         path = self.server(100, listen=False)

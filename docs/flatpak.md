@@ -2,7 +2,7 @@
 
 Status: primary distribution direction adopted; permission baseline and host
 integration below describe the full-project design. The
-[0.2.1 implementation](implementation.md) has a narrower local-only permission
+[0.3.0 implementation](implementation.md) has a narrower local-only permission
 set and a [buildable manifest](../packaging/io.github.emsi.Archcodex.json).
 Last updated: 2026-11-09.
 
@@ -26,10 +26,10 @@ the built artifact.
 
 The host desktop baseline remains Debian 13 and Ubuntu 26.04 or newer. Host Qt
 versions are not the application's library baseline; the Flatpak runtime is.
-Versions 0.2.0–0.2.1 select KDE 6.11; an explicit upgrade policy remains to be defined.
+Versions 0.2.0–0.3.0 select KDE 6.11; an explicit upgrade policy remains to be defined.
 A `.deb` is not a primary deliverable in this design.
 
-Version 0.2.1 uses application ID `io.github.emsi.Archcodex` and GPL-3.0-or-later.
+Version 0.3.0 uses application ID `io.github.emsi.Archcodex` and GPL-3.0-or-later.
 The distribution repository remains open. Flathub is a possible publication
 destination; the local test bundle does not publish the application there.
 

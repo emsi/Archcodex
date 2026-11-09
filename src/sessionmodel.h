@@ -18,12 +18,21 @@ enum ModelRole {
     AttentionRole,
     ProjectNameRole,
     EnvironmentRole,
-    BackendsRole
+    BackendsRole,
+    KindRole,
+    CountRole,
+    ActiveCountRole,
+    RunningCountRole,
+    WaitingCountRole,
+    UnknownCountRole
 };
+enum class NodeKind { Server, Folder, Session };
 class SessionModel : public QStandardItemModel {
+    Q_OBJECT
   public:
     explicit SessionModel(QObject *parent = nullptr);
     void backendName(const QString &id, const QString &name);
+    void backendDetails(const QString &id, const QString &details);
     void backendEnvironment(const QString &id, const QString &environment);
     QString environment(const QString &backend) const;
     void project(const Project &project);
@@ -31,13 +40,20 @@ class SessionModel : public QStandardItemModel {
     void remove(const QString &backend, const QString &thread);
     void removeBackend(const QString &backend);
     void resetResults();
+    void setHideUnsaved(bool hide);
+  signals:
+    void topologyAboutToChange();
+    void topologyChanged();
 
   private:
-    QHash<QString, QString> backendNames, environments, projectNames;
-    QHash<QString, QStandardItem *> projects, threads;
-    QStandardItem *ensureProject(const QString &backend, const QString &path);
-    void aggregate(QStandardItem *project);
-    void prune(QStandardItem *project);
+    bool hideUnsaved = true;
+    QHash<QString, QString> backendNames, details, environments, projectNames;
+    QHash<QString, QStandardItem *> roots, folders, threads;
+    QHash<QString, Session> records;
+    bool visible(const Session &s) const;
+    void rebuild(const QString &backend);
+    void updateSession(QStandardItem *item, const Session &s);
+    void aggregate(QStandardItem *parent);
     void updateItem(QStandardItem *item, QMap<int, QVariant> values);
 };
 class SessionFilter : public QSortFilterProxyModel {

@@ -1,6 +1,6 @@
 # Existing local sessions first
 
-Archcodex 0.2.0 starts by finding existing Codex servers, then requests their
+Archcodex 0.3.0 starts by finding existing Codex servers, then requests their
 loaded sessions and history. Projects are groups of those sessions, not objects
 the user must create. One server can contain multiple sessions; the number of
 TUIs is not used to infer the number of execution servers.
@@ -59,20 +59,41 @@ closes; no daemon or login service is created.
 
 ## Grouping and attachment
 
-Servers verified to share the host mount namespace use the `local-host`
-environment identity. Their sessions with the same exact working-directory path
-share a project row. Other namespaces/endpoints retain separate environment
-identities. A conversation still retains `(backend ID, thread ID)` for routing;
-equal thread IDs across separate servers are not silently merged.
+Every server has its own root, including servers on the same host or sharing a
+Codex configuration. Session identity remains `(backend ID, thread ID)`; shared
+storage does not imply that live instances are interchangeable. Folder paths are
+compacted relative to the common root of the visible working directories on that
+server. Only branching folders and folders containing sessions are retained.
+Full paths remain in details; paths are compared lexically in the server's
+namespace, without resolving them through the GUI sandbox.
 
-Loaded-thread inventory is independent of the first history page. An older
-running or idle loaded conversation can appear even if its saved timestamp puts
-it beyond that page. Opening its TUI attaches to the existing backend. Discovery
-itself sends no thread/start, thread/resume, turn/start or approval response.
+Automatic server names use the following evidence:
 
-Project search includes every backend in that project's environment. New-session
-creation remains a secondary menu action; if a shared project has several
-connected servers, the user chooses its target server.
+- The discovered default control socket is **Main · user@host**.
+- A different `codexHome` returned by `initialize` is **~/.codex-work · user@host**,
+  or its full path when it lies outside that user's home.
+- Other instances use **Codex · launch-directory · user@host** where available.
+- Identical automatic names gain a numeric suffix ordered by persisted profile ID.
+  Manual names are preserved. Very long automatic labels are truncated; details
+  retain their full values. PID is shown only in details.
+
+Discovery reads the matching process's cwd and PID and obtains user/home/hostname
+from standard Linux account/host interfaces. The handshake supplies the server's
+actual Codex home and user agent. No process environment, configuration content or
+account credential file is read. A launch directory is context, not an assertion
+that the server owns only that project.
+
+Loaded-thread inventory is independent of the first history page. Opening a
+session first requests `thread/read(includeTurns=false)` on its selected server;
+the TUI then uses that profile's executable and explicit socket:
+
+```text
+<profile executable> --remote unix://<profile socket> resume -- <thread ID>
+```
+
+Discovery itself sends no thread/start, thread/resume, turn/start or approval
+response. Folder search stays within its selected server and includes descendant
+working directories. A new session targets that same selected server.
 
 ## Evidence and remaining host check
 
@@ -81,8 +102,8 @@ exclusion, current-user filtering, private namespaces, inotify creation/deletion
 an idle loop without a timeout and helper exit on pipe closure. An optional real
 Codex test starts an isolated server after the helper and verifies event-driven
 discovery. A window test feeds two discovered fixture servers through the real
-bridge, verifies automatic session loading/grouping and searches their shared
-project. These tests use no account credentials or model turn.
+bridge, verifies automatic session loading, separate server roots, and server-scoped
+search. These tests use no account credentials or model turn.
 
 The host-side Flatpak command boundary still requires desktop validation because
 the build container cannot execute a full Flatpak sandbox. Run installation and

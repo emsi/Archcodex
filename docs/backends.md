@@ -1,15 +1,17 @@
 # Backend design
 
 Status: target contracts for the adopted architecture. The local Unix adapter is
-implemented in [0.2.0](implementation.md); TCP, SSH and myCodex remain planned.
-Last updated: 2026-11-08.
+implemented in [0.3.0](implementation.md); TCP, SSH and myCodex remain planned.
+Last updated: 2026-11-09.
 
 ## 1. Separation of responsibilities
 
 A **backend** identifies an execution environment and an app-server endpoint. It
 is not a terminal tab, a project directory, or a copy of conversation storage.
 Several backends can be configured on one host, and a backend can contain many
-projects and conversations.
+projects and conversations. Each local server has a separate explorer root.
+Future adapters will provide meaningful SSH host or myCodex container context
+for those roots; the shared tree keeps paths and sessions scoped to the backend.
 
 Keep three concerns separate:
 

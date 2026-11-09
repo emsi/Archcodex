@@ -14,36 +14,36 @@ resizable divider. Keep the first version simple.
 The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, then **Waiting for input**. These tabs are views of the same
 project/session data. Each view uses a predicate over the same session model.
 
-Projects are the top-level rows. Each project expands to reveal its sessions,
-ordered by recent use. Projects are groups derived from existing sessions; there
-is no project-creation prerequisite or standalone empty-project workflow.
-The interface must not require navigating a separate host tree before reaching
-a project; show a backend label where needed to distinguish locations.
+Servers are the top-level rows. Each expands into folders and sessions, ordered
+by recent use. No project-creation prerequisite exists. Future SSH and myCodex
+adapters will supply the host/container context for their roots; those adapters
+are not implemented in this version.
 
-This wireframe expresses arrangement, not final styling or exact dimensions:
+The directory prefix common to visible sessions on a server is omitted and shown
+in that server's details. Folder chains without sessions or branching are
+collapsed into one label; folders containing sessions stay explicit. With one
+working directory, its basename remains as a folder under the server. For example,
+with common root `/home/alice`:
 
 ```text
-+----------------------------- Archcodex -------------------------------+
-| Session   View   Connections   Help                                   |
-+-------------------------+---------------------------------------------+
-| Projects     [Discover] | Refactor parser                             |
-| All Active Running Input| Archcodex / laptop                          |
-|-------------------------+---------------------------------------------+
-| Search conversations... |                                             |
-| Scope: All projects  v  |                                             |
-|-------------------------|                                             |
-| v Archcodex  [laptop] o |              Embedded Codex TUI             |
-|     Refactor parser   o |                                             |
-|     Packaging notes   o |                                             |
-| > Backend API [build] o |                                             |
-| v Notes       [local] o |                                             |
-|     Search behavior   o |                                             |
-|                         |                                             |
-|                         |                                             |
-+-------------------------+---------------------------------------------+
-| Connections: 2 connected, 1 disconnected                              |
-+-----------------------------------------------------------------------+
+Projects                             Terminal workspace
+[All] [Active] [Running] [Waiting for input]
+Search conversations…
+Scope: All servers
+v Main · alice@workstation
+  v git/team
+    v alpha
+        Refactor parser
+    > beta
+  > docs/notes
+> ~/.codex-work · alice@workstation
 ```
+
+Names use configuration and user/host context, with a launch directory as a
+fallback and numeric suffixes for otherwise identical automatic labels. PID,
+full endpoint, executable, Codex home and cwd are details, not visible identity.
+Manual connection names are preserved. Empty configured servers remain visible
+in All, while filtered views show only matching branches.
 
 The terminal owns the main workspace. There is no initial requirement for an
 editor, file browser, dashboard, right-hand inspector, terminal splits or
@@ -58,13 +58,14 @@ selected filter when cleared.
 
 | View | Membership |
 | --- | --- |
-| All | Loaded sessions and saved history, including disconnected cached rows. |
-| Active | Loaded sessions: running, ordinary idle prompts, explicit input/approval requests, errors and other runtime states. |
+| All | Saved history and visible live sessions, including disconnected cached rows and open terminals. |
+| Active | Loaded sessions and open terminal views, including retained client errors and other runtime states. |
 | Running | Confirmed active turn with no waiting flags. |
 | Waiting for input | Confirmed idle prompt or active turn waiting for input/approval. |
 
-Active describes runtime presence, not whether a turn is executing or whether
-Archcodex has opened a terminal. A normal idle session is ready for a new prompt.
+Active includes server runtime presence and terminal views that the user has
+opened. A retained exited/error client belongs to Active alone, even when the
+server still advertises its thread as idle or running. A normal idle session is ready for a new prompt.
 An approval is explicitly labelled as such. Ordinary idle prompts use a quiet
 neutral dot; explicit questions and approvals use amber, so waiting prompts do
 not make every live project look urgent. A loaded server error stays in
@@ -76,7 +77,7 @@ Unknown rows never appear in Running or Waiting for input. At reconnect, the
 complete loaded inventory reconciles cached rows outside the history page too;
 partial/failed inventories do not falsely mark them unloaded. Pushed status and
 closed events take priority over older snapshots. `thread/closed` moves a row to
-saved history; it does not delete it. No periodic status request is introduced.
+saved history when no terminal is open; it does not delete it. No periodic status request is introduced.
 
 Loaded does not prove that another terminal is attached: the server may retain
 an unsubscribed idle thread for its unload grace period. This is the observable
@@ -106,10 +107,17 @@ events discover new normal Codex sockets during operation. Neither mechanism
 infers session status; that is supplied by app-server events. Discovery does not
 start servers, resume conversations, launch terminals or create directories.
 
-Sessions from servers established to share the host filesystem environment are
-grouped by exact working-directory path. Identical path spellings on unrelated
-or container environments remain separate. Thread routing still retains the
-backend and thread ID, even when their project row is shared.
+Identical working-directory paths on separate servers stay separate. Their root
+supplies backend identity, while folder/session rows retain it for exact routing.
+
+**View → Hide unsaved sessions** defaults to on and is persisted in `window.ini`.
+Saved means a non-ephemeral session with a rollout path or paginated history in
+the server store. A null path alone does not prove absence. Known missing entries
+are hidden after a server metadata read; unrelated errors do not mark them missing.
+Older cached entries without persistence metadata remain until fresh evidence
+arrives. An open terminal overrides this visibility filter so errors remain
+reachable. Closing its view removes that exception. Terminal presence and exit
+messages are never persisted as live state across application restarts.
 
 Manual connection configuration remains available for custom endpoints and
 restricted discovery environments. It is not required for discoverable local
@@ -119,20 +127,17 @@ for what host visibility and event coverage mean.
 
 ## 4. Project and session rows
 
-Each project row has an expand/collapse control, a name, a compact backend label
-and an aggregate status indicator. Each session row has its title and its own
+Each server/folder row has an expand/collapse control, a name and an aggregate
+status indicator. Each session row has its title and its own
 status indicator. Full paths, backend details and status descriptions can be
 shown in tooltips and accessible text instead of occupying several columns.
-If an explicitly grouped project has locations on several backends, put the
-backend label on its session rows as well.
-
 Use the existing MRU model for both project and session ordering. Expanding a
 project or receiving output does not count as using a conversation. Preserve
 selection and avoid moving rows under an ongoing keyboard or pointer action;
 exact MRU update timing remains a design detail to settle.
 
 Indicators distinguish running, waiting for approval/input, idle, failed and
-unknown/disconnected states. Do not communicate these differences through color
+unknown/disconnected states. Retained client errors stay in Active only. Do not communicate these differences through color
 alone. Use accessible names and a supplementary symbol or text where necessary.
 Choose actual colors from the desktop theme during visual refinement.
 
@@ -146,9 +151,12 @@ Detailed counts can appear in the tooltip. Final indicator appearance is open.
 Proposed activation behavior is Enter or double-click on a session row; a single
 click selects it. Activating a session opens/focuses its Codex TUI in the main
 workspace and passes the exact backend and thread identity to the terminal
-service. Selecting or expanding a project does not launch a terminal.
+service. Existing terminal views can be focused even while the backend is
+disconnected. A new attachment first validates the session with its own server;
+a failure displays that server error and does not fall back to another endpoint.
+Selecting or expanding a folder does not launch a terminal.
 
-Keep one visible terminal pane initially. Version 0.2.1 retains explicitly
+Keep one visible terminal pane initially. Version 0.3.0 retains explicitly
 opened terminal clients until closed, without a terminal tab strip. The
 session-filter tabs are navigation views, not terminal tabs. Only explicitly opened
 sessions may create terminal widgets, and changing a filter cannot detach or
@@ -162,7 +170,10 @@ Client exit retains the terminal buffer and displays an inline exit/crash messag
 An explicit Restart client action creates a fresh terminal for that launch, and
 Close terminal releases the view. Opening other sessions does not discard it.
 The terminal's lifetime is separate from the server conversation's lifetime.
-For an existing conversation, restart uses the same thread ID; for a new-session
+A new-session launcher has no conversation ID until Codex creates it. It is
+shown as **New session terminal** until explicitly closed; its independently
+discovered conversation can also appear. Automatic correlation is not guessed
+from titles, cwd or output. For an existing conversation, restart uses the same thread ID; for a new-session
 launcher it repeats the new-session action. No automatic restart loop is used.
 A small packaged Konsole extension exposes hold-open and process-exit events;
 Archcodex rejects a component lacking those capabilities with a clear error.
@@ -176,7 +187,8 @@ the interaction design is finalized.
 
 Retain the existing requirement to search titles and conversation text. The
 proposed initial placement is one search field in the left pane with an explicit
-scope: all projects or a selected project. Results identify their project,
+scope: all servers, or the selected server/folder. Folder scope includes
+descendants; a selected session scopes by its working directory on that server. Results identify their project,
 session and backend and open the corresponding conversation.
 
 Searching conversation history is distinct from filtering the Active view. A
@@ -194,8 +206,8 @@ concepts. A disconnected backend keeps its saved projects visible in All.
 
 - The left pane offers All, Active, Running and Waiting for input; all preserve project/session
   hierarchy and distinguish same-named projects on different backends.
-- Existing sessions appear without project setup. Servers in the same host
-  working directory share a group while retaining their separate routing.
+- Existing sessions appear without project setup. Separate server roots preserve
+  routing even for identical working directories and thread IDs.
 - MRU ordering and pagination keep large histories usable without moving the
   selected row unpredictably.
 - Pushed events update row indicators and Active membership without recurring

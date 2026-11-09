@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "types.h"
 #include <QDir>
+#include <QFileInfo>
 #include <QJsonArray>
 
 namespace Archcodex {
@@ -36,7 +37,8 @@ QJsonObject BackendProfile::json() const {
             {"executable", executable},
             {"autoConnect", autoConnect},
             {"environment", environmentId},
-            {"discovered", discovered}};
+            {"discovered", discovered},
+            {"identity", identity}};
 }
 BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
     return {o["id"].toString(),
@@ -46,19 +48,25 @@ BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
             o["executable"].toString("codex"),
             o["autoConnect"].toBool(true),
             o["environment"].toString(),
-            o["discovered"].toBool()};
+            o["discovered"].toBool(),
+            o["identity"].toObject()};
+}
+bool Session::isSaved() const {
+    // Paginated history lives in the server's store and need not have a rollout file.
+    return !ephemeral && !unavailable && (!rolloutPath.isEmpty() || historyMode == "paginated");
 }
 bool Session::isActive() const {
     // Runtime presence and turn activity are different. Preserve last-known
     // presence while disconnected, but never claim a current running/waiting state.
     const auto type = status["type"].toString();
-    return !type.isEmpty() && type != QStringLiteral("notLoaded");
+    return terminalOpen || (!unavailable && !type.isEmpty() && type != QStringLiteral("notLoaded"));
 }
 bool Session::isRunning() const {
-    return known && status["type"] == "active" && status["activeFlags"].toArray().isEmpty();
+    return clientIssue.isEmpty() && !unavailable && known && status["type"] == "active" &&
+           status["activeFlags"].toArray().isEmpty();
 }
 bool Session::isWaiting() const {
-    if (!known)
+    if (!known || unavailable || !clientIssue.isEmpty())
         return false;
     const auto flags = status["activeFlags"].toArray();
     return status["type"] == "idle" ||
@@ -66,6 +74,8 @@ bool Session::isWaiting() const {
             (flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")));
 }
 int Session::attention() const {
+    if (!clientIssue.isEmpty())
+        return 3;
     if (!known)
         return 0;
     if (isWaiting() && status["type"] == "active")
@@ -75,6 +85,10 @@ int Session::attention() const {
     return status["type"].toString() == QStringLiteral("systemError") ? 3 : 1;
 }
 QString Session::stateText() const {
+    if (!clientIssue.isEmpty())
+        return clientIssue;
+    if (unavailable)
+        return QStringLiteral("Saved session unavailable on this server");
     if (!known)
         return isActive() ? QStringLiteral("Unknown — last known active")
                           : QStringLiteral("Unknown / disconnected");
@@ -107,6 +121,11 @@ Session Session::fromThread(const QString &backend, const QJsonObject &t) {
     if (s.title.isEmpty())
         s.title = QStringLiteral("Untitled session");
     s.status = t["status"].toObject();
+    s.rolloutPath = t["path"].toString();
+    s.historyMode = t["historyMode"].toString();
+    s.ephemeral = t["ephemeral"].toBool();
+    s.persistenceKnown = t.contains("path") || s.ephemeral || t.contains("historyMode");
+    s.unavailable = t["unavailable"].toBool();
     s.known = !s.status.isEmpty();
     s.recency = t["recencyAt"].toVariant().toLongLong();
     if (!s.recency)
@@ -115,7 +134,16 @@ Session Session::fromThread(const QString &backend, const QJsonObject &t) {
 }
 QJsonObject Session::metadata() const {
     // Persist only the list metadata, never complete turns or authentication data.
-    return {{"id", id}, {"cwd", cwd}, {"name", title}, {"status", status}, {"recencyAt", recency}};
+    auto data =
+        QJsonObject{{"id", id},         {"cwd", cwd},           {"name", title},
+                    {"status", status}, {"recencyAt", recency}, {"unavailable", unavailable}};
+    if (persistenceKnown) {
+        data["path"] =
+            rolloutPath.isEmpty() ? QJsonValue(QJsonValue::Null) : QJsonValue(rolloutPath);
+        data["ephemeral"] = ephemeral;
+        data["historyMode"] = historyMode;
+    }
+    return data;
 }
 QString sessionKey(const QString &backend, const QString &thread) {
     return backend + QChar(0x1f) + thread;
@@ -135,5 +163,37 @@ QStringList terminalArguments(const BackendProfile &p, const QString &id) {
             QStringLiteral("resume"),
             QStringLiteral("--"),
             id};
+}
+QString serverLabel(const BackendProfile &p) {
+    if (!p.discovered)
+        return p.name;
+    const auto home = p.identity["codexHome"].toString();
+    const auto ownerHome = p.identity["ownerHome"].toString();
+    QString label;
+    if (p.identity["default"].toBool())
+        label = "Main";
+    else if (!home.isEmpty() && home != ownerHome + "/.codex")
+        label = home.startsWith(ownerHome + "/") && !ownerHome.isEmpty()
+                    ? "~" + home.mid(ownerHome.size())
+                    : home;
+    else {
+        const auto cwd = p.identity["cwd"].toString();
+        label = "Codex";
+        if (!cwd.isEmpty() && cwd != ownerHome && cwd != "/")
+            label += " · " + QFileInfo(cwd).fileName();
+    }
+    const auto user = p.identity["user"].toString(), host = p.identity["host"].toString();
+    if (!user.isEmpty() || !host.isEmpty())
+        label += " · " + user + (host.isEmpty() ? QString() : "@" + host);
+    return label.left(150);
+}
+QString serverDetails(const BackendProfile &p) {
+    QStringList lines{p.name, "Socket: " + p.endpoint(), "Executable: " + p.executable};
+    for (const auto &field : {"codexHome", "cwd", "user", "host", "pid", "userAgent"}) {
+        const auto value = p.identity[field].toVariant().toString();
+        if (!value.isEmpty())
+            lines << QString::fromLatin1(field) + ": " + value;
+    }
+    return lines.join('\n');
 }
 } // namespace Archcodex

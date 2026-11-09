@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "sessionmodel.h"
+#include <QAbstractItemModelTester>
 #include <QJsonArray>
 #include <QtTest>
 using namespace Archcodex;
@@ -22,13 +23,13 @@ class ModelTests : public QObject {
             model.upsert(s);
         }
         QCOMPARE(filter.rowCount(), 2);
-        QCOMPARE(filter.rowCount(filter.index(0, 0)), 40);
+        QCOMPARE(filter.rowCount(filter.index(0, 0, filter.index(0, 0))), 40);
         filter.setView(SessionFilter::View::Active);
         QCOMPARE(filter.rowCount(), 2);
-        QCOMPARE(filter.rowCount(filter.index(0, 0)), 40);
+        QCOMPARE(filter.rowCount(filter.index(0, 0, filter.index(0, 0))), 40);
         filter.setView(SessionFilter::View::Running);
-        QCOMPARE(filter.rowCount(filter.index(0, 0)), 20);
-        QCOMPARE(filter.rowCount(filter.index(1, 0)), 20);
+        QCOMPARE(filter.rowCount(filter.index(0, 0, filter.index(0, 0))), 20);
+        QCOMPARE(filter.rowCount(filter.index(0, 0, filter.index(1, 0))), 20);
         model.removeBackend("one");
         QCOMPARE(filter.rowCount(), 1);
     }
@@ -48,7 +49,7 @@ class ModelTests : public QObject {
         s.known = false;
         model.upsert(s);
         QCOMPARE(filter.rowCount(), 1);
-        QCOMPARE(model.item(0)->child(0)->data(AttentionRole).toInt(), 0);
+        QCOMPARE(model.item(0)->child(0)->child(0)->data(AttentionRole).toInt(), 0);
         s.known = true;
         s.status = {{"type", "idle"}};
         model.upsert(s);
@@ -110,7 +111,7 @@ class ModelTests : public QObject {
             filter.setView(view);
             QCOMPARE(filter.rowCount(), visible ? 1 : 0);
             if (visible)
-                QCOMPARE(filter.rowCount(filter.index(0, 0)), 1);
+                QCOMPARE(filter.rowCount(filter.index(0, 0, filter.index(0, 0))), 1);
         }
     }
     void identicalUpdatesDoNotDisturbTheView() {
@@ -125,48 +126,122 @@ class ModelTests : public QObject {
         QCOMPARE(changes.size(), 0);
         QCOMPARE(layouts.size(), 0);
     }
-    void manualNamesSurviveSessionUpdatesAndBackendRename() {
+    void separateServerRootsAndCompactFolders() {
+        SessionModel model;
+        QAbstractItemModelTester tester(&model,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        model.backendName("a", "Main");
+        model.backendName("b", "Work");
+        model.backendEnvironment("a", "local-host");
+        model.backendEnvironment("b", "local-host");
+        auto put = [&](const QString &backend, const QString &id, const QString &cwd) {
+            model.upsert(Session::fromThread(backend, {{"id", id}, {"cwd", cwd}}));
+        };
+        put("a", "one", "/home/user/git/team/alpha");
+        put("a", "two", "/home/user/git/team/beta");
+        put("a", "three", "/home/user/docs/notes");
+        put("b", "one", "/home/user/git/team/alpha");
+        QCOMPARE(model.rowCount(), 2);
+        auto *main = model.item(0);
+        QCOMPARE(main->text(), "Main");
+        QCOMPARE(main->data(PathRole).toString(), "/home/user");
+        QCOMPARE(main->rowCount(), 2);
+        auto find = [&](const QString &path) -> QStandardItem * {
+            for (int i = 0; i < main->rowCount(); ++i)
+                if (main->child(i)->data(PathRole) == path)
+                    return main->child(i);
+            return nullptr;
+        };
+        auto *team = find("/home/user/git/team");
+        QVERIFY(team);
+        QCOMPARE(team->text(), "git/team");
+        QCOMPARE(team->rowCount(), 2);
+        QVERIFY(find("/home/user/docs/notes"));
+        QCOMPARE(find("/home/user/docs/notes")->text(), "docs/notes");
+        // A folder with its own session remains an explicit node.
+        put("a", "four", "/home/user/git");
+        auto *git = find("/home/user/git");
+        QVERIFY(git);
+        QCOMPARE(git->text(), "git");
+        QCOMPARE(team->parent(), git);
+        QCOMPARE(team->text(), "team");
+        model.remove("a", "four");
+        QCOMPARE(team->parent(), main);
+        QCOMPARE(team->text(), "git/team");
+        // Removing a branch recompresses ancestors without losing remaining sessions.
+        model.remove("a", "three");
+        QCOMPARE(main->data(PathRole).toString(), "/home/user/git/team");
+        QCOMPARE(main->data(CountRole).toInt(), 2);
+        QCOMPARE(model.item(1)->data(CountRole).toInt(), 1);
+        QCOMPARE(model.item(1)->child(0)->child(0)->data(BackendRole).toString(), "b");
+        put("a", "outside", "/home/username/work");
+        QCOMPARE(main->data(PathRole).toString(), "/home");
+        put("a", "unknown", "");
+        QVERIFY(find(""));
+        put("a", "root", "/");
+        QCOMPARE(main->data(PathRole).toString(), "/");
+        model.removeBackend("a");
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->text(), "Work");
+    }
+    void savedVisibilityAndRetainedErrors() {
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        auto s = Session::fromThread("b", {{"id", "t"},
+                                           {"cwd", "/work"},
+                                           {"ephemeral", false},
+                                           {"path", QJsonValue::Null},
+                                           {"status", QJsonObject{{"type", "idle"}}}});
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
+        model.setHideUnsaved(false);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        model.setHideUnsaved(true);
+        s.historyMode = "paginated";
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        s.ephemeral = true;
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
+        s.terminalOpen = true;
+        s.clientIssue = "Terminal client exited with code 1";
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        filter.setView(SessionFilter::View::Active);
+        QCOMPARE(filter.rowCount(), 1);
+        filter.setView(SessionFilter::View::Running);
+        QCOMPARE(filter.rowCount(), 0);
+        filter.setView(SessionFilter::View::Waiting);
+        QCOMPARE(filter.rowCount(), 0);
+        auto restored = Session::fromThread("b", s.metadata());
+        QVERIFY(!restored.terminalOpen);
+        QVERIFY(restored.clientIssue.isEmpty());
+        s.terminalOpen = false;
+        s.clientIssue.clear();
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
+        s.ephemeral = false;
+        s.rolloutPath = "/saved/file.jsonl";
+        s.historyMode.clear();
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
+        s.unavailable = true;
+        model.upsert(s);
+        QCOMPARE(model.item(0)->data(CountRole).toInt(), 0);
+    }
+    void manualNamesRemainAndEmptyRootsAreAllowed() {
         SessionModel model;
         model.backendName("b", "Before");
         model.project({"b", "/work", "My project"});
-        QCOMPARE(model.rowCount(), 0); // A saved label does not create an empty project.
-        model.upsert(
-            Session::fromThread("b", {{"id", "t"}, {"cwd", "/work"}, {"name", "Session"}}));
-        QVERIFY(model.item(0)->text().startsWith("My project"));
+        QCOMPARE(model.rowCount(), 1);
+        QCOMPARE(model.item(0)->rowCount(), 0);
+        model.upsert(Session::fromThread("b", {{"id", "t"}, {"cwd", "/work"}}));
+        QCOMPARE(model.item(0)->child(0)->text(), "My project");
         model.backendName("b", "After");
-        QVERIFY(model.item(0)->text().endsWith("After"));
-    }
-    void sharedHostProjectsKeepTheirBackendRouting() {
-        SessionModel model;
-        model.backendEnvironment("one", "local-host");
-        model.backendEnvironment("two", "local-host");
-        auto first = Session::fromThread("one", {{"id", "same"}, {"cwd", "/work"}});
-        auto second = Session::fromThread("two", {{"id", "same"}, {"cwd", "/work"}});
-        model.upsert(first);
-        model.upsert(second);
-        QCOMPARE(model.rowCount(), 1);
-        QCOMPARE(model.item(0)->rowCount(), 2);
-        QCOMPARE(model.item(0)->data(BackendsRole).toStringList().size(), 2);
-        QVERIFY(model.item(0)->data(BackendRole).toString().isEmpty());
-        QCOMPARE(model.item(0)->child(0)->data(BackendRole).toString(), "one");
-        model.removeBackend("one");
-        QCOMPARE(model.rowCount(), 1);
-        QCOMPARE(model.item(0)->child(0)->data(BackendRole).toString(), "two");
-        model.remove("two", "same");
-        QCOMPARE(model.rowCount(), 0);
-    }
-    void discoveredEnvironmentRegroupsCachedSessions() {
-        SessionModel model;
-        auto s = Session::fromThread("one", {{"id", "t"}, {"cwd", "/work"}});
-        model.upsert(s);
-        model.backendEnvironment("one", "local-host");
-        model.upsert(s);
-        QCOMPARE(model.rowCount(), 1);
-        QCOMPARE(model.item(0)->data(EnvironmentRole).toString(), "local-host");
-        s.cwd = "/new-worktree";
-        model.upsert(s);
-        QCOMPARE(model.rowCount(), 1);
-        QCOMPARE(model.item(0)->data(PathRole).toString(), "/new-worktree");
+        QCOMPARE(model.item(0)->text(), "After");
+        model.remove("b", "t");
+        QCOMPARE(model.item(0)->rowCount(), 0);
     }
 };
 QTEST_MAIN(ModelTests)

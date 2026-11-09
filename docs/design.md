@@ -1,9 +1,9 @@
 # Project design
 
 Status: adopted architectural direction; detailed contracts below are design
-proposals for the full project. The [0.2.0 implementation](implementation.md)
+proposals for the full project. The [0.3.0 implementation](implementation.md)
 delivers the local Unix backend and initial UI; that document records tested
-behavior and remaining limits. Last updated: 2026-11-08.
+behavior and remaining limits. Last updated: 2026-11-09.
 
 ## 1. Product and agreed constraints
 
@@ -30,8 +30,8 @@ Backend delivery order is fixed: **existing local Unix app-server sockets →
 remote TCP app-server endpoints → SSH-forwarded sockets → myCodex**.
 
 This document defines behavior and architecture. The
-[initial UI design](ui.md) starts with a simple IDE layout: expandable projects
-and sessions on the left, All/Active navigation tabs, and the terminal workspace
+[initial UI design](ui.md) uses a simple IDE layout: separate server roots and compact folder/session
+trees on the left, All/Active/Running/Waiting navigation tabs, and the terminal workspace
 on the right. Interaction refinements, colors and notification preferences remain
 part of the ongoing UI design stage.
 

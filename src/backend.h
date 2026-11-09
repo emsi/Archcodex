@@ -22,11 +22,14 @@ class Backend : public QObject {
     virtual bool ready() const = 0;
     virtual void loadMore() = 0;
     virtual void search(const QString &query, quint64 token) = 0;
+    virtual void verifySession(const QString &id) = 0;
   signals:
     void connectionChanged(const QString &description, bool ready);
     void sessionChanged(const Archcodex::Session &session);
     void sessionRemoved(const QString &id);
     void loadedInventory(const QSet<QString> &ids);
+    void identityReceived(const QJsonObject &identity);
+    void sessionVerified(const QString &id, const QString &error);
     void moreAvailable(bool available);
     void searchResults(quint64 token, const QList<Archcodex::Session> &sessions,
                        const QString &error, bool complete);
@@ -45,6 +48,7 @@ class CodexBackend : public Backend {
     }
     void loadMore() override;
     void search(const QString &query, quint64 token) override;
+    void verifySession(const QString &id) override;
 
   protected:
     virtual QStringList bridgeArguments() const = 0;
@@ -66,7 +70,7 @@ class CodexBackend : public Backend {
     QSet<QString> loaded;
     QHash<QString, Session> sessions;
     QQueue<QString> reads;
-    QSet<QString> scheduledReads;
+    QSet<QString> scheduledReads, dirtyReads;
     int reading = 0;
     QString nextCursor;
     bool initialized = false, wanted = false, listing = false;
@@ -82,9 +86,10 @@ class CodexBackend : public Backend {
     void armDeadline();
     void listPage(const QString &cursor);
     void loadedPage(const QString &cursor = {});
-    void readThread(const QString &id);
+    void readThread(const QString &id, bool fromEvent = false);
     void pumpReads();
-    void upsert(QJsonObject thread);
+    void upsert(QJsonObject thread, bool verified = false);
+    void readFailure(const QString &id, const QString &error);
     void searchPage(const QString &query, const QString &cursor, quint64 token, quint64 searchId,
                     int pages);
 };
@@ -96,4 +101,3 @@ class LocalBackend final : public CodexBackend {
     QStringList bridgeArguments() const override;
 };
 } // namespace Archcodex
-Q_DECLARE_METATYPE(Archcodex::Session)

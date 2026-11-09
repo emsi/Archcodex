@@ -9,6 +9,8 @@ snapshots. The idle loop waits indefinitely for descriptors, with no scan timer.
 import ctypes
 import json
 import os
+import pwd
+import socket
 from pathlib import Path
 import selectors
 import stat
@@ -44,6 +46,12 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
     uid = os.getuid() if uid is None else uid
     listeners, found, warnings = {}, {}, []
     try:
+        owner = pwd.getpwuid(uid)
+        identity = {"user": owner.pw_name, "ownerHome": owner.pw_dir}
+    except KeyError:
+        identity = {}
+    identity["host"] = socket.gethostname()
+    try:
         for line in (proc / "net/unix").read_text(errors="surrogateescape").splitlines()[1:]:
             fields = line.split(maxsplit=7)
             if len(fields) == 8 and fields[4] == "0001" and fields[5] == "01":
@@ -72,6 +80,10 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
             # A container-private path with the same spelling is not a host socket.
             namespace = os.readlink(process / "ns/mnt")
             host_environment = namespace == os.readlink(proc / "self/ns/mnt")
+            try:
+                cwd = os.readlink(process / "cwd")
+            except OSError:
+                cwd = ""
             for fd in (process / "fd").iterdir():
                 try:
                     link = os.readlink(fd)
@@ -95,7 +107,9 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
                     executable = exe if valid_path(exe) and os.access(exe, os.X_OK) else "codex"
                     found[canonical] = {"path": canonical, "aliases": [path],
                                         "executable": executable, "default": False,
-                                        "hostEnvironment": host_environment}
+                                        "hostEnvironment": host_environment, **identity,
+                                        "pid": int(process.name),
+                                        "cwd": cwd if valid_path(cwd) else ""}
                     if len(found) >= LIMIT:
                         warnings.append("Local discovery reached 4,096 endpoints; coverage is incomplete.")
                         break

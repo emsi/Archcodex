@@ -14,7 +14,6 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHelpEvent>
-#include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -61,6 +60,33 @@ class SessionTree : public QTreeView {
         return true;
     }
 };
+void walkTree(QAbstractItemModel *model, const QModelIndex &parent,
+              const std::function<void(const QModelIndex &)> &visit) {
+    for (int i = 0; i < model->rowCount(parent); ++i) {
+        const auto child = model->index(i, 0, parent);
+        visit(child);
+        walkTree(model, child, visit);
+    }
+}
+QStringList expandedKeys(QTreeView *tree) {
+    QStringList keys;
+    walkTree(tree->model(), {}, [&](const QModelIndex &index) {
+        if (tree->isExpanded(index))
+            keys << index.data(KeyRole).toString();
+    });
+    return keys;
+}
+void restoreTree(QTreeView *tree, const QStringList &keys, const QString &selected) {
+    walkTree(tree->model(), {}, [&](const QModelIndex &index) {
+        if (keys.contains(index.data(KeyRole).toString()))
+            tree->expand(index);
+        if (!selected.isEmpty() && index.data(KeyRole).toString() == selected) {
+            tree->setCurrentIndex(index);
+            for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
+                tree->expand(parent);
+        }
+    });
+}
 const QStringList viewDescriptions{
     "All sessions, including saved history. Hollow dots mean unknown state.",
     "Live sessions, including idle prompts and errors. Hollow dots mean last-known active.",
@@ -113,7 +139,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     searchBox->setClearButtonEnabled(true);
     left->addWidget(searchBox);
     scope = new QComboBox;
-    scope->addItems({"All projects", "Selected project"});
+    scope->addItems({"All servers", "Selected server or folder"});
     scope->setAccessibleName("Search scope");
     left->addWidget(scope);
     connect(searchBox, &QLineEdit::returnPressed, this, &Window::search);
@@ -135,30 +161,37 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     left->addWidget(tree, 1);
     connect(tree, &QTreeView::activated, this, &Window::activate);
     connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
-        QStringList saved;
-        for (int i = 0; i < filter->rowCount(); ++i) {
-            auto idx = filter->index(i, 0);
-            if (tree->isExpanded(idx))
-                saved << idx.data(KeyRole).toString();
-        }
+        const auto saved = expandedKeys(tree);
         expanded[previousTab] = saved;
         const auto selectedKey = tree->currentIndex().data(KeyRole).toString();
         filter->setView(static_cast<SessionFilter::View>(index));
         tree->collapseAll();
-        for (int i = 0; i < filter->rowCount(); ++i) {
-            auto idx = filter->index(i, 0);
-            if (expanded.value(index, saved).contains(idx.data(KeyRole).toString()))
-                tree->expand(idx);
-            for (int j = 0; j < filter->rowCount(idx); ++j) {
-                const auto child = filter->index(j, 0, idx);
-                if (child.data(KeyRole).toString() == selectedKey)
-                    tree->setCurrentIndex(child);
-            }
-        }
+        restoreTree(tree, expanded.value(index, saved), selectedKey);
         previousTab = index;
         if (!searchingView)
             updateSummary();
     });
+    for (auto *source : {model, results}) {
+        connect(source, &SessionModel::topologyAboutToChange, this, [this, source] {
+            if (filter->sourceModel() == source) {
+                topologyExpanded = expandedKeys(tree);
+                topologySelected = tree->currentIndex().data(KeyRole).toString();
+            }
+        });
+        connect(source, &SessionModel::topologyChanged, this, [this, source] {
+            if (filter->sourceModel() != source)
+                return;
+            restoreTree(tree, topologyExpanded, topologySelected);
+            for (int i = 0; i < filter->rowCount(); ++i) {
+                const auto root = filter->index(i, 0);
+                const auto key = root.data(KeyRole).toString();
+                if (!seenRoots.contains(key)) {
+                    tree->expand(root);
+                    seenRoots.insert(key);
+                }
+            }
+        });
+    }
     loadMore = new QPushButton("Load more history");
     loadMore->setEnabled(false);
     left->addWidget(loadMore);
@@ -187,6 +220,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     splitter->setSizes({390, 760});
     connect(close, &QPushButton::clicked, terminal, &TerminalArea::closeCurrent);
     connect(terminal, &TerminalArea::currentChanged, terminalTitle, &QLabel::setText);
+    connect(terminal, &TerminalArea::clientStateChanged, this, &Window::clientStateChanged);
     connections = new QLabel;
     connections->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(connections, 1);
@@ -194,25 +228,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     projectsMenu->addAction("New session in selected project", this, [this] {
         const auto index = tree->currentIndex();
         auto id = index.data(BackendRole).toString();
-        if (id.isEmpty() && index.isValid()) {
-            QStringList ids, names;
-            for (const auto &candidate : index.data(BackendsRole).toStringList())
-                if (backends.value(candidate) && backends[candidate]->ready()) {
-                    ids << candidate;
-                    names << profiles[candidate].name + " · " + profiles[candidate].socketPath;
-                }
-            if (ids.size() == 1)
-                id = ids.first();
-            else if (!ids.isEmpty()) {
-                bool ok = false;
-                const auto name =
-                    QInputDialog::getItem(this, "New session", "Connection", names, 0, false, &ok);
-                if (!ok)
-                    return;
-                id = ids[names.indexOf(name)];
-            }
-        }
-        if (!index.isValid() || !profiles.contains(id)) {
+        if (!index.isValid() || !profiles.contains(id) ||
+            index.data(KindRole).toInt() == int(NodeKind::Server)) {
             error("Select a project first.");
             return;
         }
@@ -231,6 +248,24 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connectionMenu->addAction("Discover local sessions", this, &Window::discover);
     connectionMenu->addAction("Manage connections…", this, &Window::connectionsDialog);
     auto *view = menuBar()->addMenu("&View");
+    auto *hideUnsaved = view->addAction("Hide unsaved sessions");
+    hideUnsaved->setObjectName("hideUnsavedSessions");
+    hideUnsaved->setCheckable(true);
+    QSettings settings(directory + "/window.ini", QSettings::IniFormat);
+    hideUnsaved->setChecked(settings.value("hideUnsavedSessions", true).toBool());
+    model->setHideUnsaved(hideUnsaved->isChecked());
+    results->setHideUnsaved(hideUnsaved->isChecked());
+    hideUnsaved->setToolTip(
+        "Hide entries without saved history. Open terminals remain accessible.");
+    connect(hideUnsaved, &QAction::toggled, this, [this](bool hide) {
+        QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+        settings.setValue("hideUnsavedSessions", hide);
+        settings.sync();
+        model->setHideUnsaved(hide);
+        results->setHideUnsaved(hide);
+        if (searchingView)
+            updateSearchSummary();
+    });
     view->addAction("Focus project navigator", QKeySequence("Ctrl+Shift+P"), tree,
                     qOverload<>(&QWidget::setFocus));
     view->addAction("Focus search", QKeySequence("Ctrl+Shift+F"), searchBox,
@@ -250,6 +285,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         model->backendEnvironment(p.id, p.environmentId);
         results->backendEnvironment(p.id, p.environmentId);
     }
+    refreshNames();
     for (const auto &p : store->projects())
         model->project(p);
     for (const auto &s : store->sessions()) {
@@ -266,14 +302,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     });
     if (connectOnStart)
         QTimer::singleShot(0, this, &Window::discover);
-    QSettings settings(directory + "/window.ini", QSettings::IniFormat);
     restoreGeometry(settings.value("geometry").toByteArray());
     splitter->restoreState(settings.value("splitter").toByteArray());
-    const auto open = settings.value("expanded").toStringList();
-    for (int i = 0; i < filter->rowCount(); ++i) {
-        auto idx = filter->index(i, 0);
-        if (open.contains(idx.data(KeyRole).toString()))
-            tree->expand(idx);
+    if (settings.contains("expanded")) {
+        tree->collapseAll();
+        restoreTree(tree, settings.value("expanded").toStringList(), {});
     }
     updateSummary();
 }
@@ -310,7 +343,8 @@ void Window::attach(const BackendProfile &p, bool start) {
     connect(b, &Backend::loadedInventory, this, [this, id = p.id](const QSet<QString> &loaded) {
         // Cached rows outside the first history page also need reconciliation.
         for (auto &s : sessions)
-            if (s.backendId == id && !s.known && !loaded.contains(s.id)) {
+            if (s.backendId == id && !s.id.startsWith("new-") && !s.known &&
+                !loaded.contains(s.id)) {
                 s.status = {{"type", "notLoaded"}};
                 s.known = true;
                 model->upsert(s);
@@ -327,6 +361,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                 connectionStates[id] = text;
                 connectionReady[id] = ready;
                 if (!ready) {
+                    if (pendingOpen.startsWith(id + QChar(0x1f)))
+                        pendingOpen.clear();
                     for (auto it = sessions.begin(); it != sessions.end(); ++it)
                         if (it->backendId == id) {
                             it->known = false;
@@ -348,19 +384,35 @@ void Window::attach(const BackendProfile &p, bool start) {
     connect(b, &Backend::sessionChanged, this, [this](Session s) {
         const auto key = sessionKey(s.backendId, s.id);
         s.opened = sessions.value(key).opened;
+        s.terminalOpen = sessions.value(key).terminalOpen;
+        s.clientIssue = sessions.value(key).clientIssue;
         sessions[key] = s;
         model->upsert(s);
         persist([&] { store->save(s); });
         if (searchSessions.contains(key)) {
             searchSessions[key] = s;
             results->upsert(s);
+            if (searchingView)
+                updateSearchSummary();
         }
     });
     connect(b, &Backend::sessionRemoved, this, [this, id = p.id](const QString &thread) {
-        sessions.remove(sessionKey(id, thread));
-        model->remove(id, thread);
-        searchSessions.remove(sessionKey(id, thread));
-        results->remove(id, thread);
+        const auto key = sessionKey(id, thread);
+        if (sessions.value(key).terminalOpen) {
+            auto &s = sessions[key];
+            s.unavailable = true;
+            s.known = false;
+            model->upsert(s);
+            if (searchSessions.contains(key)) {
+                searchSessions[key] = s;
+                results->upsert(s);
+            }
+        } else {
+            sessions.remove(key);
+            model->remove(id, thread);
+            searchSessions.remove(key);
+            results->remove(id, thread);
+        }
         if (searchingView)
             updateSearchSummary();
         persist([&] { store->removeSession(id, thread); });
@@ -376,8 +428,10 @@ void Window::attach(const BackendProfile &p, bool start) {
                 if (token != searchToken || !searchingView)
                     return;
                 for (auto s : matches) {
-                    if (!scopeEnvironment.isEmpty() &&
-                        (model->environment(s.backendId) != scopeEnvironment || s.cwd != scopePath))
+                    if (!scopeBackend.isEmpty() &&
+                        (s.backendId != scopeBackend ||
+                         (!scopePath.isEmpty() && s.cwd != scopePath &&
+                          !s.cwd.startsWith(scopePath == "/" ? "/" : scopePath + "/"))))
                         continue;
                     const auto key = sessionKey(s.backendId, s.id);
                     if (sessions.contains(key))
@@ -394,10 +448,83 @@ void Window::attach(const BackendProfile &p, bool start) {
                 updateSearchSummary();
                 tree->expandAll();
             });
+    connect(b, &Backend::identityReceived, this, [this, id = p.id](const QJsonObject &identity) {
+        if (!profiles.contains(id))
+            return;
+        auto &profile = profiles[id];
+        for (auto it = identity.begin(); it != identity.end(); ++it)
+            profile.identity[it.key()] = it.value();
+        refreshNames();
+        persist([&] { store->save(profile); });
+    });
+    connect(b, &Backend::sessionVerified, this,
+            [this, id = p.id](const QString &thread, const QString &issue) {
+                const auto key = sessionKey(id, thread);
+                if (pendingOpen != key)
+                    return;
+                pendingOpen.clear();
+                if (!issue.isEmpty()) {
+                    error("This server could not open the session:\n" + issue);
+                    return;
+                }
+                auto s = sessions.value(key);
+                s.opened = QDateTime::currentSecsSinceEpoch();
+                sessions[key] = s;
+                QString launchError;
+                if (!terminal->open(profiles[id], s, &launchError)) {
+                    error(launchError);
+                    return;
+                }
+                persist([&] { store->save(s); });
+            });
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
     else
         connectionStates[p.id] = "Disconnected";
+}
+void Window::refreshNames() {
+    // Distinguish otherwise identical automatic labels with stable profile order,
+    // never with a process ID. Manual names remain user-controlled.
+    QStringList ids = profiles.keys();
+    ids.sort();
+    QHash<QString, int> totals, used;
+    for (const auto &id : ids)
+        ++totals[serverLabel(profiles[id])];
+    for (const auto &id : ids) {
+        auto &p = profiles[id];
+        auto name = serverLabel(p);
+        const int ordinal = ++used[name];
+        if (p.discovered && totals[name] > 1)
+            name += QString(" (%1)").arg(ordinal);
+        const bool changed = p.name != name;
+        p.name = name;
+        for (auto *source : {model, results}) {
+            source->backendName(id, name);
+            source->backendDetails(id, serverDetails(p));
+        }
+        if (changed)
+            persist([&] { store->save(p); });
+    }
+    updateSummary();
+}
+void Window::clientStateChanged(const Session &client) {
+    const auto key = sessionKey(client.backendId, client.id);
+    auto s = sessions.value(key, client);
+    s.terminalOpen = client.terminalOpen;
+    s.clientIssue = client.clientIssue;
+    if (!s.terminalOpen && s.id.startsWith("new-")) {
+        sessions.remove(key);
+        model->remove(s.backendId, s.id);
+        searchSessions.remove(key);
+        results->remove(s.backendId, s.id);
+        return;
+    }
+    sessions[key] = s;
+    model->upsert(s);
+    if (searchSessions.contains(key)) {
+        searchSessions[key] = s;
+        results->upsert(s);
+    }
 }
 void Window::updateSummary() {
     int count = 0;
@@ -470,6 +597,7 @@ void Window::editConnection(const QString &id) {
     results->backendName(p.id, p.name);
     model->backendEnvironment(p.id, p.environmentId);
     results->backendEnvironment(p.id, p.environmentId);
+    refreshNames();
     attach(p, true);
     updateSummary();
 }
@@ -487,6 +615,7 @@ void Window::connectionsDialog() {
             auto *item = new QListWidgetItem(
                 it->name + " — " + connectionStates.value(it.key(), "Disconnected"), list);
             item->setData(Qt::UserRole, it.key());
+            item->setToolTip(serverDetails(*it));
             if (it.key() == selectedId)
                 list->setCurrentItem(item);
         }
@@ -550,6 +679,7 @@ void Window::connectionsDialog() {
         connectionReady.remove(id);
         more.remove(id);
         model->removeBackend(id);
+        results->removeBackend(id);
         for (auto it = sessions.begin(); it != sessions.end();)
             if (it->backendId == id)
                 it = sessions.erase(it);
@@ -594,11 +724,14 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warn
                 continue;
             BackendProfile p;
             p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-            p.name = item["default"].toBool() ? "Local Codex" : "Local Codex · " + p.id.right(8);
+            for (const auto &field : {"user", "host", "ownerHome", "cwd", "pid", "default"})
+                if (item.contains(field))
+                    p.identity[field] = item[field];
+            p.discovered = true;
+            p.name = serverLabel(p);
             p.socketPath = path;
             p.executable = item["executable"].toString("codex");
             p.environmentId = item["hostEnvironment"].toBool() ? "local-host" : p.id;
-            p.discovered = true;
             if (!p.validate().isEmpty() || !persist([&] { store->save(p); }))
                 continue;
             id = p.id;
@@ -608,6 +741,9 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warn
             attach(p, false);
         }
         auto &p = profiles[id];
+        for (const auto &field : {"user", "host", "ownerHome", "cwd", "pid", "default"})
+            if (item.contains(field))
+                p.identity[field] = item[field];
         const auto executable = item["executable"].toString("codex");
         if (p.discovered && p.executable != executable) {
             auto updated = p;
@@ -635,12 +771,14 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warn
         for (const auto &s : searchSessions)
             if (s.backendId == id)
                 results->upsert(s);
+        persist([&] { store->save(p); });
         discoveredPaths[id] = path;
         present.insert(id);
         if (!backends[id]->ready() && !paused.contains(id) && p.autoConnect &&
             !discoveredPresent.contains(id))
             backends[id]->connectServer();
     }
+    refreshNames();
     if (warnings.isEmpty()) {
         for (const auto &id : discoveredPresent - present)
             if (profiles.contains(id) && profiles[id].discovered)
@@ -651,7 +789,7 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QStringList &warn
     discoveryMessage =
         endpoints.isEmpty()
             ? "No local Codex servers found. Start Codex normally, or add a custom connection."
-            : QString("%1 local server(s) discovered. Projects group existing sessions.")
+            : QString("%1 local server(s) discovered. Folders group existing sessions.")
                   .arg(endpoints.size());
     if (!warnings.isEmpty())
         discoveryMessage += "\n" + warnings.join('\n');
@@ -663,22 +801,27 @@ void Window::activate(const QModelIndex &index) {
         return;
     const auto backend = index.data(BackendRole).toString();
     const auto key = sessionKey(backend, id);
-    Session s = searchingView ? searchSessions.value(key) : sessions.value(key);
+    pendingOpen.clear();
+    if (terminal->focusSession(key)) {
+        auto &s = sessions[key];
+        s.opened = QDateTime::currentSecsSinceEpoch();
+        model->upsert(s);
+        if (searchSessions.contains(key)) {
+            searchSessions[key] = s;
+            results->upsert(s);
+        }
+        if (!s.id.startsWith("new-"))
+            persist([&] { store->save(s); });
+        return;
+    }
     if (!profiles.contains(backend))
         return;
     if (!backends.value(backend) || !backends[backend]->ready()) {
         error("Connect this backend before opening its terminal.");
         return;
     }
-    QString issue;
-    if (!terminal->open(profiles[backend], s, &issue)) {
-        error(issue);
-        return;
-    }
-    s.opened = QDateTime::currentSecsSinceEpoch();
-    sessions[key] = s;
-    model->upsert(s);
-    persist([&] { store->save(s); });
+    pendingOpen = key;
+    backends[backend]->verifySession(id);
 }
 void Window::search() {
     const auto query = searchBox->text().trimmed();
@@ -690,16 +833,17 @@ void Window::search() {
         error("Search text is too long.");
         return;
     }
-    scopeEnvironment.clear();
+    scopeBackend.clear();
     scopePath.clear();
     if (scope->currentIndex() == 1) {
         const auto index = tree->currentIndex();
         if (!index.isValid()) {
-            error("Select a project or one of its sessions first.");
+            error("Select a server, folder or session first.");
             return;
         }
-        scopeEnvironment = index.data(EnvironmentRole).toString();
-        scopePath = index.data(PathRole).toString();
+        scopeBackend = index.data(BackendRole).toString();
+        if (index.data(KindRole).toInt() != int(NodeKind::Server))
+            scopePath = index.data(PathRole).toString();
     }
     ++searchToken;
     searchingView = true;
@@ -712,7 +856,7 @@ void Window::search() {
     tabs->setEnabled(false);
     loadMore->setEnabled(false);
     for (auto it = backends.begin(); it != backends.end(); ++it)
-        if (scopeEnvironment.isEmpty() || scopeEnvironment == model->environment(it.key()))
+        if (scopeBackend.isEmpty() || scopeBackend == it.key())
             searching.insert(it.key());
     const auto ids = searching.values();
     for (const auto &id : ids)
@@ -734,12 +878,18 @@ void Window::clearSearch() {
     updateSummary();
 }
 void Window::updateSearchSummary() {
-    notice->setText(QString("%1 results%2%3")
-                        .arg(searchSessions.size())
-                        .arg(searching.isEmpty()
-                                 ? QString()
-                                 : QString(" — searching %1 connection(s)…").arg(searching.size()))
-                        .arg(searchErrors.isEmpty() ? QString() : "\n" + searchErrors.join('\n')));
+    int visible = 0;
+    for (int i = 0; i < results->rowCount(); ++i)
+        visible += results->item(i)->data(CountRole).toInt();
+    const auto hidden = searchSessions.size() - visible;
+    notice->setText(
+        QString("%1 results%2%3%4")
+            .arg(visible)
+            .arg(hidden ? QString(" (%1 unsaved/unavailable hidden)").arg(hidden) : QString())
+            .arg(searching.isEmpty()
+                     ? QString()
+                     : QString(" — searching %1 connection(s)…").arg(searching.size()))
+            .arg(searchErrors.isEmpty() ? QString() : "\n" + searchErrors.join('\n')));
 }
 bool Window::smokeTest(QString *error) {
     return terminal->smokeTest(error);
@@ -749,13 +899,7 @@ void Window::closeEvent(QCloseEvent *event) {
     settings.setValue("geometry", saveGeometry());
     settings.setValue("splitter", splitter->saveState());
     if (!searchingView) {
-        QStringList expanded;
-        for (int i = 0; i < filter->rowCount(); ++i) {
-            auto idx = filter->index(i, 0);
-            if (tree->isExpanded(idx))
-                expanded << idx.data(KeyRole).toString();
-        }
-        settings.setValue("expanded", expanded);
+        settings.setValue("expanded", expandedKeys(tree));
     }
     for (auto *b : backends)
         b->disconnectServer();

@@ -48,6 +48,7 @@ void CodexBackend::shutdownProcess() {
     buffer.clear();
     reads.clear();
     scheduledReads.clear();
+    dirtyReads.clear();
     reading = 0;
     if (process) {
         auto *p = process;
@@ -121,7 +122,7 @@ void CodexBackend::connectServer() {
                                             {"title", "Archcodex"},
                                             {"version", ARCHCODEX_VERSION}}},
                  {"capabilities", QJsonObject{{"experimentalApi", true}}}},
-                [this](const auto &, const QString &err) {
+                [this](const auto &response, const QString &err) {
                     if (!err.isEmpty()) {
                         wanted = false;
                         failed("Initialization failed: " + err);
@@ -129,6 +130,11 @@ void CodexBackend::connectServer() {
                     }
                     send({{"method", "initialized"}});
                     initialized = true;
+                    QJsonObject identity;
+                    for (const auto &key : {"codexHome", "userAgent"})
+                        if (response[key].isString() && validText(response[key].toString()))
+                            identity[key] = response[key];
+                    emit identityReceived(identity);
                     retry = 0;
                     emit connectionChanged(QStringLiteral("Connected — loading history"), true);
                     loadedPage();
@@ -234,14 +240,16 @@ void CodexBackend::message(const QJsonObject &m) {
             s.status = statuses[id];
             s.known = true;
             emit sessionChanged(s);
+            if (!s.isSaved())
+                readThread(id, true); // Persistence may have materialized with this turn.
         } else
-            readThread(id);
+            readThread(id, true);
     } else if (method == "thread/started") {
         const auto thread = p["thread"].toObject();
         const auto startedId = thread["id"].toString();
         if (thread["status"].isObject())
             statuses[startedId] = thread["status"].toObject();
-        upsert(thread);
+        upsert(thread, true);
     } else if (method == "thread/name/updated" || method == "thread/nameUpdated") {
         names[id] = p["threadName"].toString();
         if (sessions.contains(id)) {
@@ -259,7 +267,7 @@ void CodexBackend::message(const QJsonObject &m) {
         readThread(id);
     }
 }
-void CodexBackend::upsert(QJsonObject t) {
+void CodexBackend::upsert(QJsonObject t, bool verified) {
     const auto id = t["id"].toString();
     if (id.isEmpty() || !validText(id, 128) || removed.contains(id))
         return;
@@ -271,6 +279,7 @@ void CodexBackend::upsert(QJsonObject t) {
     auto s = Session::fromThread(profile.id, t);
     if (!validText(s.cwd))
         return;
+    s.unavailable = !verified && sessions.value(id).unavailable;
     sessions[id] = s;
     emit sessionChanged(s);
 }
@@ -291,8 +300,10 @@ void CodexBackend::listPage(const QString &cursor) {
             emit connectionChanged("History unavailable: " + error, true);
             return;
         }
-        for (const auto &t : r["data"].toArray())
+        for (const auto &t : r["data"].toArray()) {
             upsert(t.toObject());
+            readThread(t.toObject()["id"].toString()); // Finite inventory validation, not polling.
+        }
         nextCursor = r["nextCursor"].toString();
         if (!nextCursor.isEmpty() && nextCursor == cursor)
             nextCursor.clear();
@@ -347,9 +358,14 @@ void CodexBackend::loadedPage(const QString &cursor) {
         }
     });
 }
-void CodexBackend::readThread(const QString &id) {
-    if (id.isEmpty() || !validText(id, 128) || scheduledReads.contains(id))
+void CodexBackend::readThread(const QString &id, bool fromEvent) {
+    if (id.isEmpty() || !validText(id, 128))
         return;
+    if (scheduledReads.contains(id)) {
+        if (fromEvent)
+            dirtyReads.insert(id);
+        return;
+    }
     if (scheduledReads.size() >= 4096) {
         failed("Too many pending metadata events.");
         return;
@@ -367,10 +383,47 @@ void CodexBackend::pumpReads() {
                     --reading;
                     scheduledReads.remove(id);
                     if (error.isEmpty())
-                        upsert(r["thread"].toObject());
+                        upsert(r["thread"].toObject(), true);
+                    else
+                        readFailure(id, error);
+                    if (dirtyReads.remove(id))
+                        readThread(id); // One refresh for an event overlapping an older read.
                     pumpReads();
                 });
     }
+}
+void CodexBackend::readFailure(const QString &id, const QString &error) {
+    // These are the precise protocol errors emitted by the inspected server.
+    // Authentication/transport/other failures are not evidence of a missing session.
+    if (error != "thread not loaded: " + id && error != "thread not found: " + id)
+        return;
+    if (sessions.contains(id)) {
+        auto &s = sessions[id];
+        s.unavailable = true;
+        s.persistenceKnown = true;
+        emit sessionChanged(s);
+    }
+}
+void CodexBackend::verifySession(const QString &id) {
+    if (!initialized) {
+        emit sessionVerified(id, "This server is disconnected.");
+        return;
+    }
+    if (id.isEmpty() || !validText(id, 128)) {
+        emit sessionVerified(id, "Invalid session identifier.");
+        return;
+    }
+    request("thread/read", {{"threadId", id}, {"includeTurns", false}},
+            [this, id](const auto &r, const QString &error) {
+                auto issue = error;
+                if (issue.isEmpty() && r["thread"].toObject()["id"].toString() != id)
+                    issue = "Server returned metadata for a different session.";
+                if (issue.isEmpty())
+                    upsert(r["thread"].toObject(), true);
+                else
+                    readFailure(id, issue);
+                emit sessionVerified(id, issue);
+            });
 }
 void CodexBackend::search(const QString &query, quint64 token) {
     const auto sid = ++searchGeneration;

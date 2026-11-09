@@ -1,15 +1,19 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.2.1** implements the first backend: **existing local Unix-socket
+Version **0.3.0** implements the first backend: **existing local Unix-socket
 app-servers**. Remote TCP, SSH and myCodex are later stages.
 
 Its primary workflow is returning to **existing Codex sessions**. On startup it
 discovers the current user’s host-visible local Codex servers and loads their
-sessions. Projects are working-directory groups; no project creation is needed.
+sessions. Each server has its own root with a compact folder tree underneath; no
+project creation is needed. Server names use configuration and user/host context,
+with process IDs confined to details.
 It provides All, Active, Running and Waiting for input views, conversation search
 and the existing Codex TUI. Active includes live sessions at an idle prompt.
-Exited terminal clients retain their output and offer an explicit restart.
+Exited terminal clients retain their output, remain in Active, and offer an explicit restart.
+**View → Hide unsaved sessions** is enabled by default and remembered; open
+terminal entries remain accessible even when their conversation is unsaved.
 Session and project indicators reflect **server events, without status
 polling**. Multiple local servers can be connected independently.
 
@@ -20,13 +24,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.2.1-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.3.0-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.2.1-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.3.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -37,12 +41,12 @@ used for protocol validation. Archcodex does not install or update Codex.
 
 1. Start Codex normally on the host if it is not already running. Archcodex
    discovers existing local servers automatically; it does not start servers.
-2. Expand a project and press Enter or double-click a session to attach its TUI.
-   Several servers in the same host working directory share a project group.
+2. Expand a server and folder, then press Enter or double-click a session to attach
+   its TUI. Identical directories on different servers remain separate.
 3. **Discover** takes an explicit new snapshot, useful for nonstandard socket
    locations. Normal Codex socket creation is handled through filesystem events.
 4. Search conversation text by entering a query and pressing Enter; choose all
-   projects or the selected project. **Load more history** retrieves older pages.
+   servers or the selected server/folder (including its descendants). **Load more history** retrieves older pages.
 5. **Connections → Manage connections → Add** is an advanced fallback for custom
    endpoints. An empty socket path selects Codex's default. The optional **Session
    → New session in selected project** action is secondary to existing sessions.
@@ -93,7 +97,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, expandable projects and
   sessions, and the four session filters.
-- [Implementation and testing](docs/implementation.md): what 0.2.1 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.3.0 delivers and
   how to exercise it on your host.
 
 ## Project status
@@ -103,7 +107,7 @@ future stages; the implementation document identifies the current boundary.
 
 The documents distinguish agreed requirements from proposed implementation
 details and work that still needs validation. Upstream observations were checked
-on **2026-11-08**; they are not a promise that every Codex version supports the
+on **2026-11-09**; they are not a promise that every Codex version supports the
 same protocol capabilities.
 
 Application code is licensed under **GPL-3.0-or-later**; see [LICENSE](LICENSE).

@@ -2,10 +2,14 @@
 #include "discovery.h"
 #include "fixture.h"
 #include "sessionmodel.h"
+#include "terminal.h"
 #include "window.h"
+#include <QAction>
 #include <QComboBox>
 #include <QHelpEvent>
 #include <QLineEdit>
+#include <QMessageBox>
+#include <QSettings>
 #include <QTabBar>
 #include <QToolTip>
 #include <QTreeView>
@@ -25,8 +29,10 @@ class WindowTests : public QObject {
         auto *tabs = window.findChild<QTabBar *>();
         QCOMPARE(tabs->count(), 4);
         QTRY_COMPARE(tree->model()->rowCount(), 1);
-        auto project = [&] { return tree->model()->index(0, 0); };
-        QTRY_COMPARE(tree->model()->rowCount(project()), 1);
+        auto server = [&] { return tree->model()->index(0, 0); };
+        auto project = [&] { return tree->model()->index(0, 0, server()); };
+        QTRY_VERIFY(project().isValid());
+        QTRY_COMPARE(tree->model()->index(0, 0, project()).data(ThreadRole).toString(), "thread-1");
         tree->expand(project());
         tree->setCurrentIndex(tree->model()->index(0, 0, project()));
         tabs->setCurrentIndex(1);
@@ -63,6 +69,95 @@ class WindowTests : public QObject {
         QCOMPARE(tree->model()->rowCount(), 1);
         window.close();
     }
+    void hideUnsavedSettingAndClientError() {
+        Fixture fixture;
+        fixture.threadFields = {{"path", QJsonValue::Null}, {"ephemeral", true}};
+        QTemporaryDir data;
+        {
+            Window window(data.path(), false);
+            window.show();
+            window.findChild<HostDiscovery *>()->snapshot({QJsonObject{{"path", fixture.path()}}},
+                                                          {});
+            auto *tree = window.findChild<QTreeView *>();
+            auto *tabs = window.findChild<QTabBar *>();
+            auto *setting = window.findChild<QAction *>("hideUnsavedSessions");
+            QVERIFY(setting && setting->isChecked());
+            QTRY_VERIFY(fixture.methods.contains("thread/read"));
+            QTRY_COMPARE(tree->model()->rowCount(), 1);
+            QCOMPARE(tree->model()->index(0, 0).data(CountRole).toInt(), 0);
+            setting->setChecked(false);
+            QTRY_COMPARE(tree->model()->index(0, 0).data(CountRole).toInt(), 1);
+            auto session = Session::fromThread(
+                tree->model()->index(0, 0).data(BackendRole).toString(), fixture.thread());
+            session.terminalOpen = true;
+            session.clientIssue = "Terminal client exited with code 1";
+            window.findChild<TerminalArea *>()->clientStateChanged(session);
+            setting->setChecked(true);
+            tabs->setCurrentIndex(1);
+            QCOMPARE(tree->model()->rowCount(), 1);
+            tabs->setCurrentIndex(2);
+            QCOMPARE(tree->model()->rowCount(), 0);
+            tabs->setCurrentIndex(3);
+            QCOMPARE(tree->model()->rowCount(), 0);
+            session.terminalOpen = false;
+            session.clientIssue.clear();
+            window.findChild<TerminalArea *>()->clientStateChanged(session);
+            tabs->setCurrentIndex(1);
+            QCOMPARE(tree->model()->rowCount(), 0);
+            setting->setChecked(false);
+            window.close();
+        }
+        Window reopened(data.path(), false);
+        QVERIFY(!reopened.findChild<QAction *>("hideUnsavedSessions")->isChecked());
+        reopened.close();
+    }
+    void activationChecksOnlyTheSelectedServer() {
+        Fixture first, second;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        window.show();
+        window.findChild<HostDiscovery *>()->snapshot(
+            {QJsonObject{{"path", first.path()}}, QJsonObject{{"path", second.path()}}}, {});
+        auto *tree = window.findChild<QTreeView *>();
+        QTRY_COMPARE(first.readIds.size(), 1);
+        QTRY_COMPARE(second.readIds.size(), 1);
+        QTRY_COMPARE(tree->model()->rowCount(), 2);
+        Store store(data.path() + "/metadata.sqlite");
+        QString firstId;
+        for (const auto &p : store.backends())
+            if (p.socketPath == first.path())
+                firstId = p.id;
+        QVERIFY(!firstId.isEmpty());
+        QModelIndex server;
+        for (int i = 0; i < tree->model()->rowCount(); ++i)
+            if (tree->model()->index(i, 0).data(BackendRole) == firstId)
+                server = tree->model()->index(i, 0);
+        QVERIFY(server.isValid());
+        auto session = tree->model()->index(0, 0, tree->model()->index(0, 0, server));
+        QCOMPARE(session.data(ThreadRole).toString(), "thread-1");
+        // A rejected preflight must not launch a terminal or fall back to the other server.
+        first.readErrors["thread-1"] = "thread not loaded: thread-1";
+        QSignalSpy terminalStates(window.findChild<TerminalArea *>(),
+                                  &TerminalArea::clientStateChanged);
+        bool sawError = false;
+        for (auto *backend : window.findChildren<Backend *>())
+            connect(backend, &Backend::sessionChanged, &window, [&](const Session &s) {
+                if (!s.unavailable)
+                    return;
+                QTimer::singleShot(0, &window, [&] {
+                    for (auto *box : window.findChildren<QMessageBox *>()) {
+                        sawError = box->text().contains("thread not loaded: thread-1");
+                        box->accept();
+                    }
+                });
+            });
+        tree->activated(session);
+        QTRY_VERIFY(sawError);
+        QCOMPARE(first.readIds.size(), 2);
+        QCOMPARE(second.readIds.size(), 1);
+        QCOMPARE(terminalStates.size(), 0);
+        window.close();
+    }
     void discoveryOpensExistingSessionsWithoutProjectSetup() {
         Fixture first, second;
         first.loaded = {"older-loaded-session"};
@@ -80,9 +175,11 @@ class WindowTests : public QObject {
         };
         const QJsonArray endpoints{endpoint(first), endpoint(second)};
         discovery->snapshot(endpoints, {});
-        QTRY_COMPARE_WITH_TIMEOUT(tree->model()->rowCount(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(tree->model()->rowCount(), 2, 5000);
         auto project = [&] { return tree->model()->index(0, 0); };
-        QTRY_COMPARE_WITH_TIMEOUT(tree->model()->rowCount(project()), 3, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(tree->model()->index(0, 0).data(CountRole).toInt() +
+                                      tree->model()->index(1, 0).data(CountRole).toInt(),
+                                  3, 5000);
         QVERIFY(first.methods.contains("thread/loaded/list"));
         QVERIFY(first.methods.contains("thread/read"));
         QVERIFY(!first.methods.contains("thread/start"));
@@ -92,16 +189,19 @@ class WindowTests : public QObject {
         discovery->snapshot(endpoints, {});
         QTest::qWait(100);
         QCOMPARE(first.methods.size(), requests);
-        QCOMPARE(tree->model()->rowCount(project()), 3);
-        // A selected project searches both local servers sharing its environment.
+        QCOMPARE(tree->model()->rowCount(), 2);
+        // A selected server searches only that server, even on a shared host.
         tree->setCurrentIndex(project());
         window.findChild<QComboBox *>()->setCurrentIndex(1);
         auto *query = window.findChild<QLineEdit *>();
         query->setText("needle");
         QTest::keyClick(query, Qt::Key_Return);
-        QTRY_COMPARE(first.methods.count("thread/search"), 2);
-        QTRY_COMPARE(second.methods.count("thread/search"), 2);
-        QTRY_COMPARE(tree->model()->rowCount(project()), 4);
+        QTRY_COMPARE(first.methods.count("thread/search") + second.methods.count("thread/search"),
+                     2);
+        QVERIFY(first.methods.count("thread/search") == 0 ||
+                second.methods.count("thread/search") == 0);
+        QTRY_COMPARE(tree->model()->rowCount(), 1);
+        QTRY_COMPARE(tree->model()->index(0, 0).data(CountRole).toInt(), 2);
         window.close();
     }
 };

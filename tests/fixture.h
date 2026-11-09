@@ -19,7 +19,12 @@ class Fixture : public QObject {
     QPointer<QWebSocket> peer;
     QStringList methods;
     QStringList loaded;
+    QHash<QString, QString> readErrors;
+    QJsonObject threadFields;
+    QStringList readIds;
     bool delaySnapshot = false;
+    bool delayRead = false;
+    QJsonValue readId = QJsonValue::Undefined;
     bool failLoadedInventory = false;
     QJsonValue snapshotId = QJsonValue::Undefined;
     Fixture() {
@@ -47,7 +52,8 @@ class Fixture : public QObject {
                 const auto method = m["method"].toString();
                 methods << method;
                 if (method == "initialize")
-                    reply(m["id"], {{"userAgent", "fixture"}});
+                    reply(m["id"],
+                          {{"userAgent", "fixture"}, {"codexHome", "/home/test/.codex-work"}});
                 else if (method == "thread/list") {
                     if (delaySnapshot)
                         snapshotId = m["id"];
@@ -65,10 +71,21 @@ class Fixture : public QObject {
                                 .toJson()));
                     else
                         reply(m["id"], {{"data", QJsonArray::fromStringList(loaded)}});
-                } else if (method == "thread/read")
-                    reply(m["id"],
-                          {{"thread", thread(m["params"].toObject()["threadId"].toString())}});
-                else if (method == "thread/search") {
+                } else if (method == "thread/read") {
+                    const auto id = m["params"].toObject()["threadId"].toString();
+                    readIds << id;
+                    if (delayRead)
+                        readId = m["id"];
+                    else if (readErrors.contains(id))
+                        peer->sendTextMessage(QString::fromUtf8(
+                            QJsonDocument(
+                                QJsonObject{{"id", m["id"]},
+                                            {"error", QJsonObject{{"code", -32600},
+                                                                  {"message", readErrors[id]}}}})
+                                .toJson()));
+                    else
+                        reply(m["id"], {{"thread", thread(id)}});
+                } else if (method == "thread/search") {
                     const bool second = m["params"].toObject().contains("cursor");
                     reply(m["id"],
                           {{"data",
@@ -84,11 +101,16 @@ class Fixture : public QObject {
         return directory.path() + "/server.sock";
     }
     QJsonObject thread(const QString &id = "thread-1") const {
-        return {{"id", id},
-                {"name", "Example"},
-                {"cwd", "/work/project"},
-                {"updatedAt", 123},
-                {"status", QJsonObject{{"type", "idle"}}}};
+        QJsonObject result{{"id", id},
+                           {"path", "/saved/" + id + ".jsonl"},
+                           {"ephemeral", false},
+                           {"name", "Example"},
+                           {"cwd", "/work/project"},
+                           {"updatedAt", 123},
+                           {"status", QJsonObject{{"type", "idle"}}}};
+        for (auto it = threadFields.begin(); it != threadFields.end(); ++it)
+            result[it.key()] = it.value();
+        return result;
     }
     void reply(QJsonValue id, const QJsonObject &result) {
         peer->sendTextMessage(

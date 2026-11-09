@@ -1,4 +1,4 @@
-# Implementation: 0.2.1
+# Implementation: 0.3.0
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
@@ -11,8 +11,11 @@ application UI.
   socket selects Codex's host default; explicit socket paths remain supported.
 - Startup discovery of existing host-visible local Codex servers, with inotify
   events for new normal sockets and an explicit Discover action. No status polling.
-- Projects derived from conversation working directories. Servers sharing the host
-  filesystem environment share project groups; no manual project setup is required.
+- Separate roots for every server, with meaningful configuration/user/host names
+  and compact folder paths derived from conversation working directories. PID is
+  confined to details; no manual project setup is required.
+- Persisted **View → Hide unsaved sessions**, enabled by default, with an exception
+  for open terminal views so retained errors remain accessible in Active.
 - An IDE-style left navigator with All, Active, Running and Waiting for input tabs, recent-use ordering,
   expandable sessions, backend labels and accessible status descriptions.
 - Running, waiting (including idle prompts), saved, error and unknown states from protocol events.
@@ -22,8 +25,9 @@ application UI.
   reused by backend/thread ID and retained until closed. One is visible at a time.
 - A new-session action launches the host Codex TUI against the selected backend
   and working directory. No task prompt or approval-policy override is injected.
-- Server-side conversation search on Enter, with all-project or selected-project
-  scope. Every result page is considered before project filtering is complete.
+- Server-side conversation search on Enter, across all servers or within the
+  selected server/folder subtree. Every result page is considered before filtering
+  is complete; the result summary reports entries hidden by the saved-state filter.
 - Persistent backend profiles, legacy display names, list metadata and local recent
   use. Full conversation bodies and authentication tokens are not cached.
 - Automatic reconnect after transport failure with bounded backoff, explicit
@@ -44,7 +48,7 @@ requested. This is deliberately not presented as an exhaustive disk scan.
 | `src/localbackend.cpp` | Local Unix adapter's transport launch arguments. |
 | `src/bridge.cpp` | Beast WebSocket framing over a native socket or host Codex proxy. |
 | `src/store.*`, `src/types.*` | SQLite metadata, validation and state interpretation. |
-| `src/sessionmodel.*` | Project/session tree and shared state filtering. |
+| `src/sessionmodel.*` | Server/folder/session tree and shared state filtering. |
 | `src/terminal.*` | Konsole embedding and structured TUI launch arguments. |
 | `src/window.*` | Native interface, automatic connection reconciliation and connection dialogs. |
 
@@ -127,14 +131,15 @@ connection deletes only its local cache/configuration, not Codex history.
 - Launch-argument tests exercise shell metacharacters and the CLI argument
   separator without executing embedded input.
 - Model tests cover 80 sessions across two backends, Active filtering, waiting
-  and unknown states, shared-host grouping, backend routing, empty-group removal
+  and unknown states, separate server roots, compact folder paths, backend routing, empty-folder removal
   and preservation of legacy display names.
 - Discovery tests cover aliases, updater exclusion, same-user visibility, namespace
   isolation, inotify creation/deletion and an idle loop with no rescan timeout.
 - A real isolated Codex server started after discovery is picked up by an inotify
   event. No model turn or account credentials are involved.
 - Window integration tests discover two fixture servers without project setup,
-  load a session outside the history page, merge their project and search both.
+  load a session outside the history page, preserve separate roots, validate
+  selected-server search/open routing, and persist the unsaved-entry setting.
 - Discovery, core, model and window integration suites pass in the KDE 6.11 SDK. Core tests also pass with address
   and undefined-behavior sanitizers; leak detection was disabled for that run.
 - An isolated real Codex 0.166.0 app-server passes initialize, inventory, search
@@ -196,17 +201,20 @@ independent-server persistence requirement.
 - Active includes loaded idle prompts and errors as well as busy turns. Running
   and Waiting for input require confirmed current state; disconnected last-known
   active rows remain visible only in All/Active with hollow dots.
-- Projects map to exact environment/working-directory paths; discovery establishes
-  which servers share the host environment. Linked-worktree grouping is future work.
+- Folders map to lexical working-directory paths within each server. Shared
+  filesystems do not merge server roots. Linked-worktree grouping is future work.
 - Host discovery requires Python 3 and readable same-user procfs metadata. Custom
   sockets outside watched locations may require Discover; private container sockets
   require future integration or a separately configured exposed endpoint.
 - Terminal views are retained until explicitly closed; they are not evicted in
   the background. A new-session TUI has no thread ID at launch, so reopening its
   subsequently discovered row can create an additional client to the same server
-  conversation. It does not create another execution server.
-- Cached history can contain stale entries until server events or later reads
-  supply new metadata. Archived-history browsing, unread-completion receipts,
+  conversation. Its launcher stays accessible as **New session terminal** until
+  closed, and is never saved as a conversation. It does not create another execution server.
+- Cached history can contain stale entries outside the loaded pages. Finite
+  metadata validation at inventory/load-more and before attachment hides confirmed
+  missing entries; unrelated failures remain explicit errors. Older cache records
+  without persistence fields stay visible pending fresh evidence. Archived-history browsing, unread-completion receipts,
   background desktop notifications and a native conversation view are not yet
   implemented.
 - The measured 80-session check covers model behavior, not a performance claim
@@ -319,3 +327,85 @@ assessment. The following implementation details were selected in that scope:
   their test harnesses. No host settings, credentials or services were changed.
 - Commit the task's source, tests, patch and documentation under the standing
   commit instruction. No push, tag, upstream submission or public release.
+
+
+## 0.3.0 server explorer and saved-state correction
+
+The user requested default-on configurable hiding of unsaved entries, retained
+error terminals in Active only, separate meaningful server roots without PID in
+the visible name, and compact directory chains. This section supersedes the
+older shared-host project grouping described in the historical decisions above.
+
+### What the reported Codex error establishes
+
+Codex 0.166.0's remote resume lookup calls the selected app-server's `thread/read`.
+Its [TUI implementation](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/tui/src/lib.rs)
+(`lookup_session_target_with_app_server`, `no_resume_target_exit`) turns any failed
+lookup into the generic “No saved session found” message. The message alone does
+not establish a missing file or a wrong configuration directory. The user's
+particular underlying server error has not been captured here.
+
+Archcodex launches the configured/discovered executable against that profile's
+socket, not a default daemon chosen from the session cwd:
+
+```text
+<profile executable> --remote unix://<profile socket> resume -- <thread ID>
+```
+
+Only an explicitly blank socket profile uses Codex's default endpoint (`unix://`).
+Discovery prefers the server process's executable when host-executable, otherwise
+`codex` from the host PATH; manually configured executable choices are preserved.
+The shell wrapper is constant and all values remain separate arguments.
+
+The server [thread processor](https://github.com/openai/codex/blob/rust-v0.166.0/codex-rs/app-server/src/request_processors/thread_processor.rs)
+can read persisted or loaded-only threads. Paginated history need not have a
+rollout path. Consequently, filtering uses `ephemeral`, `path`, `historyMode` and
+precise missing-thread errors, not a local file-existence guess. Permission,
+transport and unrelated server errors never establish that a session is unsaved.
+Server configuration identity comes from the `initialize` response's `codexHome`.
+
+### Decisions not agreed in advance
+
+The requested behaviors above were explicitly authorized. The following are the
+implementation choices made to deliver them; all are implemented in this version.
+
+| Choice and reason | Affected files/configuration and consequences |
+| --- | --- |
+| Use `Main`, a shortened custom Codex-home path, or `Codex · launch-directory`, followed by user/host. Preserve manual names; disambiguate duplicate automatic names with a persisted-profile-order numeric suffix. Bound long labels to 150 characters and keep full details. | `src/types.*`, `src/discover.py`, `src/window.cpp`; collects cwd/PID and account/hostname metadata, plus handshake home/user agent, without reading process environments or credentials. Names can refine after connection and duplicate suffixes can change when profiles are added/removed. |
+| Keep persistence knowledge separate from terminal presence and server activity. Recognize legacy rollout paths and paginated storage; leave older metadata without evidence visible pending refresh. | `src/types.*`, `src/sessionmodel.*`, SQLite JSON metadata; additive cache fields require no schema migration. Open unsaved/error views override hiding; terminal presence and messages do not survive GUI restart. |
+| Validate each loaded history page with bounded metadata reads and validate again on explicit open. Preserve missing-state evidence against older inventories; one follow-up read handles a persistence event overlapping an older read. | `src/backend.*`, `src/window.cpp`; four queued metadata reads in flight, existing 4,096 queue bound, plus an explicit-open request. No periodic query, turn start, approval or file scan. Generic server errors are shown without marking data missing. Only the latest pending activation opens a new view. |
+| Retain a synthetic **New session terminal** row until that launcher is closed. Do not infer its eventual thread ID from cwd, timing or text. Focus retained clients even while disconnected. | `src/terminal.*`, `src/window.*`; a discovered conversation may have a separate row/client. Restarting this launcher repeats the existing new-session action. Closing a retained terminal restores the normal visibility/state predicates. |
+| Place the saved toggle in View and save immediately; apply it to explorer and search results. Report hidden search-result counts. | `src/window.cpp`, `window.ini`; defaults on as requested, existing preference survives restart. No settings framework or dependency added. |
+| Use one root per backend, lexical common-prefix paths, compressed nonbranching folders, stable row keys, recursive expansion/selection restoration and existing MRU ordering. Keep empty configured server roots in All; auto-expand newly seen roots. Preserve legacy folder labels. | `src/sessionmodel.*`, `src/window.*`; same paths on different servers no longer merge. A single cwd keeps its basename below the server; sessions at the common root attach directly to the server. Full common/working paths are in details. Folder keys changed, so old flat-project expansion keys cannot all migrate. |
+| Scope local search to the selected server/folder subtree. New-session creation requires selecting a folder or session rather than a server root. | `src/window.cpp`; removes the old shared-project server chooser because the ancestor server now determines routing. Global search still covers all configured servers. |
+| Deliver development version 0.3.0 with updated documentation and regression tests. Reuse the existing KDE SDK root and Konsole lifecycle patch. | `CMakeLists.txt`, `data/`, `scripts/build-flatpak.sh`, `README.md`, `docs/`, `tests/`; no dependency, Flatpak permission or host service changes. Local build/test state is retained in ignored `.build/`, with bundle/source archive/checksums in `dist/`. Temporary edit scripts are removed before handoff. |
+| Commit completed authorized work, as required by the user's standing instruction. | One local Git commit after checks; no push, tag, Flathub submission or public release. Commit ID is reported at handoff; source archive represents that commit. |
+
+### Validation and remaining boundary
+
+Regression coverage includes both persistence formats, hidden ephemeral/missing
+entries, retained error classification and closure, multiple servers sharing
+paths/IDs, compressed folder regrouping under Qt's model consistency tester,
+80-session filtering, unchanged-update stability, metadata/event races, PID-free
+names, selected-server preflight, server-scoped search and setting persistence.
+Real-PTY terminal tests exercise normal exit, failure, crash, missing executable,
+retained output, refocusing and explicit restart.
+
+The package is validated with the KDE SDK tests, native core sanitizers, an X11
+runtime smoke test, and isolated Flatpak import/ref/permission inspection. The
+container still cannot run a full Flatpak sandbox; host KDE testing remains
+necessary for the actual host-command boundary, authenticated Codex turns,
+clipboard and long-running task survival. This change does not prove why the
+specific session in the user's report failed its original lookup.
+
+
+For 0.3.0, all four SDK suites passed (discovery, core, model, window), native
+core/discovery passed, and ASan/UBSan core/discovery passed with leak detection
+disabled. All four real-PTY exit scenarios passed under X11. The packaged runtime
+rendered the two-server synthetic explorer fixture successfully; its SQLite
+fixture and screenshot remain under `.build/explorer-test/`. Optional real Codex
+integration tests were not rerun for this change. Desktop-file validation passed;
+AppStream retains the existing missing-public-homepage warning. Flatpak import
+returned success and deployed ref `app/io.github.emsi.Archcodex/x86_64/stable` in
+`.build/flatpak`; sandboxed cache triggers reported the known namespace restriction.
+Effective permissions match 0.2.1. No normal user installation was modified.

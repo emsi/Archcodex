@@ -41,7 +41,7 @@ class Window : public QMainWindow {
     QSet<QString> searching;
     QStringList searchErrors;
     quint64 searchToken = 0;
-    QString scopeEnvironment, scopePath;
+    QString scopeBackend, scopePath, pendingOpen;
     QString discoveryMessage;
     QSet<QString> paused, ignoredSockets, discoveredPresent;
     QHash<QString, QString> discoveredPaths;
@@ -59,6 +59,11 @@ class Window : public QMainWindow {
     HostDiscovery *discovery;
     QHash<int, QStringList> expanded;
     int previousTab = 0;
+    QStringList topologyExpanded;
+    QString topologySelected;
+    QSet<QString> seenRoots;
+    void refreshNames();
+    void clientStateChanged(const Session &session);
     void attach(const BackendProfile &profile, bool start);
     void connectionsDialog();
     void editConnection(const QString &id = {});

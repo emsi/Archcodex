@@ -72,6 +72,76 @@ class CoreTests : public QObject {
         }
         QVERIFY(!(QFile::permissions(db) & QFile::ReadOther));
     }
+    void humanReadableServerIdentity() {
+        BackendProfile p{"b", "Custom name"};
+        p.identity = {{"user", "alice"},
+                      {"host", "workstation"},
+                      {"pid", 12345},
+                      {"ownerHome", "/home/alice"},
+                      {"codexHome", "/home/alice/.codex"},
+                      {"cwd", "/home/alice/git/project"}};
+        QCOMPARE(serverLabel(p), "Custom name");
+        p.discovered = true;
+        QCOMPARE(serverLabel(p), "Codex · project · alice@workstation");
+        p.identity["default"] = true;
+        QCOMPARE(serverLabel(p), "Main · alice@workstation");
+        p.identity["default"] = false;
+        p.identity["codexHome"] = "/home/alice/.codex-work";
+        QCOMPARE(serverLabel(p), "~/.codex-work · alice@workstation");
+        QVERIFY(!serverLabel(p).contains("12345"));
+        QVERIFY(serverDetails(p).contains("12345"));
+        QCOMPARE(BackendProfile::fromJson(p.json()).identity, p.identity);
+    }
+    void inventoryValidationAndOpenPreflight() {
+        Fixture f;
+        f.readErrors["thread-1"] = "thread not loaded: thread-1";
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy updates(&b, &Backend::sessionChanged);
+        QSignalSpy verified(&b, &Backend::sessionVerified);
+        QSignalSpy identity(&b, &Backend::identityReceived);
+        b.connectServer();
+        QTRY_VERIFY(!updates.isEmpty() && qvariant_cast<Session>(updates.last()[0]).unavailable);
+        QCOMPARE(identity.size(), 1);
+        QCOMPARE(identity[0][0].toJsonObject()["codexHome"].toString(), "/home/test/.codex-work");
+        const auto count = f.methods.size();
+        QTest::qWait(100);
+        QCOMPARE(f.methods.size(), count);
+        f.readErrors.clear();
+        b.verifySession("thread-1");
+        QTRY_COMPARE(verified.size(), 1);
+        QVERIFY(verified.last()[1].toString().isEmpty());
+        QVERIFY(qvariant_cast<Session>(updates.last()[0]).isSaved());
+        f.readErrors["thread-1"] = "Permission denied";
+        b.verifySession("thread-1");
+        QTRY_COMPARE(verified.size(), 2);
+        QCOMPARE(verified.last()[1].toString(), "Permission denied");
+        QVERIFY(!qvariant_cast<Session>(updates.last()[0]).unavailable);
+        b.disconnectServer();
+    }
+    void persistenceEventDuringReadIsNotLost() {
+        Fixture f;
+        f.delayRead = true;
+        f.threadFields = {{"path", QJsonValue::Null}, {"ephemeral", false}};
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        Session latest;
+        connect(&b, &Backend::sessionChanged, this, [&](const Session &s) { latest = s; });
+        b.connectServer();
+        QTRY_VERIFY(!f.readId.isUndefined());
+        auto oldMetadata = f.thread();
+        f.notify("thread/status/changed",
+                 {{"threadId", "thread-1"},
+                  {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        QTRY_VERIFY(latest.isRunning());
+        f.delayRead = false;
+        f.threadFields = {};
+        f.reply(f.readId, {{"thread", oldMetadata}});
+        QTRY_VERIFY(latest.isSaved());
+        QCOMPARE(f.readIds.size(), 2);
+        const auto count = f.methods.size();
+        QTest::qWait(100);
+        QCOMPARE(f.methods.size(), count);
+        b.disconnectServer();
+    }
     void pushedEventsAndNoPolling() {
         Fixture f;
         LocalBackend b(f.profile(), BRIDGE_PATH);

@@ -14,6 +14,7 @@ struct BackendProfile {
     bool autoConnect = true;
     QString environmentId; // Shared only when discovery establishes a common host namespace.
     bool discovered = false;
+    QJsonObject identity; // Non-secret server/discovery metadata; never configuration contents.
     QString validate() const;
     QString endpoint() const {
         return QStringLiteral("unix://") + socketPath;
@@ -32,12 +33,20 @@ struct Session {
     QString cwd;
     QString title;
     QJsonObject status;
+    QString rolloutPath;
+    QString historyMode;
+    bool ephemeral = false;
+    bool persistenceKnown = false;
+    bool unavailable = false;
+    bool terminalOpen = false; // UI lifetime; deliberately not persisted.
+    QString clientIssue;
     qint64 recency = 0;
     qint64 opened = 0;
     bool known = false;
     bool isActive() const;
     bool isRunning() const;
     bool isWaiting() const;
+    bool isSaved() const;
     QString stateText() const;
     int attention() const;
     static Session fromThread(const QString &backend, const QJsonObject &thread);
@@ -47,4 +56,8 @@ QString sessionKey(const QString &backend, const QString &thread);
 QString projectKey(const QString &backend, const QString &path);
 bool validText(const QString &text, int maxLength = 4096);
 QStringList terminalArguments(const BackendProfile &profile, const QString &threadId);
+QString serverLabel(const BackendProfile &profile);
+QString serverDetails(const BackendProfile &profile);
 } // namespace Archcodex
+
+Q_DECLARE_METATYPE(Archcodex::Session)
