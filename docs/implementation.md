@@ -1,4 +1,4 @@
-# Implementation: 0.3.0
+# Implementation: 0.3.1
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE
@@ -16,7 +16,7 @@ application UI.
   confined to details; no manual project setup is required.
 - Persisted **View → Hide unsaved sessions**, enabled by default, with an exception
   for open terminal views so retained errors remain accessible in Active.
-- An IDE-style left navigator with All, Active, Running and Waiting for input tabs, recent-use ordering,
+- An IDE-style left navigator with All, Active, Running and Waiting tabs, recent-use ordering,
   expandable sessions, backend labels and accessible status descriptions.
 - Running, waiting (including idle prompts), saved, error and unknown states from protocol events.
   Initial/reconnect inventory queries are finite. There is no recurring status
@@ -177,7 +177,7 @@ none is invented for this unpublished initial package.
    selection, clipboard operations, scrolling and resizing.
 4. Start work in the TUI. Verify the session/project indicators and Active tab
    change when the server reports running, waiting and idle states. An idle prompt
-   remains in Active and Waiting for input, but not Running.
+   remains in Active and Waiting, but not Running.
 5. Search for text from an older conversation, including a project-specific
    search with matches beyond the first result page.
 6. Close a terminal during a disposable test task, then reconnect to the same
@@ -199,7 +199,7 @@ independent-server persistence requirement.
   reported explicitly; there is no silent title-only fallback or local FTS index.
   Search is capped at 10,000 results per backend with an explicit narrowing notice.
 - Active includes loaded idle prompts and errors as well as busy turns. Running
-  and Waiting for input require confirmed current state; disconnected last-known
+  and Waiting require confirmed current state; disconnected last-known
   active rows remain visible only in All/Active with hollow dots.
 - Folders map to lexical working-directory paths within each server. Shared
   filesystems do not merge server roots. Linked-worktree grouping is future work.
@@ -409,3 +409,62 @@ AppStream retains the existing missing-public-homepage warning. Flatpak import
 returned success and deployed ref `app/io.github.emsi.Archcodex/x86_64/stable` in
 `.build/flatpak`; sandboxed cache triggers reported the known namespace restriction.
 Effective permissions match 0.2.1. No normal user installation was modified.
+
+
+## 0.3.1 filtered paths, expansion and indicators
+
+The user requested compression within each filtered view, the shorter **Waiting**
+tab name, default expansion in Running/Waiting, and green waiting indicators.
+Previously the model compressed all sessions and a proxy hid nonmatching leaves;
+historical sessions could therefore keep long ancestor chains in filtered views.
+Filtering now precedes folder grouping, common-root calculation and aggregation.
+All metadata remains in the model's record store; switching tabs changes only its
+visible tree. Pushed membership changes recompute that server's tree, while
+unchanged membership/title updates retain the existing structure. No protocol,
+discovery, session lifetime or polling behavior changes.
+
+### Decisions not agreed in advance
+
+The requested UI changes were explicitly authorized. The following choices support
+them; no additional feature area is introduced:
+
+- `src/sessionmodel.*`: keep the view predicate in the tree model, with the proxy
+  handling sorting and empty-server visibility. Folder counts and parent colors
+  now describe matching sessions only, so hidden waiting history cannot color a
+  Running root green. Stable server/path/session keys preserve routing and restore
+  navigation as paths compress differently. Search still uses its own All view.
+- `src/window.*`: interpret default expansion as expanding every Running/Waiting
+  branch, including newly arriving ones, while honoring explicit manual collapses
+  per view for the current GUI run. These overrides are not a new persistent
+  setting. All/Active retain their existing expansion behavior. Preserve the
+  browsing selection and expansion when returning from search as well.
+- `src/types.cpp`, `src/sessionmodel.cpp`: use green `#27ae60` for every confirmed
+  waiting state, including idle prompts and approvals, and propagate it to visible
+  ancestors. Keep existing blue/red/neutral/hollow indicators for running, error,
+  history and unknown states. Status text still distinguishes approval from a
+  normal prompt; the existing waiting/error/running aggregate priority is retained.
+- `tests/test_model.cpp`, `tests/test_window.cpp`: add regressions for historical
+  ancestor chains, per-view common roots/counts/colors, event-driven regrouping,
+  stable unchanged rows, default expansion, manual collapse and search return.
+  Adjust the tooltip test to keep its row present while status changes.
+- `CMakeLists.txt`, `data/`, `scripts/build-flatpak.sh`, `README.md`, `docs/`: deliver
+  patch version 0.3.1 and document the revised interaction. Reuse the existing KDE
+  SDK/runtime and Konsole component, with no dependency or permission changes.
+  Build/test artifacts remain in ignored `.build/`; the local bundle, matching
+  source archive and checksums are placed in `dist/`. Commit the authorized change
+  under the user's standing instruction; no push, tag or public release.
+
+Validation includes model/window regressions in the KDE SDK and X11 visual checks
+with synthetic session data. The existing container namespace restriction still
+prevents running a full Flatpak sandbox here; actual KDE host launch remains the
+final acceptance boundary. No account credentials or live model turns are used.
+
+
+For 0.3.1, discovery/core/model/window suites all passed in the KDE SDK. The
+activity-view integration test also passed under X11 and produced inspected
+Running/Waiting screenshots in `.build/filter-view-test/`. The packaged KDE
+Platform application loaded its Konsole component and real PTY in the X11 smoke
+test and reported version 0.3.1. Its bundle imported successfully into the isolated
+`.build/flatpak` installation; cache triggers still reported the known sandbox
+namespace restriction. Flatpak metadata/permissions match 0.3.0 exactly. No normal
+user installation, host service, credential or remote repository was modified.

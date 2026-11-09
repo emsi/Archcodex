@@ -11,7 +11,7 @@ Start with a familiar IDE arrangement: a narrow project navigator on the left
 and a large terminal workspace on the right. Use ordinary native widgets and a
 resizable divider. Keep the first version simple.
 
-The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, then **Waiting for input**. These tabs are views of the same
+The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, then **Waiting**. These tabs are views of the same
 project/session data. Each view uses a predicate over the same session model.
 
 Servers are the top-level rows. Each expands into folders and sessions, ordered
@@ -20,14 +20,17 @@ adapters will supply the host/container context for their roots; those adapters
 are not implemented in this version.
 
 The directory prefix common to visible sessions on a server is omitted and shown
-in that server's details. Folder chains without sessions or branching are
+in that server's details. This is calculated after applying the current view and
+unsaved-entry filter, so hidden history cannot leave extra folder levels in Active,
+Running or Waiting. Counts and aggregate indicators also describe only the visible
+sessions. Folder chains without sessions or branching are
 collapsed into one label; folders containing sessions stay explicit. With one
 working directory, its basename remains as a folder under the server. For example,
 with common root `/home/alice`:
 
 ```text
 Projects                             Terminal workspace
-[All] [Active] [Running] [Waiting for input]
+[All] [Active] [Running] [Waiting]
 Search conversations…
 Scope: All servers
 v Main · alice@workstation
@@ -61,19 +64,20 @@ selected filter when cleared.
 | All | Saved history and visible live sessions, including disconnected cached rows and open terminals. |
 | Active | Loaded sessions and open terminal views, including retained client errors and other runtime states. |
 | Running | Confirmed active turn with no waiting flags. |
-| Waiting for input | Confirmed idle prompt or active turn waiting for input/approval. |
+| Waiting | Confirmed idle prompt or active turn waiting for input/approval. |
 
 Active includes server runtime presence and terminal views that the user has
 opened. A retained exited/error client belongs to Active alone, even when the
 server still advertises its thread as idle or running. A normal idle session is ready for a new prompt.
-An approval is explicitly labelled as such. Ordinary idle prompts use a quiet
-neutral dot; explicit questions and approvals use amber, so waiting prompts do
-not make every live project look urgent. A loaded server error stays in
+An approval is explicitly labelled as such in its status details. All confirmed
+waiting states use green dots, including ordinary idle prompts, questions and
+approvals. Running stays blue; errors stay red; saved history is neutral and
+unknown/disconnected state has a hollow dot. A loaded server error stays in
 Active without being misclassified as running or waiting. Unrecognized activity
 flags also stay in Active and have an explicit other-activity label.
 
 On disconnect, retain last-known Active membership with a hollow unknown dot.
-Unknown rows never appear in Running or Waiting for input. At reconnect, the
+Unknown rows never appear in Running or Waiting. At reconnect, the
 complete loaded inventory reconciles cached rows outside the history page too;
 partial/failed inventories do not falsely mark them unloaded. Pushed status and
 closed events take priority over older snapshots. `thread/closed` moves a row to
@@ -83,9 +87,12 @@ Loaded does not prove that another terminal is attached: the server may retain
 an unsubscribed idle thread for its unload grace period. This is the observable
 runtime boundary, rather than a guess based on terminal output or process lists.
 
-Each view remembers expanded groups. The first visit inherits the current
-expansion state, and a selected matching session stays selected. Switching views
-does not activate a terminal. The initial sidebar is wider to accommodate the
+All and Active remember expanded groups; the first visit inherits the current
+expansion state. Running and Waiting expand every branch by default, including
+new branches arriving through events. Explicitly collapsed branches are remembered
+separately for those two views during the current GUI run and are not reopened by
+updates or tab changes. Matching sessions retain selection through recompression
+and search return. Switching views does not activate a terminal. The initial sidebar is wider to accommodate the
 four labels; existing saved window geometry remains respected.
 
 Rows update only when their values change, with changed roles sent together.
@@ -204,7 +211,7 @@ concepts. A disconnected backend keeps its saved projects visible in All.
 
 ## 7. First UI validation checklist
 
-- The left pane offers All, Active, Running and Waiting for input; all preserve project/session
+- The left pane offers All, Active, Running and Waiting; all preserve project/session
   hierarchy and distinguish same-named projects on different backends.
 - Existing sessions appear without project setup. Separate server roots preserve
   routing even for identical working directories and thread IDs.

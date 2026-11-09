@@ -26,6 +26,7 @@ enum ModelRole {
     WaitingCountRole,
     UnknownCountRole
 };
+enum class SessionView { All, Active, Running, Waiting };
 enum class NodeKind { Server, Folder, Session };
 class SessionModel : public QStandardItemModel {
     Q_OBJECT
@@ -41,12 +42,17 @@ class SessionModel : public QStandardItemModel {
     void removeBackend(const QString &backend);
     void resetResults();
     void setHideUnsaved(bool hide);
+    void setView(SessionView view);
+    SessionView currentView() const {
+        return view;
+    }
   signals:
     void topologyAboutToChange();
     void topologyChanged();
 
   private:
     bool hideUnsaved = true;
+    SessionView view = SessionView::All;
     QHash<QString, QString> backendNames, details, environments, projectNames;
     QHash<QString, QStandardItem *> roots, folders, threads;
     QHash<QString, Session> records;
@@ -58,15 +64,12 @@ class SessionModel : public QStandardItemModel {
 };
 class SessionFilter : public QSortFilterProxyModel {
   public:
-    enum class View { All, Active, Running, Waiting };
+    using View = SessionView;
     explicit SessionFilter(QObject *parent = nullptr);
     void setView(View view);
 
   protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override;
     bool lessThan(const QModelIndex &left, const QModelIndex &right) const override;
-
-  private:
-    View view = View::All;
 };
 } // namespace Archcodex

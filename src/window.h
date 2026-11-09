@@ -58,6 +58,9 @@ class Window : public QMainWindow {
     TerminalArea *terminal;
     HostDiscovery *discovery;
     QHash<int, QStringList> expanded;
+    QHash<int, QSet<QString>> collapsed;
+    QString searchSelection;
+    void expandActivityViews();
     int previousTab = 0;
     QStringList topologyExpanded;
     QString topologySelected;

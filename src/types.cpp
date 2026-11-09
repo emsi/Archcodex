@@ -78,7 +78,7 @@ int Session::attention() const {
         return 3;
     if (!known)
         return 0;
-    if (isWaiting() && status["type"] == "active")
+    if (isWaiting())
         return 4;
     if (isRunning())
         return 2;

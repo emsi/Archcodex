@@ -50,6 +50,7 @@ class WindowTests : public QObject {
         QTRY_COMPARE(tree->model()->rowCount(), 0);
         tabs->setCurrentIndex(2);
         QCOMPARE(tree->model()->rowCount(), 1);
+        tabs->setCurrentIndex(1);
         // Tooltips keep a stable snapshot while events arrive under the pointer.
         const auto pos = tree->visualRect(project()).center();
         QHelpEvent help(QEvent::ToolTip, pos, tree->viewport()->mapToGlobal(pos));
@@ -67,6 +68,88 @@ class WindowTests : public QObject {
         QTRY_COMPARE(tree->model()->rowCount(), 0);
         tabs->setCurrentIndex(0);
         QCOMPARE(tree->model()->rowCount(), 1);
+        window.close();
+    }
+    void activityViewsExpandWithoutOverridingManualCollapse() {
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            store.save(BackendProfile{"b", "Main"});
+        }
+        Window window(data.path(), false);
+        window.show();
+        auto *backend = window.findChild<Backend *>();
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        QVERIFY(backend);
+        QCOMPARE(tabs->tabText(3), "Waiting");
+        auto put = [&](const QString &id, const QString &cwd, const QString &type) {
+            auto s = Session::fromThread(
+                "b", {{"id", id},
+                      {"cwd", cwd},
+                      {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+            s.title = id + " session";
+            backend->sessionChanged(s);
+            return s;
+        };
+        put("old-home", "/home", "notLoaded");
+        put("old-user", "/home/emsi", "notLoaded");
+        put("old-documents", "/home/emsi/Documents", "notLoaded");
+        auto waiting = put("waiting", "/home/emsi/Documents/Chats", "idle");
+        put("running", "/srv/work/build", "active");
+        auto root = [&] { return tree->model()->index(0, 0); };
+        auto folder = [&] { return tree->model()->index(0, 0, root()); };
+        for (const auto tab : {2, 3}) {
+            tabs->setCurrentIndex(tab);
+            QVERIFY(tree->isExpanded(root()));
+            QVERIFY(tree->isExpanded(folder()));
+            QCOMPARE(folder().data(Qt::DisplayRole).toString(), tab == 2 ? "build" : "Chats");
+            const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+            if (!screenshots.isEmpty()) {
+                QApplication::processEvents();
+                QVERIFY(
+                    window.grab().save(screenshots + (tab == 2 ? "/running.png" : "/waiting.png")));
+            }
+        }
+        tree->collapse(folder());
+        QVERIFY(!tree->isExpanded(folder()));
+        tabs->setCurrentIndex(0);
+        tabs->setCurrentIndex(3);
+        QVERIFY(!tree->isExpanded(folder()));
+        waiting.title = "Updated title";
+        backend->sessionChanged(waiting);
+        QVERIFY(!tree->isExpanded(folder()));
+        auto fresh = put("fresh", "/home/emsi/Documents/other/nested", "idle");
+        bool sawNewBranch = false;
+        for (int i = 0; i < tree->model()->rowCount(root()); ++i) {
+            auto branch = tree->model()->index(i, 0, root());
+            if (branch.data(PathRole) == fresh.cwd) {
+                QVERIFY(tree->isExpanded(branch));
+                sawNewBranch = true;
+            } else if (branch.data(PathRole) == waiting.cwd)
+                QVERIFY(!tree->isExpanded(branch));
+        }
+        QVERIFY(sawNewBranch);
+        // Leaving and rejoining Waiting must keep the explicit collapse for its stable path.
+        fresh.status = {{"type", "notLoaded"}};
+        backend->sessionChanged(fresh);
+        QCOMPARE(folder().data(PathRole).toString(), waiting.cwd);
+        QVERIFY(!tree->isExpanded(folder()));
+        tree->expand(folder());
+        tree->setCurrentIndex(tree->model()->index(0, 0, folder()));
+        tabs->setCurrentIndex(1);
+        QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "waiting");
+        tabs->setCurrentIndex(3);
+        QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "waiting");
+        QVERIFY(tree->isExpanded(folder()));
+        // Search may show history but must restore the filtered tree and its defaults.
+        auto *query = window.findChild<QLineEdit *>();
+        query->setText("needle");
+        QTest::keyClick(query, Qt::Key_Return);
+        query->clear();
+        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
+        QVERIFY(tree->isExpanded(root()) && tree->isExpanded(folder()));
+        QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "waiting");
         window.close();
     }
     void hideUnsavedSettingAndClientError() {

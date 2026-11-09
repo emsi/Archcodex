@@ -22,6 +22,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QSettings>
+#include <QSignalBlocker>
 #include <QSplitter>
 #include <QStatusBar>
 #include <QTabBar>
@@ -87,6 +88,9 @@ void restoreTree(QTreeView *tree, const QStringList &keys, const QString &select
         }
     });
 }
+bool expandsByDefault(int index) {
+    return index == int(SessionView::Running) || index == int(SessionView::Waiting);
+}
 const QStringList viewDescriptions{
     "All sessions, including saved history. Hollow dots mean unknown state.",
     "Live sessions, including idle prompts and errors. Hollow dots mean last-known active.",
@@ -128,7 +132,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tabs->addTab("All");
     tabs->addTab("Active");
     tabs->addTab("Running");
-    tabs->addTab("Waiting for input");
+    tabs->addTab("Waiting");
     for (int i = 0; i < tabs->count(); ++i)
         tabs->setTabToolTip(i, viewDescriptions[i]);
     tabs->setExpanding(false);
@@ -161,15 +165,25 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     left->addWidget(tree, 1);
     connect(tree, &QTreeView::activated, this, &Window::activate);
     connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
+        const QSignalBlocker block(tree);
         const auto saved = expandedKeys(tree);
         expanded[previousTab] = saved;
         const auto selectedKey = tree->currentIndex().data(KeyRole).toString();
         filter->setView(static_cast<SessionFilter::View>(index));
         tree->collapseAll();
         restoreTree(tree, expanded.value(index, saved), selectedKey);
+        expandActivityViews();
         previousTab = index;
         if (!searchingView)
             updateSummary();
+    });
+    connect(tree, &QTreeView::collapsed, this, [this](const QModelIndex &index) {
+        if (!searchingView && expandsByDefault(tabs->currentIndex()))
+            collapsed[tabs->currentIndex()].insert(index.data(KeyRole).toString());
+    });
+    connect(tree, &QTreeView::expanded, this, [this](const QModelIndex &index) {
+        if (!searchingView && expandsByDefault(tabs->currentIndex()))
+            collapsed[tabs->currentIndex()].remove(index.data(KeyRole).toString());
     });
     for (auto *source : {model, results}) {
         connect(source, &SessionModel::topologyAboutToChange, this, [this, source] {
@@ -181,6 +195,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         connect(source, &SessionModel::topologyChanged, this, [this, source] {
             if (filter->sourceModel() != source)
                 return;
+            const QSignalBlocker block(tree);
             restoreTree(tree, topologyExpanded, topologySelected);
             for (int i = 0; i < filter->rowCount(); ++i) {
                 const auto root = filter->index(i, 0);
@@ -190,6 +205,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                     seenRoots.insert(key);
                 }
             }
+            expandActivityViews();
         });
     }
     loadMore = new QPushButton("Load more history");
@@ -481,6 +497,16 @@ void Window::attach(const BackendProfile &p, bool start) {
         QTimer::singleShot(0, b, &Backend::connectServer);
     else
         connectionStates[p.id] = "Disconnected";
+}
+void Window::expandActivityViews() {
+    if (searchingView || !expandsByDefault(tabs->currentIndex()))
+        return;
+    const QSignalBlocker block(tree);
+    const auto &closed = collapsed[tabs->currentIndex()];
+    walkTree(filter, {}, [&](const QModelIndex &index) {
+        if (filter->rowCount(index))
+            tree->setExpanded(index, !closed.contains(index.data(KeyRole).toString()));
+    });
 }
 void Window::refreshNames() {
     // Distinguish otherwise identical automatic labels with stable profile order,
@@ -845,6 +871,10 @@ void Window::search() {
         if (index.data(KindRole).toInt() != int(NodeKind::Server))
             scopePath = index.data(PathRole).toString();
     }
+    if (!searchingView) {
+        expanded[tabs->currentIndex()] = expandedKeys(tree);
+        searchSelection = tree->currentIndex().data(KeyRole).toString();
+    }
     ++searchToken;
     searchingView = true;
     searchSessions.clear();
@@ -864,6 +894,8 @@ void Window::search() {
     updateSearchSummary();
 }
 void Window::clearSearch() {
+    const bool wasSearching = searchingView;
+    const QSignalBlocker block(tree);
     ++searchToken;
     for (auto *b : backends)
         b->search({}, searchToken);
@@ -873,6 +905,10 @@ void Window::clearSearch() {
     results->resetResults();
     filter->setSourceModel(model);
     filter->setView(static_cast<SessionFilter::View>(tabs->currentIndex()));
+    if (wasSearching) {
+        restoreTree(tree, expanded.value(tabs->currentIndex()), searchSelection);
+        expandActivityViews();
+    }
     tabs->setEnabled(true);
     loadMore->setEnabled(std::any_of(more.begin(), more.end(), [](bool x) { return x; }));
     updateSummary();

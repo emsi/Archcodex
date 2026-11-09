@@ -184,6 +184,107 @@ class ModelTests : public QObject {
         QCOMPARE(model.rowCount(), 1);
         QCOMPARE(model.item(0)->text(), "Work");
     }
+    void compressionAndAggregatesFollowEachView() {
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        QAbstractItemModelTester modelTester(
+            &model, QAbstractItemModelTester::FailureReportingMode::QtTest);
+        QAbstractItemModelTester proxyTester(
+            &filter, QAbstractItemModelTester::FailureReportingMode::QtTest);
+        auto put = [&](const QString &id, const QString &cwd, const QString &state) {
+            auto s = Session::fromThread(
+                "b", {{"id", id},
+                      {"cwd", cwd},
+                      {"status", QJsonObject{{"type", state}, {"activeFlags", QJsonArray{}}}}});
+            model.upsert(s);
+            return s;
+        };
+        for (const auto &path : {"/home", "/home/emsi", "/home/emsi/Documents", "/var/history"})
+            put(path, path, "notLoaded");
+        auto waiting = put("waiting", "/home/emsi/Documents/Chats", "idle");
+        auto running = put("running", "/home/emsi/Documents/Chats/work/build", "active");
+        auto root = [&] { return filter.index(0, 0); };
+        auto folder = [&] { return filter.index(0, 0, root()); };
+        QCOMPARE(root().data(PathRole).toString(), "/");
+        QCOMPARE(root().data(CountRole).toInt(), 6);
+        filter.setView(SessionFilter::View::Active);
+        QCOMPARE(root().data(PathRole).toString(), waiting.cwd);
+        QCOMPARE(root().data(CountRole).toInt(), 2);
+        bool foundCompact = false;
+        for (int i = 0; i < filter.rowCount(root()); ++i) {
+            const auto row = filter.index(i, 0, root());
+            if (row.data(KindRole).toInt() == int(NodeKind::Folder)) {
+                QCOMPARE(row.data(Qt::DisplayRole).toString(), "work/build");
+                foundCompact = true;
+            }
+        }
+        QVERIFY(foundCompact);
+        filter.setView(SessionFilter::View::Running);
+        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "build");
+        QCOMPARE(root().data(PathRole).toString(), "/home/emsi/Documents/Chats/work");
+        QCOMPARE(root().data(CountRole).toInt(), 1);
+        QCOMPARE(root().data(WaitingCountRole).toInt(), 0);
+        QCOMPARE(root().data(AttentionRole), running.attention());
+        QCOMPARE(filter.index(0, 0, folder()).data(ThreadRole).toString(), "running");
+        filter.setView(SessionFilter::View::Waiting);
+        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
+        QCOMPARE(root().data(PathRole).toString(), "/home/emsi/Documents");
+        QCOMPARE(root().data(CountRole).toInt(), 1);
+        QCOMPARE(root().data(RunningCountRole).toInt(), 0);
+        QCOMPARE(root().data(AttentionRole), waiting.attention());
+        const auto leaf = QPersistentModelIndex(filter.index(0, 0, folder()));
+        QSignalSpy topology(&model, &SessionModel::topologyChanged);
+        for (int i = 0; i < 80; ++i)
+            model.upsert(waiting);
+        QCOMPARE(topology.size(), 0);
+        QVERIFY(leaf.isValid());
+        // A pushed status change adds/removes a branch and recomputes the common root.
+        running.status = {{"type", "idle"}};
+        running.cwd = "/srv/work";
+        model.upsert(running);
+        QCOMPARE(root().data(PathRole).toString(), "/");
+        QCOMPARE(root().data(CountRole).toInt(), 2);
+        QSet<QString> labels;
+        for (int i = 0; i < filter.rowCount(root()); ++i)
+            labels.insert(filter.index(i, 0, root()).data(Qt::DisplayRole).toString());
+        QCOMPARE(labels, (QSet<QString>{"home/emsi/Documents/Chats", "srv/work"}));
+        running.status = {{"type", "active"}};
+        model.upsert(running);
+        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
+        QCOMPARE(root().data(CountRole).toInt(), 1);
+        filter.setView(SessionFilter::View::All);
+        QCOMPARE(root().data(CountRole).toInt(), 6); // Hidden history was never discarded.
+        QCOMPARE(root().data(PathRole).toString(), "/");
+    }
+    void waitingIconsAreGreenAndHistoryRemainsNeutral() {
+        SessionModel model;
+        auto s = Session::fromThread(
+            "b", {{"id", "t"}, {"cwd", "/work"}, {"status", QJsonObject{{"type", "idle"}}}});
+        const auto color = [](const QStandardItem *item) {
+            return item->icon().pixmap(16, 16).toImage().pixelColor(8, 8);
+        };
+        model.upsert(s);
+        const auto idle = color(model.item(0)->child(0)->child(0));
+        QVERIFY(idle.green() > idle.red() && idle.green() > idle.blue());
+        QCOMPARE(color(model.item(0)), idle);
+        s.status = {{"type", "active"}, {"activeFlags", QJsonArray{"waitingOnApproval"}}};
+        model.upsert(s);
+        QCOMPARE(color(model.item(0)), idle);
+        s.status = {{"type", "active"}, {"activeFlags", QJsonArray{"waitingOnUserInput"}}};
+        model.upsert(s);
+        QCOMPARE(color(model.item(0)), idle);
+        s.status = {{"type", "active"}};
+        model.upsert(s);
+        const auto running = color(model.item(0));
+        QVERIFY(running.blue() > running.green() && running.blue() > running.red());
+        s.status = {{"type", "notLoaded"}};
+        model.upsert(s);
+        QVERIFY(color(model.item(0)) != idle);
+        s.known = false;
+        model.upsert(s);
+        QCOMPARE(color(model.item(0)).alpha(), 0);
+    }
     void savedVisibilityAndRetainedErrors() {
         SessionModel model;
         SessionFilter filter;

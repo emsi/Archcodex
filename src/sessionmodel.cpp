@@ -14,7 +14,7 @@ static QIcon dot(int attention) {
     p.fill(Qt::transparent);
     QPainter paint(&p);
     paint.setRenderHint(QPainter::Antialiasing);
-    const QColor color = attention == 4   ? QColor("#bd7519")
+    const QColor color = attention == 4   ? QColor("#27ae60")
                          : attention == 3 ? QColor("#c64b4b")
                          : attention == 2 ? QColor("#3986cc")
                                           : QApplication::palette().color(QPalette::Mid);
@@ -45,8 +45,28 @@ void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
         setItemData(item->index(), values);
 }
 bool SessionModel::visible(const Session &s) const {
-    return s.terminalOpen || !hideUnsaved ||
-           (!s.unavailable && (!s.persistenceKnown || s.isSaved()));
+    if (!s.terminalOpen && hideUnsaved && (s.unavailable || (s.persistenceKnown && !s.isSaved())))
+        return false;
+    switch (view) {
+    case SessionView::Active:
+        return s.isActive();
+    case SessionView::Running:
+        return s.isRunning();
+    case SessionView::Waiting:
+        return s.isWaiting();
+    case SessionView::All:
+        return true;
+    }
+    return false;
+}
+void SessionModel::setView(SessionView value) {
+    if (view == value)
+        return;
+    view = value;
+    // Build paths and aggregates from the selected sessions, not the full history.
+    // Records remain intact so switching views never discards metadata or clients.
+    for (const auto &backend : backendNames.keys())
+        rebuild(backend);
 }
 void SessionModel::setHideUnsaved(bool hide) {
     if (hideUnsaved == hide)
@@ -150,7 +170,7 @@ void SessionModel::aggregate(QStandardItem *p) {
     updateItem(p, values);
 }
 void SessionModel::rebuild(const QString &backend) {
-    // Only topology changes come here. Status/title updates retain every index.
+    // Membership/path changes come here. Other status/title updates retain every index.
     emit topologyAboutToChange();
     auto *root = roots.value(backend);
     if (!root) {
@@ -319,18 +339,16 @@ SessionFilter::SessionFilter(QObject *parent) : QSortFilterProxyModel(parent) {
     sort(0, Qt::DescendingOrder);
 }
 void SessionFilter::setView(View value) {
-    if (view == value)
-        return;
-    view = value;
+    if (auto *model = qobject_cast<SessionModel *>(sourceModel()))
+        model->setView(value);
     invalidate();
 }
 bool SessionFilter::filterAcceptsRow(int row, const QModelIndex &parent) const {
-    if (view == View::All)
-        return true;
-    const auto role = view == View::Active    ? ActiveRole
-                      : view == View::Running ? RunningRole
-                                              : WaitingRole;
-    return sourceModel()->index(row, 0, parent).data(role).toBool();
+    const auto *model = qobject_cast<const SessionModel *>(sourceModel());
+    // SessionModel filters before grouping. The proxy only sorts and hides empty
+    // configured server roots outside All; it never leaves historical branches.
+    return !model || model->currentView() == View::All ||
+           sourceModel()->index(row, 0, parent).data(CountRole).toInt() > 0;
 }
 bool SessionFilter::lessThan(const QModelIndex &a, const QModelIndex &b) const {
     const auto x = a.data(RecencyRole).toLongLong(), y = b.data(RecencyRole).toLongLong();
