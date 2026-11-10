@@ -3,7 +3,7 @@
 Download the [latest release](https://github.com/emsi/Archcodex/releases/latest)
 or browse [all releases](https://github.com/emsi/Archcodex/releases).
 Each release has an x86_64 Flatpak, a `SHA256SUMS` file containing its basename,
-and its own reviewed notes. GitHub also provides source archives from the tag.
+and its own release notes. GitHub also provides source archives from the tag.
 The versioned build manifest pins the dependency sources and includes the
 Konsole patches needed to build the bundled component.
 
@@ -63,11 +63,14 @@ history and preserve known limitations.
 
 1. Build and validate the version, recording the exact source commit and bundle
    hash. Ensure the artifact's version matches its source and AppStream metadata.
-2. Add its catalog entry and notes. Review the diff from the previous version,
-   explain visible behavior and limitations, and include that exact tag comparison.
-   GitHub-generated notes can supply merged-PR/contributor entries when useful;
-   specify the previous tag rather than relying on automatic baseline selection.
-   Do not replace reviewed summaries with an empty generated changelog.
+2. Add its catalog entry. Generate release notes using GitHub's
+   `repos/emsi/Archcodex/releases/generate-notes` API, with explicit `tag_name`,
+   `previous_tag_name` and the built source commit as `target_commitish`.
+   Save the returned `body` verbatim in the version's notes file and use that
+   same body for the GitHub release. A sparse generated result is acceptable;
+   do not replace it with a handwritten summary or append lists of unchanged
+   or unimplemented features. Installation, compatibility and implementation
+   details belong in README and project documentation.
 3. Create the tag at the recorded source commit and push the required source
    commits and that tag. Never move an existing release tag to a different build.
 4. Create a draft with `gh release create --draft --verify-tag --latest=false`,
@@ -80,6 +83,10 @@ history and preserve known limitations.
 6. Publish the verified draft. Set Latest explicitly for the newest recommended
    normal release, and false for historical releases. A prerelease cannot be
    Latest. Recheck published downloads and the Latest endpoint afterward.
+7. Close resolved issues when the delivered release satisfies their agreed
+   scope, including explicitly accepted limitations. Verify the issue state;
+   do not leave completed issues open merely because publication was a separate
+   step. Keep any accepted limitations in the project documentation.
 
 The 0.x releases are normal GitHub releases explicitly described as
 development builds. Future prereleases should
