@@ -4,7 +4,7 @@ Status: primary distribution direction adopted; permission baseline and host
 integration below describe the full-project design. The
 [0.5.1 implementation](implementation.md) retains the original host-command permission
 set and a [buildable manifest](../packaging/io.github.emsi.Archcodex.json).
-Last updated: 2026-11-09.
+Last updated: 2026-11-10.
 
 ## 1. Packaging model
 
@@ -17,6 +17,15 @@ is the starting reference. On 2026-11-08 it selected KDE runtime **6.11** and
 Konsole **26.08.2**, with DRI, IPC, network, Wayland, fallback X11 and host-command
 D-Bus access. Version 0.2.0 adopts those runtime/component versions with the
 narrower permissions documented in [implementation and testing](implementation.md).
+
+The current manifest retains KDE **6.11** and pins Konsole **26.04.3** to avoid
+[KDE bug 524571](https://bugs.kde.org/show_bug.cgi?id=524571): the 26.08 keyboard
+handler can forward Shift+Page Up/Down to a client requesting the enhanced
+keyboard protocol instead of scrolling terminal history. Both existing embedding
+patches apply to 26.04.3 unchanged; no keyboard backport or profile override is
+needed. This release uses legacy keyboard handling. Before upgrading Konsole,
+run the terminal regression tests with a real PTY and the candidate KPart,
+including `scrollbackShortcutsStayLocal`, and smoke-test the installed Flatpak.
 
 Bundle the Konsole KPart and any dependencies missing from the chosen runtime.
 Installing the separate Konsole Flatpak does not supply Archcodex's plugin. Do

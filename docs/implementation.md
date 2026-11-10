@@ -79,10 +79,13 @@ session polling.
 
 ## Flatpak contents and permissions
 
-The package targets x86_64 Linux and uses KDE Platform 6.11, Konsole 26.08.2 and
+The package targets x86_64 Linux and uses KDE Platform 6.11, Konsole 26.04.3 and
 Boost 1.90.0 headers. Dependency source hashes are recorded in the manifest. The
 GUI and bridge are built against that SDK; the host does not need matching Qt/KDE
 libraries or a separate Konsole installation.
+The [Konsole version pin](flatpak.md#1-packaging-model) avoids the 26.08 regression
+that intercepts terminal scrollback shortcuts when a client requests the enhanced
+keyboard protocol.
 
 The application-specific permissions are:
 

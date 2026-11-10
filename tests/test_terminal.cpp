@@ -14,6 +14,7 @@
 #include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
+#include <QScrollBar>
 #include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -59,6 +60,79 @@ QString candidate(TerminalArea &area) {
 class TerminalTests : public QObject {
     Q_OBJECT
   private slots:
+    void scrollbackShortcutsStayLocal_data() {
+        QTest::addColumn<bool>("enhancedKeyboard");
+        QTest::newRow("legacy") << false;
+        QTest::newRow("enhanced-keyboard-request") << true;
+    }
+    void scrollbackShortcutsStayLocal() {
+        QFETCH(bool, enhancedKeyboard);
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        // The cursor-position reply confirms that both the output and the
+        // keyboard-protocol request have been processed before sending keys.
+        script.write("#!/usr/bin/python3\nimport os, pathlib, select, sys, time, tty\n"
+                     "out = pathlib.Path(__file__).parent\n"
+                     "tty.setraw(0)\n"
+                     "os.write(1, b''.join(f'LINE {i:04d}\\r\\n'.encode() for i in range(500)))\n"
+                     // Request the same enhanced keyboard flags as Codex, on the normal
+                     // screen with real scrollback. Older terminals may ignore this.
+                     "if sys.argv[-1] == 'kitty': os.write(1, b'\\x1b[>7u')\n"
+                     "os.write(1, b'\\x1b[6n')\nresponse = b''\n"
+                     "while not response.endswith(b'R'):\n"
+                     " assert select.select([0], [], [], 5)[0], 'No cursor-position reply'\n"
+                     " response += os.read(0, 1024)\n"
+                     "(out / 'ready').touch()\n"
+                     "received = b''\nend = time.monotonic() + 20\n"
+                     "while time.monotonic() < end:\n"
+                     " if not select.select([0], [], [], 0.1)[0]: continue\n"
+                     " chunk = os.read(0, 1024)\n"
+                     " if not chunk: break\n"
+                     " received += chunk\n"
+                     " if b'\\r' in received: break\n"
+                     "(out / 'received').write_bytes(received.split(b'\\r')[0])\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        TerminalArea area;
+        area.resize(900, 500);
+        area.show();
+        area.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&area));
+        BackendProfile profile{"b", "Fixture", "local-unix", "/unused", script.fileName(), false};
+        auto session = Session::fromThread(
+            "b", {{"id", enhancedKeyboard ? "kitty" : "legacy"}, {"cwd", dir.path()}});
+        QString error;
+        QVERIFY2(area.open(profile, session, &error), qPrintable(error));
+        QTRY_VERIFY(QApplication::focusWidget() && area.isAncestorOf(QApplication::focusWidget()));
+        auto *input = QApplication::focusWidget();
+        QTRY_VERIFY(QFile::exists(dir.filePath("ready")));
+        auto *part = area.findChild<KParts::ReadOnlyPart *>();
+        QVERIFY(part);
+        auto *scrollbar = part->widget()->findChild<QScrollBar *>();
+        QVERIFY(scrollbar);
+        QVERIFY(scrollbar->maximum() > 100);
+        const int bottom = scrollbar->maximum();
+        QCOMPARE(scrollbar->value(), bottom);
+        QTest::keyClick(input, Qt::Key_PageUp, Qt::ShiftModifier);
+        QTRY_VERIFY(scrollbar->value() < bottom);
+        QTest::keyClick(input, Qt::Key_PageDown, Qt::ShiftModifier);
+        QTRY_COMPARE(scrollbar->value(), bottom);
+        QTest::keyClick(input, Qt::Key_Home, Qt::ShiftModifier);
+        QTRY_COMPARE(scrollbar->value(), scrollbar->minimum());
+        QTest::keyClick(input, Qt::Key_End, Qt::ShiftModifier);
+        QTRY_COMPARE(scrollbar->value(), bottom);
+        QSignalSpy exits(&area, &TerminalArea::clientExited);
+        QTest::keyClick(input, Qt::Key_Return);
+        QTRY_COMPARE(exits.size(), 1);
+        QCOMPARE(exits.first()[1].toInt(), 0);
+        QFile received(dir.filePath("received"));
+        QVERIFY(received.open(QIODevice::ReadOnly));
+        // Only the final Enter should reach the child, without any scroll keys.
+        QCOMPARE(received.readAll(), QByteArray());
+        area.closeCurrent();
+    }
     void windowCommandsOverrideKonsoleWithoutLeakingIntoThePty() {
         QTemporaryDir dir;
         QFile script(dir.filePath("client"));
