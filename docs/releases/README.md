@@ -18,6 +18,7 @@ listing.
 
 | Version | Changes |
 | --- | --- |
+| [0.8.0](v0.8.0.md) | Restore opened terminals, selection and recency, with documented TUI limits |
 | [0.7.1](v0.7.1.md) | Restore terminal scrollback shortcuts with Konsole 26.04.3 |
 | [0.7.0](v0.7.0.md) | Configurable keyboard navigation and deferred recent-terminal/project switching |
 | [0.6.2](v0.6.2.md) | Independent conversation search and per-tab local filters |

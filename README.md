@@ -8,7 +8,7 @@ interface.
 
 ## Install from Flatpak
 
-Download **`Archcodex-0.7.1-x86_64.flatpak`** and **`SHA256SUMS`** from the
+Download **`Archcodex-0.8.0-x86_64.flatpak`** and **`SHA256SUMS`** from the
 [latest GitHub release](https://github.com/emsi/Archcodex/releases/latest) into
 the same directory.
 
@@ -17,7 +17,7 @@ in your **local host terminal**, outside myCodex or any other container:
 
 ```sh
 sha256sum -c SHA256SUMS
-flatpak install --user --or-update ./Archcodex-0.7.1-x86_64.flatpak
+flatpak install --user --or-update ./Archcodex-0.8.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -46,7 +46,7 @@ notes and checksums.
 
 ## Remember opened terminals
 
-The current source and 0.8.0 test bundle remember open terminal views, selection
+Archcodex 0.8.0 remembers open terminal views, selection
 and recent-terminal order. **Settings → Application → Restore opened terminals
 on startup** is enabled by default. Offline views remain in **Opened**; select
 one to reconnect or inspect **Terminal workspace…** in the status bar.
@@ -172,7 +172,7 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-The current source (**0.8.0**, not yet published) supports existing local Unix-socket
+Version **0.8.0** supports existing local Unix-socket
 app-servers and local or SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
 to non-container app-servers remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.

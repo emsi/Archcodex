@@ -196,6 +196,19 @@
       "bytes": 2300440,
       "notes": "v0.7.1.md",
       "included_fix": "fa62908a109fc6d5e5963c0d61fd84641df031a3"
+    },
+    {
+      "version": "0.8.0",
+      "tag": "v0.8.0",
+      "previous_tag": "v0.7.1",
+      "title": "Archcodex 0.8.0 — Restore opened terminals",
+      "source_commit": "9a9f1f73d2522276c9daea176a06a7d05cb0ab69",
+      "source_commit_date": "2026-11-10T16:31:33Z",
+      "flatpak_commit": "3b8d7eae2d84a093d7dd91c135607ec7e8127ec20283601b0acae194b7940158",
+      "asset": "Archcodex-0.8.0-x86_64.flatpak",
+      "sha256": "877f9112dfa0a21639711b07116f7eeeb43c09f18b7aeb3e0040864020f9d992",
+      "bytes": 2347440,
+      "notes": "v0.8.0.md"
     }
   ]
 }

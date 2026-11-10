@@ -2,7 +2,7 @@
 
 Implemented for issue [#3](https://github.com/emsi/Archcodex/issues/3), with the
 explicitly agreed limitation that stock-TUI conversation switches are not yet
-tracked. Version 0.8.0 is a local development/test build, not a published release.
+tracked. Version 0.8.0 is a development release for Linux host testing.
 No Codex patch or new transport proxy is required by this implementation.
 
 ## What the user sees
