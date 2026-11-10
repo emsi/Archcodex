@@ -13,13 +13,13 @@ class SettingsDialog : public QDialog {
   public:
     SettingsDialog(bool hideUnsaved, bool showAllMyCodexSessions,
                    const QString &localExecutable = {}, QWidget *parent = nullptr,
-                   Commands *commands = nullptr);
+                   Commands *commands = nullptr, bool restoreOpened = true);
   signals:
     void settingsApplied(bool hideUnsaved, bool showAllMyCodexSessions,
-                         const QString &localExecutable);
+                         const QString &localExecutable, bool restoreOpened);
 
   private:
-    QCheckBox *hideUnsaved, *showAllMyCodexSessions;
+    QCheckBox *hideUnsaved, *showAllMyCodexSessions, *restoreOpened;
     QLineEdit *localCodex;
     QLabel *validation;
     Commands *commands;

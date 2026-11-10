@@ -21,11 +21,22 @@ class StoreWriter : public QObject {
     void initialize(const QString &path) {
         try {
             store = std::make_unique<Store>(path);
-            emit loaded({store->backends(), store->projects(), store->sessions()});
+            StoreSnapshot snapshot;
+            snapshot.profiles = store->backends();
+            snapshot.projects = store->projects();
+            snapshot.sessions = store->sessions();
+            try {
+                snapshot.workspace = store->workspace();
+            } catch (const std::exception &e) {
+                snapshot.workspaceError = QString::fromUtf8(e.what());
+            }
+            emit loaded(snapshot);
         } catch (const std::exception &e) {
             store.reset(); // Do not overwrite a cache that could not be read safely.
             emit failed(QString::fromUtf8(e.what()));
-            emit loaded({});
+            StoreSnapshot snapshot;
+            snapshot.workspaceError = QString::fromUtf8(e.what());
+            emit loaded(snapshot);
         }
     }
     void enqueue(const QString &key, Operation operation) {
@@ -61,11 +72,15 @@ class StoreWriter : public QObject {
             }
         }
         if (store) {
-            try {
-                for (auto &entry : batch)
+            for (auto &entry : batch) {
+                try {
                     entry.operation(*store);
-            } catch (const std::exception &e) {
-                emit failed(QString::fromUtf8(e.what()));
+                } catch (const std::exception &e) {
+                    if (entry.key == "workspace")
+                        emit workspaceFailed(QString::fromUtf8(e.what()));
+                    else
+                        emit failed(QString::fromUtf8(e.what()));
+                }
             }
         }
         QMutexLocker lock(&mutex);
@@ -89,6 +104,7 @@ class StoreWriter : public QObject {
   signals:
     void loaded(const Archcodex::StoreSnapshot &snapshot);
     void failed(const QString &error);
+    void workspaceFailed(const QString &error);
 };
 AsyncStore::AsyncStore(const QString &path, QObject *parent)
     : QObject(parent), worker(std::make_shared<Worker>()), writer(new StoreWriter) {
@@ -96,6 +112,7 @@ AsyncStore::AsyncStore(const QString &path, QObject *parent)
     writer->moveToThread(worker->context->thread());
     connect(writer, &StoreWriter::loaded, this, &AsyncStore::loaded);
     connect(writer, &StoreWriter::failed, this, &AsyncStore::failed);
+    connect(writer, &StoreWriter::workspaceFailed, this, &AsyncStore::workspaceFailed);
     worker->post([w = writer, path] { w->initialize(path); });
 }
 AsyncStore::~AsyncStore() {
@@ -106,6 +123,9 @@ void AsyncStore::save(const BackendProfile &p) {
 }
 void AsyncStore::save(const Session &s) {
     writer->enqueue("s:" + sessionKey(s.backendId, s.id), [s](Store &store) { store.save(s); });
+}
+void AsyncStore::save(const WorkspaceSnapshot &snapshot) {
+    writer->enqueue("workspace", [snapshot](Store &store) { store.save(snapshot); });
 }
 void AsyncStore::removeBackend(const QString &id) {
     writer->enqueue({}, [id](Store &s) { s.removeBackend(id); });

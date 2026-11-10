@@ -25,14 +25,15 @@ class BackendPump : public QObject {
             emit removed(id);
         });
         connect(this, &BackendPump::removed, target, &Backend::sessionRemoved);
-        connect(core, &Backend::sessionVerified, this,
-                [this](const QString &id, const QString &error) {
-                    // The selected record must precede its preflight result, even during a bulk
-                    // import.
-                    if (pending.contains(id))
-                        emit selected(pending.take(id));
-                    emit verified(id, error);
-                });
+        connect(
+            core, &Backend::sessionVerified, this,
+            [this](const QString &id, const QString &error, quint64 token, const Session &session) {
+                // The selected record must precede its preflight result, even during a bulk
+                // import.
+                if (pending.contains(id))
+                    emit selected(pending.take(id));
+                emit verified(id, error, token, session);
+            });
         connect(this, &BackendPump::selected, target, &Backend::sessionChanged);
         connect(this, &BackendPump::verified, target, &Backend::sessionVerified);
         connect(core, &Backend::sessionForked, this,
@@ -53,6 +54,7 @@ class BackendPump : public QObject {
         });
         connect(core, &Backend::connectionChanged, target, &Backend::connectionChanged);
         connect(core, &Backend::loadedInventory, target, &Backend::loadedInventory);
+        connect(core, &Backend::loadedInventoryFailed, target, &Backend::loadedInventoryFailed);
         connect(core, &Backend::identityReceived, target, &Backend::identityReceived);
         connect(core, &Backend::moreAvailable, target, &Backend::moreAvailable);
         connect(core, &Backend::searchResults, target, &Backend::searchResults);
@@ -79,7 +81,8 @@ class BackendPump : public QObject {
     void batch(const QList<Archcodex::Session> &items);
     void selected(const Archcodex::Session &session);
     void removed(const QString &id);
-    void verified(const QString &id, const QString &error);
+    void verified(const QString &id, const QString &error, quint64 token,
+                  const Archcodex::Session &session);
     void forked(const QString &id, const Archcodex::Session &session, const QString &error);
 };
 AsyncBackend::AsyncBackend(BackendProfile p, const QString &bridge, QObject *parent)
@@ -111,8 +114,8 @@ void AsyncBackend::loadMore() {
 void AsyncBackend::search(const QString &q, quint64 token) {
     worker->post([s = state, q, token] { s->pump->core->search(q, token); });
 }
-void AsyncBackend::verifySession(const QString &id) {
-    worker->post([s = state, id] { s->pump->core->verifySession(id); });
+void AsyncBackend::verifySession(const QString &id, quint64 token) {
+    worker->post([s = state, id, token] { s->pump->core->verifySession(id, token); });
 }
 void AsyncBackend::forkSession(const QString &id, const QString &priorExecutionEnvironment) {
     worker->post([s = state, id, priorExecutionEnvironment] {

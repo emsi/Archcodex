@@ -7,6 +7,7 @@
 #include "settingsdialog.h"
 #include "terminal.h"
 #include "window.h"
+#include "worker.h"
 #include <KCommandBar>
 #include <KShortcutsEditor>
 #include <QAction>
@@ -99,6 +100,93 @@ class SettingsShown : public QObject {
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void restoreWorkspaceFromExactIdsAndPreserveOfflineIntent() {
+        QTemporaryDir data;
+        Fixture fixture;
+        auto p = fixture.profile();
+        QFile script(data.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        p.executable = script.fileName();
+        p.identity["codexHome"] = "/home/test/.codex-work";
+        WorkspaceView v;
+        v.id = "stable-view";
+        v.backendId = p.id;
+        v.threadId = "beyond-first-page";
+        v.title = "Remembered";
+        v.cwd = "/work/project";
+        v.sourceIdentity = workspaceSourceIdentity(p);
+        WorkspaceSnapshot saved{1, {v}, {v.id}, v.id};
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+            store.save(saved);
+            auto cached = Session::fromThread(p.id, fixture.thread(v.threadId));
+            cached.opened = 123;
+            store.save(cached);
+        }
+        {
+            Window window(data.path(), false);
+            window.show();
+            auto *area = window.findChild<TerminalArea *>();
+            QSignalSpy focused(area, &TerminalArea::sessionFocused);
+            QTRY_COMPARE(area->workspace().views.size(), 1);
+            QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 0);
+            QCOMPARE(area->currentKey(), v.key());
+            auto *tabs = window.findChild<QTabBar *>();
+            tabs->setCurrentIndex(int(SessionView::Opened));
+            auto *tree = window.findChild<QTreeView *>();
+            QTRY_COMPARE(visibleThreads(tree), QStringList{v.threadId});
+            const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+            if (!screenshots.isEmpty())
+                QVERIFY(window.grab().save(screenshots + "/workspace-placeholder.png"));
+            auto *backend = window.findChild<Backend *>();
+            QVERIFY(backend);
+            backend->connectServer();
+            QTRY_VERIFY(area->hasClient(v.key()));
+            QVERIFY(fixture.readIds.contains(v.threadId));
+            QCOMPARE(focused.size(), 0);
+            QCOMPARE(area->workspace().recent, saved.recent);
+            QCOMPARE(area->currentSession().opened, 123);
+            fixture.notify("thread/name/updated",
+                           {{"threadId", v.threadId}, {"threadName", "Live rename"}});
+            QTRY_COMPARE(area->workspace().views.first().title, "Live rename");
+            window.close();
+        }
+        QVERIFY(Worker::finishPending());
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            saved = store.workspace();
+            QCOMPARE(saved.views.size(), 1);
+            QCOMPARE(saved.views.first().disposition, ViewDisposition::Automatic);
+            QCOMPARE(saved.views.first().title, "Live rename");
+        }
+        {
+            Window window(data.path(), false);
+            auto *area = window.findChild<TerminalArea *>();
+            QTRY_COMPARE(area->workspace().views.size(), 1);
+            QCOMPARE(area->workspace().views.first().id, v.id);
+            QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 0);
+            window.close(); // Still offline; partial startup must preserve intent.
+        }
+        QVERIFY(Worker::finishPending());
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            QCOMPARE(store.workspace().views.first().id, v.id);
+            QCOMPARE(store.workspace().views.first().disposition, ViewDisposition::Automatic);
+        }
+        QSettings settings(data.filePath("window.ini"), QSettings::IniFormat);
+        settings.setValue("application/restoreOpenedTerminals", false);
+        settings.sync();
+        {
+            Window window(data.path(), false);
+            QTRY_VERIFY(window.findChild<Backend *>());
+            QCOMPARE(window.findChild<TerminalArea *>()->workspace().views.size(), 0);
+        }
+        QVERIFY(Worker::finishPending());
+    }
     void keyboardNavigationPaletteAndContextMenus() {
         QTemporaryDir data;
         {
@@ -1260,32 +1348,25 @@ class WindowTests : public QObject {
         first.readErrors["thread-1"] = "thread not loaded: thread-1";
         QSignalSpy terminalStates(window.findChild<TerminalArea *>(),
                                   &TerminalArea::clientStateChanged);
-        bool sawError = false;
-        for (auto *backend : window.findChildren<Backend *>())
-            connect(backend, &Backend::sessionChanged, &window, [&](const Session &s) {
-                if (!s.unavailable)
-                    return;
-                QTimer::singleShot(0, &window, [&] {
-                    for (auto *box : window.findChildren<QMessageBox *>()) {
-                        sawError = box->text().contains("thread not loaded: thread-1");
-                        box->accept();
-                    }
-                });
-            });
+        auto *area = window.findChild<TerminalArea *>();
         tree->activated(session);
-        QTRY_VERIFY(sawError);
+        QTRY_VERIFY(area->currentSession().clientIssue.contains("thread not loaded: thread-1"));
         QCOMPARE(first.readIds.size(), 2);
         QCOMPARE(second.readIds.size(), 1);
-        QCOMPARE(terminalStates.size(), 0);
-        // Restart uses the same selected-server preflight instead of bypassing
-        // verification with the terminal's previously captured arguments.
-        sawError = false;
+        QVERIFY(!terminalStates.isEmpty()); // Failure remains visible in a placeholder.
+        QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 0);
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
+        QCOMPARE(area->workspace().views.first().disposition, ViewDisposition::Disconnected);
+        // Retry uses the same exact selected-server preflight and same view.
+        const auto stableId = area->workspace().views.first().id;
         const auto client = Session::fromThread(firstId, first.thread());
-        window.findChild<TerminalArea *>()->restartRequested(client);
-        QTRY_VERIFY(sawError);
-        QCOMPARE(first.readIds.size(), 3);
+        area->restartRequested(client);
+        QTRY_COMPARE(first.readIds.size(), 3);
+        QTRY_VERIFY(area->currentSession().clientIssue.contains("thread not loaded: thread-1"));
         QCOMPARE(second.readIds.size(), 1);
-        QCOMPARE(terminalStates.size(), 0);
+        QCOMPARE(area->workspace().views.first().id, stableId);
+        QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 0);
+        QVERIFY(window.findChildren<QMessageBox *>().isEmpty());
         window.close();
     }
     void discoveryOpensExistingSessionsWithoutProjectSetup() {

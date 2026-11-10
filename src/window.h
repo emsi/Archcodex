@@ -24,6 +24,7 @@ namespace Archcodex {
 class TerminalArea;
 class DiscoveryDialog;
 class Commands;
+class OpeningCoordinator;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -49,13 +50,12 @@ class Window : public QMainWindow {
     quint64 searchToken = 0;
     QSet<QString> scopeBackends;
     bool scopedSearch = false;
-    QString scopePath, pendingOpen;
+    QString scopePath;
     QSet<QString> pendingForks;
     QString localUser, localHost;
     QString configuredLocalCodex, discoveredLocalCodex;
     bool localIdentityDiscovered = false;
     QHash<QString, QString> containerHostNames;
-    bool pendingRestart = false;
     DiscoveryReport discoveryReport;
     QPointer<DiscoveryDialog> discoveryDialog;
     QToolButton *discoveryStatus;
@@ -87,6 +87,18 @@ class Window : public QMainWindow {
     QPushButton *loadMore;
     QSplitter *splitter;
     TerminalArea *terminal;
+    OpeningCoordinator *opening;
+    QToolButton *workspaceStatus;
+    bool workspaceLoaded = false, workspaceWritable = false, workspaceSaving = false;
+    bool closing = false;
+    qint64 workspaceRevision = 0;
+    QString workspaceError;
+    void queueWorkspaceSave();
+    void saveWorkspace();
+    void freezeWorkspace();
+    void updateWorkspaceStatus();
+    void showWorkspaceDetails();
+    void openSession(const QString &backend, const Session &session);
     Commands *commands;
     QWidget *projectPane;
     bool projectsContext = true;

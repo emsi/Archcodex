@@ -22,7 +22,7 @@ class Backend : public QObject {
     virtual bool ready() const = 0;
     virtual void loadMore() = 0;
     virtual void search(const QString &query, quint64 token) = 0;
-    virtual void verifySession(const QString &id) = 0;
+    virtual void verifySession(const QString &id, quint64 token = 0) = 0;
     // Prior evidence comes only from the application's saved execution context,
     // never from shared server history. It lets a previously observed session fork
     // after an ordinary GUI reconnect, under the same rules as Resume.
@@ -33,8 +33,10 @@ class Backend : public QObject {
     void sessionsChanged(const QList<Archcodex::Session> &sessions);
     void sessionRemoved(const QString &id);
     void loadedInventory(const QSet<QString> &ids);
+    void loadedInventoryFailed();
     void identityReceived(const QJsonObject &identity);
-    void sessionVerified(const QString &id, const QString &error);
+    void sessionVerified(const QString &id, const QString &error, quint64 token = 0,
+                         const Archcodex::Session &session = {});
     void sessionForked(const QString &sourceId, const Archcodex::Session &session,
                        const QString &error);
     void moreAvailable(bool available);
@@ -55,7 +57,7 @@ class CodexBackend : public Backend {
     }
     void loadMore() override;
     void search(const QString &query, quint64 token) override;
-    void verifySession(const QString &id) override;
+    void verifySession(const QString &id, quint64 token = 0) override;
     void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) override;
 
   protected:

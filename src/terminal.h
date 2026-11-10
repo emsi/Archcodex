@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "types.h"
+#include "workspace.h"
 #include <KParts/ReadOnlyPart>
 #include <QPointer>
 #include <QWidget>
@@ -32,12 +33,25 @@ class TerminalArea : public QWidget {
     Session currentSession() const;
     bool triggerAction(const QString &name);
     void updateSession(const Session &session, const QString &serverName);
+    WorkspaceView prepare(const BackendProfile &profile, const Session &session, bool activate);
+    bool startPrepared(const QString &viewId, const BackendProfile &profile, const Session &session,
+                       QString *error);
+    void restoreWorkspace(const WorkspaceSnapshot &snapshot,
+                          const QHash<QString, BackendProfile> &profiles);
+    WorkspaceSnapshot workspace() const;
+    WorkspaceView view(const QString &key) const;
+    void openingState(const QString &viewId, const QString &text, bool needsAttention);
+    bool hasClient(const QString &key) const;
+    void freezeWorkspace();
   signals:
     void currentChanged(const QString &title);
     void clientStateChanged(const Archcodex::Session &session);
     void clientExited(const QString &key, int exitCode, bool crashed);
     void restartRequested(const Archcodex::Session &session);
     void sessionFocused(const QString &key);
+    void workspaceChanged();
+    void viewClosed(const QString &viewId);
+    void connectionsRequested();
 
   protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
@@ -55,6 +69,9 @@ class TerminalArea : public QWidget {
     QHash<QString, QString> titles;
     QHash<QString, QString> exits;
     QHash<QString, Session> clients;
+    QHash<QString, WorkspaceView> views;
+    QHash<QString, QWidget *> placeholders;
+    bool frozen = false;
     QStringList recent, cycle, cycleOrder, cycleProjectOrder;
     QString localCodexExecutable;
     int cycleIndex = 0;
@@ -76,9 +93,12 @@ class TerminalArea : public QWidget {
     QStringList candidates(const QStringList &order, bool projects) const;
     void forgetClient(const QString &key);
     KParts::ReadOnlyPart *create(QString *error);
-    bool startSession(const BackendProfile &profile, const Session &session, QString *error);
+    bool startSession(const BackendProfile &profile, const Session &session, QString *error,
+                      bool activate = true);
     bool launch(const QString &key, const QStringList &arguments, const QString &title,
-                const Session &session, QString *error);
+                const Session &session, QString *error, bool activate = true);
+    QWidget *viewWidget(const QString &key) const;
+    void addPlaceholder(const WorkspaceView &view, const QString &serverName);
     void updateCurrent();
 };
 } // namespace Archcodex

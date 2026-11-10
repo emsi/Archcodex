@@ -45,7 +45,8 @@ struct Session {
     bool ephemeral = false;
     bool persistenceKnown = false;
     bool unavailable = false;
-    bool terminalOpen = false; // UI lifetime; deliberately not persisted.
+    bool terminalOpen = false;  // UI lifetime; deliberately not persisted.
+    bool clientPending = false; // A remembered view has not started its client yet.
     bool contextRequired = false;
     bool executionObserved = false; // Evidence from this backend's loaded inventory/events only.
     QString executionEnvironment;   // Bind cached evidence to the container/mount identity.

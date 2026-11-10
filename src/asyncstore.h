@@ -7,6 +7,8 @@ struct StoreSnapshot {
     QList<BackendProfile> profiles;
     QList<Project> projects;
     QList<Session> sessions;
+    WorkspaceSnapshot workspace;
+    QString workspaceError;
 };
 class StoreWriter;
 class AsyncStore : public QObject {
@@ -16,11 +18,13 @@ class AsyncStore : public QObject {
     ~AsyncStore() override;
     void save(const BackendProfile &profile);
     void save(const Session &session);
+    void save(const WorkspaceSnapshot &snapshot);
     void removeBackend(const QString &id);
     void removeSession(const QString &backend, const QString &id);
   signals:
     void loaded(const Archcodex::StoreSnapshot &snapshot);
     void failed(const QString &error);
+    void workspaceFailed(const QString &error);
 
   private:
     std::shared_ptr<Worker> worker;

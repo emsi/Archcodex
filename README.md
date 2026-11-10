@@ -44,6 +44,23 @@ notes and checksums.
   an accepted SSH host key and non-interactive authentication, such as an SSH
   agent.
 
+## Remember opened terminals
+
+The current source and 0.8.0 test bundle remember open terminal views, selection
+and recent-terminal order. **Settings → Application → Restore opened terminals
+on startup** is enabled by default. Offline views remain in **Opened**; select
+one to reconnect or inspect **Terminal workspace…** in the status bar.
+Previously exited or failed clients remain disconnected, with a short summary.
+Terminal output itself is not saved across application restarts.
+
+**Known limitation:** restoration uses the conversation opened from Archcodex.
+Switching inside the Codex TUI with `/resume`, `/fork`, `/new` or agent navigation
+can leave that saved target unchanged. `/rename` updates still work. A **New**
+terminal without a confirmed conversation ID is remembered as a disconnected
+placeholder; open its saved conversation from Projects to make it restorable.
+See [workspace restoration](docs/workspace.md) for behavior, migration and the
+planned protocol-observation option that requires no Codex changes.
+
 ## Features
 
 - **Automatic discovery:** find existing local Codex servers and running
@@ -155,8 +172,8 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-Version **0.7.1** supports existing local Unix-socket app-servers and local or
-SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
+The current source (**0.8.0**, not yet published) supports existing local Unix-socket
+app-servers and local or SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
 to non-container app-servers remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.
 
@@ -185,7 +202,7 @@ produces the bundle and checksums in `dist/`. On x86_64:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.7.1-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.8.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 

@@ -16,7 +16,7 @@ class AsyncBackend final : public Backend {
     }
     void loadMore() override;
     void search(const QString &query, quint64 token) override;
-    void verifySession(const QString &id) override;
+    void verifySession(const QString &id, quint64 token = 0) override;
     void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) override;
   signals:
     void batchAccepted();

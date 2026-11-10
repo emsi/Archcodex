@@ -22,7 +22,7 @@ Store::Store(const QString &path) {
     q.prepare("PRAGMA user_version");
     run(q);
     q.next();
-    if (q.value(0).toInt() > 1)
+    if (q.value(0).toInt() > 2)
         throw std::runtime_error("The database belongs to a newer Archcodex version.");
     q.prepare("PRAGMA foreign_keys=ON");
     run(q);
@@ -34,7 +34,9 @@ Store::Store(const QString &path) {
         "CASCADE, path TEXT, name TEXT, PRIMARY KEY(backend,path))",
         "CREATE TABLE IF NOT EXISTS sessions (backend TEXT REFERENCES backends(id) ON DELETE "
         "CASCADE, id TEXT, data TEXT, opened INTEGER NOT NULL, PRIMARY KEY(backend,id))",
-        "PRAGMA user_version=1"};
+        "CREATE TABLE IF NOT EXISTS workspace (id INTEGER PRIMARY KEY CHECK(id=1), "
+        "revision INTEGER NOT NULL, data TEXT NOT NULL)",
+        "PRAGMA user_version=2"};
     if (!db.transaction())
         throw std::runtime_error("Could not begin database migration.");
     try {
@@ -129,6 +131,52 @@ void Store::removeSession(const QString &backend, const QString &id) {
     q.prepare("DELETE FROM sessions WHERE backend=? AND id=?");
     q.addBindValue(backend);
     q.addBindValue(id);
+    run(q);
+}
+WorkspaceSnapshot Store::workspace() const {
+    try {
+        QSqlQuery q(db);
+        q.prepare("SELECT revision,data FROM workspace WHERE id=1");
+        run(q);
+        if (!q.next())
+            return {};
+        const auto bytes = q.value(1).toByteArray();
+        if (bytes.size() > 4 * 1024 * 1024)
+            throw std::runtime_error("Terminal workspace exceeds its size limit.");
+        QJsonParseError error;
+        const auto doc = QJsonDocument::fromJson(bytes, &error);
+        if (error.error != QJsonParseError::NoError || !doc.isObject())
+            throw std::runtime_error("Cannot read the saved terminal workspace.");
+        auto snapshot = WorkspaceSnapshot::fromJson(doc.object());
+        if (snapshot.revision != q.value(0).toLongLong())
+            throw std::runtime_error("Terminal workspace revision is inconsistent.");
+        return snapshot;
+    } catch (...) {
+        workspaceReadable = false;
+        throw;
+    }
+}
+void Store::save(const WorkspaceSnapshot &snapshot) {
+    if (!workspaceReadable)
+        throw std::runtime_error("The unreadable terminal workspace has been preserved. "
+                                 "Workspace saving is disabled for this run.");
+    const auto error = snapshot.validate();
+    if (!error.isEmpty())
+        throw std::runtime_error(error.toStdString());
+    // Validate existing data before the first write too, including direct callers.
+    const auto current = workspace();
+    if (snapshot.revision <= current.revision)
+        return;
+    const auto bytes = QJsonDocument(snapshot.json()).toJson(QJsonDocument::Compact);
+    if (bytes.size() > 4 * 1024 * 1024)
+        throw std::runtime_error("Terminal workspace exceeds its size limit.");
+    QSqlQuery q(db);
+    // One SQLite statement atomically replaces the complete intended workspace.
+    q.prepare("INSERT INTO workspace VALUES(1,?,?) ON CONFLICT(id) DO UPDATE SET "
+              "revision=excluded.revision,data=excluded.data "
+              "WHERE excluded.revision>workspace.revision");
+    q.addBindValue(snapshot.revision);
+    q.addBindValue(bytes);
     run(q);
 }
 } // namespace Archcodex

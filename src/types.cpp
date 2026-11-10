@@ -105,6 +105,8 @@ bool Session::isWaiting() const {
             (flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")));
 }
 int Session::attention() const {
+    if (clientPending)
+        return 0;
     if (!clientIssue.isEmpty())
         return 3;
     if (!known)

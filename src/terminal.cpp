@@ -32,9 +32,12 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     exitText->setWordWrap(true);
     exitText->setTextInteractionFlags(Qt::TextSelectableByMouse);
     exitLayout->addWidget(exitText, 1);
-    auto *retry = new QPushButton("Restart client");
+    auto *retry = new QPushButton("Reconnect client");
     retry->setObjectName("reconnectTerminal");
     exitLayout->addWidget(retry);
+    auto *details = new QPushButton("Connections…");
+    connect(details, &QPushButton::clicked, this, &TerminalArea::connectionsRequested);
+    exitLayout->addWidget(details);
     exitBar->hide();
     layout->addWidget(exitBar);
     layout->addWidget(stack);
@@ -49,7 +52,7 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     connect(stack, &QStackedWidget::currentChanged, this, &TerminalArea::updateCurrent);
     connect(retry, &QPushButton::clicked, this, [this] {
         const auto key = currentKey();
-        if (key.isEmpty() || !exits.contains(key))
+        if (key.isEmpty() || (!exits.contains(key) && !placeholders.contains(key)))
             return;
         // The controller owns current profiles and session evidence. Never retry
         // a captured command after rediscovery has changed the execution context.
@@ -109,9 +112,14 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     updateShortcuts();
     stack->addWidget(part->widget());
     connect(part, &QObject::destroyed, this, [this] {
+        if (frozen)
+            return;
         for (auto it = parts.begin(); it != parts.end();)
             if (it.value().isNull()) {
+                const auto id = views.take(it.key()).id;
                 forgetClient(it.key());
+                emit viewClosed(id);
+                emit workspaceChanged();
                 titles.remove(it.key());
                 exits.remove(it.key());
                 it = parts.erase(it);
@@ -149,8 +157,8 @@ void TerminalArea::overrideShortcut(QKeyEvent *event, bool &override) {
         override = false;
 }
 void TerminalArea::focusCurrent() {
-    if (auto *part = parts.value(currentKey()).data())
-        part->widget()->setFocus(Qt::ShortcutFocusReason);
+    if (auto *widget = viewWidget(currentKey()))
+        widget->setFocus(Qt::ShortcutFocusReason);
 }
 Session TerminalArea::currentSession() const {
     return clients.value(currentKey());
@@ -180,13 +188,14 @@ bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *erro
 }
 bool TerminalArea::restart(const BackendProfile &p, const Session &s, QString *error) {
     const auto key = sessionKey(p.id, s.id);
-    if (!parts.value(key) || !exits.contains(key)) {
+    if (!viewWidget(key) || (!exits.contains(key) && !placeholders.contains(key))) {
         *error = "The terminal is no longer available for restart.";
         return false;
     }
     return startSession(p, s, error);
 }
-bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QString *error) {
+bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QString *error,
+                                bool activate) {
     if (p.isContainer() && p.relaySocket.isEmpty()) {
         *error = "This container has no live desktop transport. Reconnect its host first.";
         return false;
@@ -206,8 +215,12 @@ bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QStri
     const auto key = sessionKey(p.id, s.id);
     const auto title =
         (fresh ? QString("New session") : s.title) + "  ·  " + p.name + "  ·  " + s.cwd;
+    if (!views.contains(key) && prepare(p, s, false).id.isEmpty()) {
+        *error = "Close a terminal before opening more than 512 views.";
+        return false;
+    }
     return launch(key, clientArguments(p, fresh ? QString() : s.id, s.cwd, localCodexExecutable),
-                  title, s, error);
+                  title, s, error, activate);
 }
 bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QString *error) {
     if (!p.validate().isEmpty() || !validText(path) || !QDir::isAbsolutePath(path)) {
@@ -223,7 +236,8 @@ bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QStr
     return startSession(p, s, error);
 }
 bool TerminalArea::launch(const QString &key, const QStringList &arguments, const QString &title,
-                          const Session &session, QString *error) {
+                          const Session &session, QString *error, bool activate) {
+    const bool replaceSelected = currentKey() == key;
     auto *part = create(error);
     if (!part)
         return false;
@@ -234,38 +248,54 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     auto s = session;
     s.terminalOpen = true;
     s.clientIssue.clear();
+    s.clientPending = false;
     clients[key] = s;
+    auto &v = views[key];
+    v.title = s.title;
+    v.cwd = s.cwd;
+    v.executionObserved = s.executionObserved;
+    v.executionEnvironment = s.executionEnvironment;
+    v.disposition = v.threadId.isEmpty() ? ViewDisposition::Unresolved : ViewDisposition::Automatic;
+    v.summary.clear();
     emit clientStateChanged(s);
     // Konsole already handles the Flatpak host boundary. Arguments stay separate.
     qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh", arguments);
-    stack->setCurrentWidget(part->widget());
+    if (activate || replaceSelected)
+        stack->setCurrentWidget(part->widget());
+    delete placeholders.take(key);
     delete old;
-    finishCycle(false);
-    remember(key);
-    part->widget()->setFocus();
+    if (activate) {
+        finishCycle(false);
+        remember(key);
+        part->widget()->setFocus();
+        emit sessionFocused(key);
+    }
     updateCurrent();
-    emit sessionFocused(key);
+    if (!frozen)
+        emit workspaceChanged();
     return true;
 }
 bool TerminalArea::focusSession(const QString &key) {
-    if (!parts.value(key))
+    if (!viewWidget(key))
         return false;
     finishCycle(false);
     remember(key);
     return showSession(key);
 }
 bool TerminalArea::showSession(const QString &key) {
-    auto *part = parts.value(key).data();
-    if (!part)
+    auto *widget = viewWidget(key);
+    if (!widget)
         return false;
-    stack->setCurrentWidget(part->widget());
-    part->widget()->setFocus();
+    stack->setCurrentWidget(widget);
+    widget->setFocus();
     updateCurrent();
     emit sessionFocused(key);
+    if (!frozen)
+        emit workspaceChanged();
     return true;
 }
 void TerminalArea::remember(const QString &key) {
-    if (key.isEmpty() || !parts.value(key))
+    if (key.isEmpty() || !viewWidget(key))
         return;
     recent.removeAll(key);
     recent.prepend(key);
@@ -274,7 +304,7 @@ QStringList TerminalArea::candidates(const QStringList &order, bool projects) co
     QStringList result;
     QSet<QString> seen;
     for (const auto &key : order) {
-        if (!parts.value(key))
+        if (!viewWidget(key))
             continue;
         const auto &session = clients.value(key);
         const auto project = projectKey(session.backendId, QDir::cleanPath(session.cwd));
@@ -297,7 +327,7 @@ void TerminalArea::finishCycle(bool commit) {
     cycleModifier = {};
     if (switcher)
         switcher->hide();
-    if (commit && parts.value(selected)) {
+    if (commit && viewWidget(selected)) {
         remember(selected);
         showSession(selected); // Only this path changes focus and records a visit.
     } else if (previousFocus && previousFocus->isVisible() && window()->isActiveWindow() &&
@@ -483,7 +513,13 @@ void TerminalArea::updateSession(const Session &session, const QString &serverNa
     auto current = session;
     current.terminalOpen = true;
     current.clientIssue = clients[key].clientIssue;
+    current.clientPending = clients[key].clientPending;
     clients[key] = current;
+    const bool changed = views[key].title != current.title || views[key].cwd != current.cwd;
+    views[key].title = current.title;
+    views[key].cwd = current.cwd;
+    if (changed && !frozen)
+        emit workspaceChanged();
     titles[key] = current.title + "  ·  " + serverName + "  ·  " + current.cwd;
     if (currentKey() == key)
         updateCurrent();
@@ -500,21 +536,24 @@ void TerminalArea::forgetClient(const QString &key) {
         return;
     s.terminalOpen = false;
     s.clientIssue.clear();
+    s.clientPending = false;
     emit clientStateChanged(s);
 }
 QString TerminalArea::currentKey() const {
-    for (auto it = parts.cbegin(); it != parts.cend(); ++it)
-        if (it.value() && it.value()->widget() == stack->currentWidget())
+    for (auto it = clients.cbegin(); it != clients.cend(); ++it)
+        if (viewWidget(it.key()) == stack->currentWidget())
             return it.key();
     return {};
 }
 void TerminalArea::updateCurrent() {
     const auto key = currentKey();
     exitText->setText(exits.value(key));
-    exitBar->setVisible(exits.contains(key));
+    exitBar->setVisible(exits.contains(key) || placeholders.contains(key));
     emit currentChanged(titles.value(key, "No terminal selected"));
 }
 void TerminalArea::processExited(int exitCode, bool crashed) {
+    if (frozen)
+        return;
     for (auto it = parts.cbegin(); it != parts.cend(); ++it)
         if (it.value() == sender()) {
             const auto key = it.key();
@@ -525,10 +564,17 @@ void TerminalArea::processExited(int exitCode, bool crashed) {
                           .arg(exitCode)
                     : "Terminal client closed. Its output is retained below.";
             clients[key].clientIssue = exits[key];
+            auto &v = views[key];
+            v.disposition =
+                v.threadId.isEmpty() ? ViewDisposition::Unresolved : ViewDisposition::Disconnected;
+            v.summary = QString(exits[key])
+                            .replace("Its output is retained below.",
+                                     "Output is not saved across restarts.");
             emit clientStateChanged(clients[key]);
             updateCurrent();
             refreshCycle();
             emit clientExited(key, exitCode, crashed);
+            emit workspaceChanged();
             return;
         }
 }
@@ -536,33 +582,170 @@ void TerminalArea::closeCurrent() {
     closeSession(currentKey());
 }
 void TerminalArea::closeSession(const QString &key) {
-    auto *part = parts.value(key).data();
-    if (!part)
+    if (!viewWidget(key))
         return;
+    const auto id = views.value(key).id;
     const bool current = currentKey() == key;
     forgetClient(key);
     titles.remove(key);
     exits.remove(key);
-    parts.remove(key);
+    views.remove(key);
+    auto *part = parts.take(key).data();
+    auto *placeholder = placeholders.take(key);
     if (current)
         stack->setCurrentWidget(empty);
     delete part;
+    delete placeholder;
     updateCurrent();
+    emit viewClosed(id);
+    if (!frozen)
+        emit workspaceChanged();
 }
 void TerminalArea::closeBackend(const QString &backend) {
-    QList<KParts::ReadOnlyPart *> doomed;
-    for (auto it = parts.begin(); it != parts.end();)
-        if (it.key().startsWith(backend + QChar(0x1f))) {
-            forgetClient(it.key());
-            titles.remove(it.key());
-            exits.remove(it.key());
-            if (it.value())
-                doomed << it.value();
-            it = parts.erase(it);
-        } else
-            ++it;
-    for (auto *p : doomed)
-        delete p;
+    const auto keys = clients.keys();
+    for (const auto &key : keys)
+        if (clients[key].backendId == backend)
+            closeSession(key);
+}
+QWidget *TerminalArea::viewWidget(const QString &key) const {
+    if (auto *part = parts.value(key).data())
+        return part->widget();
+    return placeholders.value(key);
+}
+bool TerminalArea::hasClient(const QString &key) const {
+    return parts.value(key) && !exits.contains(key);
+}
+WorkspaceView TerminalArea::view(const QString &key) const {
+    return views.value(key);
+}
+void TerminalArea::addPlaceholder(const WorkspaceView &v, const QString &serverName) {
+    const auto key = v.key();
+    views[key] = v;
+    auto *label = new QLabel;
+    label->setObjectName("terminalPlaceholder");
+    label->setFocusPolicy(Qt::StrongFocus);
+    label->setAlignment(Qt::AlignCenter);
+    label->setWordWrap(true);
+    label->setTextFormat(Qt::PlainText);
+    label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    placeholders[key] = label;
+    stack->addWidget(label);
+    Session s;
+    s.backendId = v.backendId;
+    s.id = v.threadId.isEmpty() ? "new-" + v.id : v.threadId;
+    s.title = v.title;
+    s.cwd = v.cwd;
+    s.terminalOpen = s.clientPending = true;
+    s.executionObserved = v.executionObserved;
+    s.executionEnvironment = v.executionEnvironment;
+    clients[key] = s;
+    titles[key] = v.title + "  ·  " + serverName + "  ·  " + v.cwd;
+    const auto note =
+        v.disposition == ViewDisposition::Unresolved
+            ? QString("Conversation ID unknown. Open the saved conversation from Projects. "
+                      "New-session launchers are never replayed automatically.")
+        : v.disposition == ViewDisposition::Disconnected
+            ? QString("Disconnected — reconnect explicitly when ready. ") + v.summary
+            : QString("Waiting for connection…");
+    openingState(v.id, note, false);
+}
+WorkspaceView TerminalArea::prepare(const BackendProfile &p, const Session &s, bool activate) {
+    const auto key = sessionKey(p.id, s.id);
+    if (!views.contains(key)) {
+        if (views.size() >= 512)
+            return {};
+        WorkspaceView v;
+        v.id = s.id.startsWith("new-") ? s.id.mid(4)
+                                       : QUuid::createUuid().toString(QUuid::WithoutBraces);
+        v.backendId = p.id;
+        if (!s.id.startsWith("new-"))
+            v.threadId = s.id;
+        v.title = s.title;
+        v.cwd = s.cwd;
+        v.sourceIdentity = workspaceSourceIdentity(p);
+        v.executionEnvironment = s.executionEnvironment;
+        v.executionObserved = s.executionObserved;
+        v.disposition =
+            v.threadId.isEmpty() ? ViewDisposition::Unresolved : ViewDisposition::Automatic;
+        addPlaceholder(v, p.name);
+        recent.append(key);
+        if (!frozen)
+            emit workspaceChanged();
+    }
+    if (!views[key].threadId.isEmpty() && views[key].disposition != ViewDisposition::Automatic) {
+        views[key].disposition = ViewDisposition::Automatic;
+        views[key].summary.clear();
+        if (!frozen)
+            emit workspaceChanged();
+    }
+    if (activate)
+        focusSession(key);
+    return views.value(key);
+}
+bool TerminalArea::startPrepared(const QString &id, const BackendProfile &p, const Session &s,
+                                 QString *error) {
+    const auto key = sessionKey(p.id, s.id);
+    if (!views.contains(key) || views[key].id != id || hasClient(key)) {
+        *error = "The terminal open was cancelled or already completed.";
+        return false;
+    }
+    views[key].sourceIdentity = workspaceSourceIdentity(p);
+    return startSession(p, s, error, false);
+}
+void TerminalArea::openingState(const QString &id, const QString &text, bool attention) {
+    for (auto it = views.begin(); it != views.end(); ++it) {
+        if (it->id != id)
+            continue;
+        const auto key = it.key();
+        exits[key] = text;
+        clients[key].clientIssue = text;
+        clients[key].clientPending = !attention;
+        if (attention) {
+            it->disposition = it->threadId.isEmpty() ? ViewDisposition::Unresolved
+                                                     : ViewDisposition::Disconnected;
+            it->summary = text.simplified().left(1024);
+        }
+        if (auto *label = qobject_cast<QLabel *>(placeholders.value(key)))
+            label->setText(text + "\n\n" + it->cwd + "\n" + it->threadId);
+        emit clientStateChanged(clients[key]);
+        updateCurrent();
+        if (attention && !frozen)
+            emit workspaceChanged();
+        return;
+    }
+}
+WorkspaceSnapshot TerminalArea::workspace() const {
+    WorkspaceSnapshot snapshot;
+    for (const auto &key : recent) {
+        if (!views.contains(key))
+            continue;
+        snapshot.views.append(views[key]);
+        snapshot.recent.append(views[key].id);
+    }
+    snapshot.selected = views.value(currentKey()).id;
+    return snapshot;
+}
+void TerminalArea::restoreWorkspace(const WorkspaceSnapshot &snapshot,
+                                    const QHash<QString, BackendProfile> &profiles) {
+    const bool oldFrozen = frozen;
+    frozen = true;
+    QHash<QString, QString> keys;
+    for (const auto &v : snapshot.views) {
+        if (views.contains(v.key()))
+            continue;
+        addPlaceholder(v, profiles.value(v.backendId).name);
+        keys[v.id] = v.key();
+    }
+    for (const auto &id : snapshot.recent)
+        if (keys.contains(id))
+            recent.append(keys[id]);
+    if (keys.contains(snapshot.selected))
+        stack->setCurrentWidget(viewWidget(keys[snapshot.selected]));
+    frozen = oldFrozen;
+    updateCurrent();
+}
+void TerminalArea::freezeWorkspace() {
+    frozen = true;
 }
 bool TerminalArea::smokeTest(QString *error) {
     auto *p = create(error);

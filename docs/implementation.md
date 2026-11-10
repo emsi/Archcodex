@@ -1264,3 +1264,80 @@ These supporting choices were made for that release:
 - Commit and push the release metadata, provenance and annotated version tag
   without force. No CI publisher, Flathub submission, unrelated source fix or
   rebuild of previous versions is included.
+
+## 0.8.0 — remembered terminal workspace (#3)
+
+Implemented workspace restoration with the user's explicit acceptance of the
+stock-TUI `/resume`, `/fork`, `/new` and agent-navigation limitations. The launch
+thread remains the saved target. Existing app-server rename events still update
+its title. No Codex modification, protocol observer or additional relay process
+was introduced. See [workspace behavior and future protocol observation](workspace.md).
+
+`WorkspaceSnapshot` is separate from cached sessions. Its SQLite snapshot is
+versioned, atomic, worker-written and coalesced. Stable view IDs, source evidence,
+dispositions, selection and MRU survive normal shutdown and offline startup.
+Unreadable/future records cannot be overwritten. Database schema 2 deliberately
+prevents older releases from opening the upgraded database; downgrade requires
+a pre-upgrade backup or separate data directory.
+
+`OpeningCoordinator` handles manual opens, retries and automatic restores with
+exact metadata reads, bounded concurrency, cancellation tokens and source
+generations. Offline sources consume no slots. Same-container execution evidence
+is required; shared history cannot authorize a different container. The terminal
+UI restores placeholders immediately, launches incrementally without recording
+visits or stealing focus, and retains disconnected/unresolved views for explicit
+action. Shutdown freezes intent before client teardown.
+
+### Validation and artifact
+
+All nine suites pass: discovery, containers, transport, core, workspace, runtime,
+model, window and terminal. Native core/protocol/Python tests passed; the workspace
+suite additionally passed after the final cancellation-safety adjustment. Real
+KDE runtime/X11 tests pass 22 window cases, 17 terminal cases and 28 model cases.
+Coverage includes 80 queued views, source replacement, cancelled replies that
+still occupy request slots, reconnects, failure/no-loop behavior, protected
+storage, exact IDs beyond the first history page, persisted rename, selection,
+MRU, focus, retained failures and offline restarts. The new placeholder and
+Application settings screenshots were inspected.
+
+A first full-window regression run exposed an existing test expecting a modal
+preflight-error dialog. That test now verifies the intended nonmodal placeholder,
+exact selected-server retry, stable view ID and absence of a terminal process.
+Direct-runtime testing also needed the existing temporary bridge symlink beside
+the ELF loader; that test-only symlink has been removed.
+
+The stripped package reports **0.8.0** and passes an X11 window/Konsole smoke test
+with fresh isolated data. Bundle installation into a separate project-local
+Flatpak installation succeeded; installed application/bridge/AppStream bytes and
+metadata match staging. Effective permissions are byte-identical to 0.7.1.
+The first isolated installation attempt failed because this container lacks a
+system D-Bus socket; as in prior builds, a temporary private D-Bus session supplied
+that address solely for the install check. Cache triggers still report blocked
+user namespaces. Full Flatpak sandbox execution and real desktop/SSH/container
+restore acceptance remain unverified here. Existing AppStream validation still
+reports the missing-homepage warning; desktop-entry, shell syntax, formatting
+and whitespace checks pass.
+
+Local test artifact: `dist/Archcodex-0.8.0-x86_64.flatpak`, 2,347,440 bytes.
+SHA-256: `877f9112dfa0a21639711b07116f7eeeb43c09f18b7aeb3e0040864020f9d992`.
+Flatpak commit: `3b8d7eae2d84a093d7dd91c135607ec7e8127ec20283601b0acae194b7940158`.
+The sibling `.flatpak.sha256` and `.BUILD-INFO.txt` identify the local artifact.
+No public release, tag, push, issue comment or issue closure is part of this task.
+
+### Decisions not agreed in advance
+
+Implementing #3 with limited in-TUI tracking, documenting a future proxy approach
+without modifying Codex, and committing completed authorized changes are explicit
+user instructions. The following supporting choices were made during this work:
+
+| Choice/action | Reason, affected files and consequences | Status |
+| --- | --- | --- |
+| Separate `WorkspaceView`/`WorkspaceSnapshot` records and an event-driven `OpeningCoordinator`; keep one view per backend/thread pair. | `src/workspace.*`, `src/opening.*`, `CMakeLists.txt`; stable UUIDs separate intent from cached sessions without adding a plugin framework. Record version 1, max 512 views/4 MiB, strict navigation validation and SHA-256 logical source identity. A future observer can reassociate views; current in-TUI switches cannot. | Implemented and tested. |
+| Database schema 2 and one monotonically revised workspace row, coalesced through the existing worker. | `src/store.*`, `src/asyncstore.*`; no new dependency. Old versions reject the upgraded database. Corrupt/future records and failed writes disable workspace saving for that run, preserving prior data. Individual failed operations no longer discard the rest of a queued cache batch. | Migration, atomicity, stale-write, corruption and flush tests pass. Downgrade procedure documented. |
+| Four outstanding verification reads globally, two per host key, at most three remote; one widget launch per event iteration. | `src/opening.*`, `src/backend.*`, `src/asyncbackend.*`; explicit requests and saved selection get priority, cancelled reads still count until completion, offline sources do not block ready ones. Verification responses now carry tokens and exact metadata; inventory failure has an explicit signal so evidence waiting can finish. No new transport/process ownership. | 80-view, disconnect, replacement, cancellation and provenance tests pass. |
+| Reuse placeholders and existing terminal navigation; add a nonmodal workspace detail window/status button and Connections action. | `src/terminal.*`, `src/window.*`, `src/types.*`; no visits/focus changes on automatic restore, no modal error storm. Exited clients remain disconnected and summaries replace persisted terminal output. Removing a remote myCodex host explicitly closes its views; disabling it keeps them. | Real KPart and X11 tests pass; screenshots reviewed. |
+| Default startup restoration on; continue recording the current workspace when off. Unknown New IDs remain unresolved and their launcher is never replayed by restoration/reconnect. | `src/settingsdialog.*`, `src/window.*`, `src/terminal.*`; toggle applies next startup. A disabled startup begins empty, and saving that run replaces the prior workspace. GUI Fork keeps the confirmed returned ID. Rename remains event-driven. | Implemented; settings, offline restart and rename tests pass. |
+| Keep exact-ID preflight and avoid archive scans or unarchive mutations. | `src/backend.cpp`, `docs/workspace.md`; known archive/removal events fail preflight. An offline archive not identified by Codex's metadata may instead be rejected by the TUI, with output retained and no retry loop. Reliable per-view proxy observation is documented, not implemented. | Protocol limitation explicit; no Codex patch. |
+| Use 0.8.0 for a local development bundle, preserving published 0.7.1 assets and dependencies. | `CMakeLists.txt`, `data/`, `scripts/build-flatpak.sh`, `README.md`, `docs/workspace.md`, this log; README's published download still points to 0.7.1, while source build instructions use 0.8.0. Existing KDE 6.11/Konsole 26.04.3 and Flatpak permissions retained. | Bundle and checksum built/installed locally; publication and real-host acceptance remain separate. |
+| Add isolated protocol/storage, window and terminal regressions; reuse extracted SDK/runtime with privileged chroot only for builds/install-to-staging. | `tests/test_workspace.cpp`, `tests/test_window.cpp`, `tests/test_terminal.cpp`; controlled fixtures, temporary clients, Xvfb, fresh data and a private install bus. No production conversation or credential access. Local Codex 0.166.0 probes used isolated homes and no model turns to test rename and TUI-switch behavior. | Tests and packaged smoke pass; owned clients/transports/Xvfb/probe processes are gone, temporary runtime bridge link removed. |
+| Retain reproducible test/build evidence locally and commit this task on the existing branch. | Ignored `.build/issue-3/` contains official Codex source/probes, logs, screenshots, isolated data, repository and Flatpak install; `.build/package-0.8.0`, SDK staging and `dist/` contain build artifacts. Existing SDK/native build caches were reused. No normal desktop installation, global settings change, external message, push or publication. | Local artifacts retained; implementation committed under the standing instruction. |

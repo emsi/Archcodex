@@ -60,6 +60,88 @@ QString candidate(TerminalArea &area) {
 class TerminalTests : public QObject {
     Q_OBJECT
   private slots:
+    void restoredPlaceholdersPreserveNavigationAndExitIntent() {
+        QTemporaryDir dir;
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/usr/bin/python3\nimport time\ntime.sleep(30)\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        BackendProfile p{"b", "Fixture", "local-unix", "/unused", script.fileName(), false};
+        p.identity["codexHome"] = "/home/test/.codex";
+        WorkspaceSnapshot saved;
+        for (const auto &id : {QString("a"), QString("b")}) {
+            WorkspaceView v;
+            v.id = "view-" + id;
+            v.backendId = p.id;
+            v.threadId = id;
+            v.cwd = dir.path();
+            v.title = id;
+            v.sourceIdentity = workspaceSourceIdentity(p);
+            saved.views << v;
+            saved.recent << v.id;
+        }
+        saved.selected = "view-b";
+        QWidget window;
+        auto *layout = new QVBoxLayout(&window);
+        auto *outside = new QLineEdit;
+        auto *area = new TerminalArea;
+        layout->addWidget(outside);
+        layout->addWidget(area);
+        window.resize(800, 500);
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QSignalSpy focused(area, &TerminalArea::sessionFocused);
+        area->restoreWorkspace(saved, {{p.id, p}});
+        QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 0);
+        QCOMPARE(area->workspace().json(), saved.json());
+        outside->setFocus();
+        for (const auto &v : saved.views) {
+            auto session =
+                Session::fromThread(p.id, {{"id", v.threadId}, {"name", v.title}, {"cwd", v.cwd}});
+            QString error;
+            QVERIFY2(area->startPrepared(v.id, p, session, &error), qPrintable(error));
+            QCOMPARE(area->currentKey(), sessionKey(p.id, "b"));
+            QCOMPARE(area->workspace().recent, saved.recent);
+            QCOMPARE(QApplication::focusWidget(), outside);
+        }
+        QCOMPARE(focused.size(), 0);
+        QVERIFY(area->findChildren<QLabel *>("terminalPlaceholder").isEmpty());
+        area->freezeWorkspace();
+        const auto intent = area->workspace().json();
+        for (auto *part : area->findChildren<KParts::ReadOnlyPart *>())
+            QVERIFY(QMetaObject::invokeMethod(part, "terminalProcessExited", Q_ARG(int, 1),
+                                              Q_ARG(bool, false)));
+        QCOMPARE(area->workspace().json(), intent);
+    }
+    void unresolvedAndExitedViewsNeverCreateClientsOnRestore() {
+        TerminalArea original;
+        BackendProfile p{"b", "Fixture"};
+        auto s =
+            Session::fromThread(p.id, {{"id", "saved"}, {"cwd", "/work"}, {"name", "Original"}});
+        const auto v = original.prepare(p, s, true);
+        original.openingState(v.id, "Missing session", true);
+        s.id = "new-fresh";
+        original.prepare(p, s, true);
+        auto snapshot = original.workspace();
+        QVERIFY(snapshot.validate().isEmpty());
+        TerminalArea restored;
+        restored.restoreWorkspace(snapshot, {{p.id, p}});
+        QCOMPARE(restored.workspace().json(), snapshot.json());
+        QCOMPARE(restored.findChildren<KParts::ReadOnlyPart *>().size(), 0);
+        QCOMPARE(restored.findChildren<QLabel *>("terminalPlaceholder").size(), 2);
+        auto renamed = s;
+        renamed.id = "saved";
+        renamed.title = "Renamed through app-server";
+        restored.updateSession(renamed, p.name);
+        QCOMPARE(restored.view(sessionKey(p.id, "saved")).title, renamed.title);
+        QSignalSpy closed(&restored, &TerminalArea::viewClosed);
+        restored.closeSession(sessionKey(p.id, "saved"));
+        QCOMPARE(closed.size(), 1);
+        QCOMPARE(closed.first()[0].toString(), v.id);
+        QCOMPARE(restored.workspace().views.size(), 1);
+    }
     void scrollbackShortcutsStayLocal_data() {
         QTest::addColumn<bool>("enhancedKeyboard");
         QTest::newRow("legacy") << false;
@@ -533,6 +615,8 @@ class TerminalTests : public QObject {
         auto client = qvariant_cast<Session>(states.last()[0]);
         QVERIFY(client.terminalOpen && client.isActive());
         QVERIFY(!client.clientIssue.isEmpty());
+        QCOMPARE(area.workspace().views.first().disposition, ViewDisposition::Disconnected);
+        QVERIFY(area.workspace().views.first().summary.contains("not saved across restarts"));
         QVERIFY(!client.isRunning() && !client.isWaiting());
         QVERIFY(area.focusSession(sessionKey("b", "first")));
         session.id = "first";

@@ -5,6 +5,7 @@
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "launch.h"
+#include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
@@ -483,6 +484,34 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             disabledContainerHosts.insert(id);
         addContainerHost(id, host, false);
     }
+    opening = new OpeningCoordinator(this);
+    workspaceStatus = new QToolButton(this);
+    workspaceStatus->setObjectName("workspaceStatus");
+    workspaceStatus->setAutoRaise(true);
+    workspaceStatus->setToolTip("Remembered terminal views and restoration details");
+    statusBar()->addPermanentWidget(workspaceStatus);
+    connect(workspaceStatus, &QToolButton::clicked, this, &Window::showWorkspaceDetails);
+    connect(opening, &OpeningCoordinator::stateChanged, terminal, &TerminalArea::openingState);
+    connect(opening, &OpeningCoordinator::progressChanged, this, &Window::updateWorkspaceStatus);
+    connect(opening, &OpeningCoordinator::launchRequested, this,
+            [this](const QString &view, const BackendProfile &profile, Session session) {
+                if (closing)
+                    return;
+                const auto key = sessionKey(profile.id, session.id);
+                session.opened = sessions.value(key).opened;
+                QString issue;
+                if (!terminal->startPrepared(view, profile, session, &issue))
+                    terminal->openingState(view, issue, true);
+            });
+    connect(terminal, &TerminalArea::viewClosed, opening, &OpeningCoordinator::cancel);
+    connect(terminal, &TerminalArea::connectionsRequested, this, &Window::connectionsDialog);
+    connect(terminal, &TerminalArea::workspaceChanged, this, &Window::queueWorkspaceSave);
+    connect(store.get(), &AsyncStore::workspaceFailed, this, [this](const QString &error) {
+        workspaceError = error;
+        workspaceWritable = false;
+        updateWorkspaceStatus();
+    });
+    updateWorkspaceStatus();
     connect(
         store.get(), &AsyncStore::loaded, this, [this, connectOnStart](const StoreSnapshot &cache) {
             for (const auto &p : cache.profiles) {
@@ -499,6 +528,37 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 }
                 attach(p, connectOnStart && p.autoConnect && !p.discovered && !p.isContainer());
             }
+            workspaceError = cache.workspaceError;
+            workspaceWritable = workspaceError.isEmpty();
+            workspaceRevision = cache.workspace.revision;
+            const bool restore = QSettings(dataDirectory + "/window.ini", QSettings::IniFormat)
+                                     .value("application/restoreOpenedTerminals", true)
+                                     .toBool();
+            if (workspaceWritable && restore) {
+                QSet<QString> remembered;
+                for (const auto &view : cache.workspace.views)
+                    remembered.insert(view.key());
+                for (const auto &session : cache.sessions) {
+                    const auto key = sessionKey(session.backendId, session.id);
+                    if (remembered.contains(key) && !sessions.contains(key))
+                        sessions[key] = session;
+                }
+                terminal->restoreWorkspace(cache.workspace, profiles);
+                // Selected first, then saved MRU. Placeholders require no processes.
+                auto order = cache.workspace.recent;
+                if (!cache.workspace.selected.isEmpty()) {
+                    order.removeAll(cache.workspace.selected);
+                    order.prepend(cache.workspace.selected);
+                }
+                QHash<QString, WorkspaceView> views;
+                for (const auto &view : cache.workspace.views)
+                    views[view.id] = view;
+                for (const auto &id : order)
+                    if (views[id].disposition == ViewDisposition::Automatic)
+                        opening->request(views[id], true);
+            }
+            workspaceLoaded = true;
+            updateWorkspaceStatus();
             cachePending = cache.sessions;
             restoreCache(connectOnStart);
         });
@@ -540,6 +600,7 @@ void Window::restoreCache(bool connectOnStart) {
         discover();
 }
 Window::~Window() {
+    freezeWorkspace();
     qApp->disconnect(this);
     discovery->disconnect(this);
     delete discovery;
@@ -608,8 +669,6 @@ void Window::attach(const BackendProfile &p, bool start) {
                 connectionReady[id] = ready;
                 if (!ready) {
                     QList<Session> updates, matches;
-                    if (pendingOpen.startsWith(id + QChar(0x1f)))
-                        pendingOpen.clear();
                     for (auto it = sessions.begin(); it != sessions.end(); ++it)
                         if (it->backendId == id) {
                             it->known = false;
@@ -697,38 +756,10 @@ void Window::attach(const BackendProfile &p, bool start) {
             profile.identity[it.key()] = it.value();
         if (profile.isContainer() && identity["codexHome"].isString())
             profile.identity["serverCodexHome"] = identity["codexHome"];
+        opening->updateProfile(profile);
         refreshNames();
         persist([&] { store->save(profile); });
     });
-    connect(
-        b, &Backend::sessionVerified, this,
-        [this, id = p.id](const QString &thread, const QString &issue) {
-            const auto key = sessionKey(id, thread);
-            if (pendingOpen != key)
-                return;
-            const bool restart = pendingRestart;
-            pendingOpen.clear();
-            pendingRestart = false;
-            if (!issue.isEmpty()) {
-                error("This server could not open the session:\n" + issue);
-                return;
-            }
-            auto s = sessions.value(key);
-            if (profiles[id].isContainer() &&
-                (!s.executionObserved || s.executionEnvironment != profiles[id].environmentId)) {
-                error("This is shared history. Archcodex has not observed this conversation "
-                      "loaded in this container. Open it in its original environment first; "
-                      "it will then become available here through server events.");
-                return;
-            }
-            QString launchError;
-            const bool opened = restart ? terminal->restart(profiles[id], s, &launchError)
-                                        : terminal->open(profiles[id], s, &launchError);
-            if (!opened) {
-                error(launchError);
-                return;
-            }
-        });
     connect(b, &Backend::sessionForked, this,
             [this, id = p.id](const QString &source, const Session &session, const QString &issue) {
                 if (!pendingForks.remove(sessionKey(id, source)))
@@ -738,11 +769,9 @@ void Window::attach(const BackendProfile &p, bool start) {
                     return;
                 }
                 applySessions({session});
-                QString launchError;
-                if (!terminal->open(profiles[id], sessions.value(sessionKey(id, session.id)),
-                                    &launchError))
-                    error("The fork was created, but its terminal could not open:\n" + launchError);
+                openSession(id, sessions.value(sessionKey(id, session.id)));
             });
+    opening->setSource(p, b);
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
     else
@@ -840,6 +869,7 @@ void Window::applySessions(const QList<Session> &items) {
         s.opened = old.opened;
         s.terminalOpen = old.terminalOpen;
         s.clientIssue = old.clientIssue;
+        s.clientPending = old.clientPending;
         s.contextRequired = profiles[s.backendId].isContainer();
         if (s.contextRequired) {
             const auto environment = profiles[s.backendId].environmentId;
@@ -910,12 +940,13 @@ void Window::containerHostsDialog() {
     QDialog dialog(this);
     dialog.setWindowTitle("myCodex hosts");
     auto *layout = new QVBoxLayout(&dialog);
-    auto *description = new QLabel(
-        "Local containers are discovered automatically. Remote discovery uses "
-        "host OpenSSH and requires a known host key and non-interactive authentication "
-        "(for example, "
-        "your SSH agent). Docker and Python 3 must be available on each host. "
-        "Disabling or removing a host disconnects its terminals; their output is retained.");
+    auto *description =
+        new QLabel("Local containers are discovered automatically. Remote discovery uses "
+                   "host OpenSSH and requires a known host key and non-interactive authentication "
+                   "(for example, "
+                   "your SSH agent). Docker and Python 3 must be available on each host. "
+                   "Disabling a host disconnects its clients and keeps their terminal views. "
+                   "Removing a host closes its terminal views.");
     description->setWordWrap(true);
     layout->addWidget(description);
     auto *list = new QListWidget;
@@ -1001,8 +1032,10 @@ void Window::containerHostsDialog() {
         containerProblems.remove(id);
         disabledContainerHosts.remove(id);
         for (const auto &p : profiles)
-            if (p.discoveryHost == id)
+            if (p.discoveryHost == id) {
+                terminal->closeBackend(p.id);
                 backends[p.id]->disconnectServer();
+            }
         saveContainerHosts();
         updateContainerSummary();
     });
@@ -1118,6 +1151,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                         }
             }
             profiles[p.id] = p;
+            opening->updateProfile(p);
             store->save(p);
             model->backendEnvironment(p.id, p.environmentId);
             results->backendEnvironment(p.id, p.environmentId);
@@ -1236,8 +1270,6 @@ void Window::presentProfile(const BackendProfile &p, const QString &label) {
     }
 }
 void Window::terminalFocused(const QString &key) {
-    pendingOpen.clear();
-    pendingRestart = false;
     auto it = sessions.find(key);
     if (it == sessions.end())
         return;
@@ -1260,13 +1292,10 @@ void Window::terminalFocused(const QString &key) {
 }
 void Window::clientStateChanged(const Session &client) {
     const auto key = sessionKey(client.backendId, client.id);
-    if (!client.terminalOpen && pendingOpen == key) {
-        pendingOpen.clear();
-        pendingRestart = false;
-    }
     auto s = sessions.value(key, client);
     s.terminalOpen = client.terminalOpen;
     s.clientIssue = client.clientIssue;
+    s.clientPending = client.clientPending;
     if (!s.terminalOpen && s.id.startsWith("new-")) {
         sessions.remove(key);
         model->remove(s.backendId, s.id);
@@ -1282,22 +1311,20 @@ void Window::clientStateChanged(const Session &client) {
     }
 }
 void Window::restartTerminal(const Session &client) {
-    pendingOpen.clear();
-    pendingRestart = false;
-    const auto id = client.backendId;
-    if (!profiles.contains(id) || !backends.value(id) || !backends[id]->ready()) {
-        error("Connect this backend before restarting its terminal.");
+    const auto view = profiles.contains(client.backendId)
+                          ? terminal->prepare(profiles[client.backendId], client, false)
+                          : terminal->view(sessionKey(client.backendId, client.id));
+    opening->request(view, false);
+}
+void Window::openSession(const QString &backend, const Session &session) {
+    if (!profiles.contains(backend))
+        return;
+    const auto view = terminal->prepare(profiles[backend], session, true);
+    if (view.id.isEmpty()) {
+        statusBar()->showMessage("Close a terminal before opening more than 512 views.");
         return;
     }
-    if (client.id.startsWith("new-")) {
-        QString issue;
-        if (!terminal->restart(profiles[id], client, &issue))
-            error(issue);
-        return;
-    }
-    pendingOpen = sessionKey(id, client.id);
-    pendingRestart = true;
-    backends[id]->verifySession(client.id);
+    opening->request(view, false);
 }
 void Window::updateSummary() {
     int count = 0;
@@ -1413,22 +1440,25 @@ void Window::showSettings() {
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
     SettingsDialog dialog(hideUnsaved->isChecked(),
                           settings.value("backends/myCodex/showAllSessions", false).toBool(),
-                          configuredLocalCodex, this, commands);
-    connect(&dialog, &SettingsDialog::settingsApplied, this,
-            [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable) {
-                hideUnsaved->setChecked(hide);
-                QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
-                settings.setValue("backends/myCodex/showAllSessions", showAll);
-                settings.setValue("application/localCodexExecutable", localExecutable);
-                settings.sync();
-                configuredLocalCodex = localExecutable;
-                terminal->setLocalCodexExecutable(
-                    configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
-                model->setMyCodexWorkdirOnly(!showAll);
-                results->setMyCodexWorkdirOnly(!showAll);
-                if (globalSearchActive)
-                    updateSearchSummary();
-            });
+                          configuredLocalCodex, this, commands,
+                          settings.value("application/restoreOpenedTerminals", true).toBool());
+    connect(
+        &dialog, &SettingsDialog::settingsApplied, this,
+        [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable, bool restore) {
+            hideUnsaved->setChecked(hide);
+            QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+            settings.setValue("backends/myCodex/showAllSessions", showAll);
+            settings.setValue("application/localCodexExecutable", localExecutable);
+            settings.setValue("application/restoreOpenedTerminals", restore);
+            settings.sync();
+            configuredLocalCodex = localExecutable;
+            terminal->setLocalCodexExecutable(
+                configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
+            model->setMyCodexWorkdirOnly(!showAll);
+            results->setMyCodexWorkdirOnly(!showAll);
+            if (globalSearchActive)
+                updateSearchSummary();
+        });
     dialog.exec();
 }
 void Window::showDiscoveryDetails() {
@@ -1687,6 +1717,7 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
             p.environmentId = environment;
             persist([&] { store->save(p); });
         }
+        opening->updateProfile(p);
         model->backendEnvironment(id, environment);
         results->backendEnvironment(id, environment);
         for (const auto &s : sessions)
@@ -1726,19 +1757,14 @@ void Window::activate(const QModelIndex &index) {
         return;
     const auto backend = index.data(BackendRole).toString();
     const auto key = sessionKey(backend, id);
-    pendingOpen.clear();
-    pendingRestart = false;
     if (terminal->focusSession(key)) {
+        // A visit prioritizes a pending restore, but never restarts an exited client.
+        const auto view = terminal->view(key);
+        if (!terminal->hasClient(key) && view.disposition == ViewDisposition::Automatic)
+            opening->request(view, false);
         return;
     }
-    if (!profiles.contains(backend))
-        return;
-    if (!backends.value(backend) || !backends[backend]->ready()) {
-        error("Connect this backend before opening its terminal.");
-        return;
-    }
-    pendingOpen = key;
-    backends[backend]->verifySession(id);
+    openSession(backend, sessions.value(key, searchSessions.value(key)));
 }
 bool Window::showingSearch() const {
     return globalSearchActive && tabs->currentIndex() == int(SessionView::All);
@@ -1949,7 +1975,85 @@ void Window::updateSearchSummary() {
 bool Window::smokeTest(QString *error) {
     return terminal->smokeTest(error);
 }
+void Window::queueWorkspaceSave() {
+    updateWorkspaceStatus();
+    if (closing || !workspaceLoaded || !workspaceWritable || workspaceSaving)
+        return;
+    workspaceSaving = true;
+    QTimer::singleShot(0, this, [this] {
+        workspaceSaving = false;
+        if (!closing)
+            saveWorkspace();
+    });
+}
+void Window::saveWorkspace() {
+    if (!workspaceLoaded || !workspaceWritable)
+        return;
+    auto snapshot = terminal->workspace();
+    snapshot.revision = ++workspaceRevision;
+    store->save(snapshot);
+}
+void Window::freezeWorkspace() {
+    if (closing)
+        return;
+    // Capture intent before transport teardown can report client exits.
+    saveWorkspace();
+    closing = true;
+    opening->stop();
+    terminal->freezeWorkspace();
+}
+void Window::updateWorkspaceStatus() {
+    const auto pending = opening->pendingCount();
+    workspaceStatus->setText(!workspaceError.isEmpty() ? "Workspace needs attention…"
+                             : pending ? QString("%1 pending terminal(s)…").arg(pending)
+                                       : "Terminal workspace…");
+}
+void Window::showWorkspaceDetails() {
+    auto *dialog = new QDialog(this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle("Terminal workspace");
+    auto *layout = new QVBoxLayout(dialog);
+    auto *info = new QLabel(
+        "Restoration uses the conversation opened by Archcodex. Switching with /resume, /fork, "
+        "/new or agent navigation inside the TUI can leave that saved target unchanged. "
+        "New-session launchers with no confirmed ID remain disconnected after restart. "
+        "Open the desired saved conversation from Projects to remember it reliably.");
+    info->setWordWrap(true);
+    layout->addWidget(info);
+    auto *list = new QListWidget;
+    layout->addWidget(list);
+    const auto refresh = [this, list] {
+        list->clear();
+        if (!workspaceError.isEmpty())
+            list->addItem(
+                "Workspace persistence is unavailable; its last saved data is preserved: " +
+                workspaceError);
+        for (const auto &view : terminal->workspace().views) {
+            const auto client = sessions.value(view.key());
+            auto *item = new QListWidgetItem(
+                view.title + " — " +
+                    (terminal->hasClient(view.key()) ? QString("Client open") : client.clientIssue),
+                list);
+            item->setToolTip(view.cwd + "\n" + view.threadId);
+            item->setData(Qt::UserRole, view.key());
+        }
+    };
+    connect(terminal, &TerminalArea::clientStateChanged, dialog, refresh);
+    connect(terminal, &TerminalArea::workspaceChanged, dialog, refresh);
+    connect(list, &QListWidget::itemActivated, dialog, [this](QListWidgetItem *item) {
+        terminal->focusSession(item->data(Qt::UserRole).toString());
+    });
+    auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+    auto *connections = buttons->addButton("Connections…", QDialogButtonBox::ActionRole);
+    connect(connections, &QPushButton::clicked, this, &Window::connectionsDialog);
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::close);
+    layout->addWidget(buttons);
+    refresh();
+    dialog->resize(680, 420);
+    dialog->show();
+}
 void Window::closeEvent(QCloseEvent *event) {
+    freezeWorkspace();
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
     settings.setValue("geometry", saveGeometry());
     settings.setValue("splitter", splitter->saveState());

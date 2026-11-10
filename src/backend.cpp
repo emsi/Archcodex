@@ -393,6 +393,7 @@ void CodexBackend::loadedPage(const QString &cursor) {
         p["cursor"] = cursor;
     request("thread/loaded/list", p, [this, cursor](const auto &r, const QString &error) {
         if (!error.isEmpty()) {
+            emit loadedInventoryFailed();
             emit connectionChanged("Connected — loaded-session inventory unavailable: " + error,
                                    true);
             return;
@@ -404,6 +405,7 @@ void CodexBackend::loadedPage(const QString &cursor) {
         }
         const auto next = r["nextCursor"].toString();
         if (!next.isEmpty() && next == cursor) {
+            emit loadedInventoryFailed();
             emit connectionChanged(
                 "Connected — loaded-session inventory repeated a page; coverage is incomplete",
                 true);
@@ -483,25 +485,27 @@ void CodexBackend::readFailure(const QString &id, const QString &error) {
         emit sessionChanged(s);
     }
 }
-void CodexBackend::verifySession(const QString &id) {
+void CodexBackend::verifySession(const QString &id, quint64 token) {
     if (!initialized) {
-        emit sessionVerified(id, "This server is disconnected.");
+        emit sessionVerified(id, "This server is disconnected.", token);
         return;
     }
     if (id.isEmpty() || !validText(id, 128)) {
-        emit sessionVerified(id, "Invalid session identifier.");
+        emit sessionVerified(id, "Invalid session identifier.", token);
         return;
     }
     request("thread/read", {{"threadId", id}, {"includeTurns", false}},
-            [this, id](const auto &r, const QString &error) {
+            [this, id, token](const auto &r, const QString &error) {
                 auto issue = error;
+                if (issue.isEmpty() && removed.contains(id))
+                    issue = "This conversation was archived or removed.";
                 if (issue.isEmpty() && r["thread"].toObject()["id"].toString() != id)
                     issue = "Server returned metadata for a different session.";
                 if (issue.isEmpty())
                     upsert(r["thread"].toObject(), true);
                 else
                     readFailure(id, issue);
-                emit sessionVerified(id, issue);
+                emit sessionVerified(id, issue, token, sessions.value(id));
             });
 }
 void CodexBackend::forkSession(const QString &id, const QString &priorExecutionEnvironment) {

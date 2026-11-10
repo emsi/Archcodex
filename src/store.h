@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
 #include "types.h"
+#include "workspace.h"
 #include <QList>
 #include <QSqlDatabase>
 
@@ -14,6 +15,8 @@ class Store {
     QList<BackendProfile> backends() const;
     QList<Project> projects() const;
     QList<Session> sessions() const;
+    WorkspaceSnapshot workspace() const;
+    void save(const WorkspaceSnapshot &snapshot);
     void save(const BackendProfile &profile);
     void save(const Project &project);
     void save(const Session &session);
@@ -22,5 +25,6 @@ class Store {
 
   private:
     QSqlDatabase db;
+    mutable bool workspaceReadable = true;
 };
 } // namespace Archcodex

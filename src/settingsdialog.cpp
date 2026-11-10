@@ -15,7 +15,7 @@
 
 namespace Archcodex {
 SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExecutable,
-                               QWidget *parent, Commands *registry)
+                               QWidget *parent, Commands *registry, bool restore)
     : QDialog(parent), commands(registry) {
     setWindowTitle("Configure Archcodex");
     setObjectName("settingsDialog");
@@ -51,6 +51,16 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
         content->addStretch();
     };
     auto *application = page("Application", "Application preferences");
+    restoreOpened = new QCheckBox("Restore opened terminals on startup");
+    restoreOpened->setObjectName("restoreOpenedTerminals");
+    restoreOpened->setChecked(restore);
+    application->addWidget(restoreOpened);
+    auto *restoreHelp = new QLabel(
+        "Takes effect at next startup. Saves the conversation opened by Archcodex; in-TUI "
+        "/resume, /fork, /new and agent switches are not tracked. New-session launchers with "
+        "no confirmed ID are remembered as disconnected views. Terminal output is not saved.");
+    restoreHelp->setWordWrap(true);
+    application->addWidget(restoreHelp);
     hideUnsaved = new QCheckBox("Hide unsaved sessions");
     hideUnsaved->setObjectName("hideUnsavedSetting");
     hideUnsaved->setChecked(hide);
@@ -140,7 +150,8 @@ bool SettingsDialog::apply() {
             return false;
         }
     }
-    emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked(), executable);
+    emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked(), executable,
+                         restoreOpened->isChecked());
     return true;
 }
 } // namespace Archcodex

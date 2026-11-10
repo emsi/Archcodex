@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(Archcodex VERSION 0.7.1 LANGUAGES CXX)
+project(Archcodex VERSION 0.8.0 LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -14,7 +14,8 @@ find_package(Threads REQUIRED)
 
 add_library(archcodex-core src/types.cpp src/store.cpp src/backend.cpp src/localbackend.cpp
   src/discovery.cpp src/discovery.qrc src/launch.cpp src/worker.cpp src/asyncbackend.cpp
-  src/asyncstore.cpp src/containerdiscovery.cpp src/jsonprocess.cpp)
+  src/asyncstore.cpp src/containerdiscovery.cpp src/jsonprocess.cpp src/workspace.cpp
+  src/opening.cpp)
 target_include_directories(archcodex-core PUBLIC src)
 target_link_libraries(archcodex-core PUBLIC Qt6::Core Qt6::Network Qt6::Sql)
 target_compile_definitions(archcodex-core PUBLIC ARCHCODEX_VERSION="${PROJECT_VERSION}")
@@ -57,6 +58,9 @@ if(BUILD_TESTING)
   target_compile_definitions(test-core PRIVATE BRIDGE_PATH="$<TARGET_FILE:archcodex-bridge>")
   add_dependencies(test-core archcodex-bridge)
   add_test(NAME core COMMAND test-core)
+  add_executable(test-workspace tests/test_workspace.cpp)
+  target_link_libraries(test-workspace PRIVATE archcodex-core Qt6::Test)
+  add_test(NAME workspace COMMAND test-workspace)
   add_executable(test-runtime tests/test_runtime.cpp)
   target_link_libraries(test-runtime PRIVATE archcodex-core Qt6::Test Qt6::WebSockets)
   target_compile_definitions(test-runtime PRIVATE BRIDGE_PATH="$<TARGET_FILE:archcodex-bridge>")
