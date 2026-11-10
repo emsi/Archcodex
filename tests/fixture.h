@@ -26,6 +26,8 @@ class Fixture : public QObject {
     QStringList readIds;
     bool delaySnapshot = false;
     bool delayRead = false;
+    bool delaySearch = false;
+    QList<QJsonValue> searchIds;
     QJsonValue readId = QJsonValue::Undefined;
     bool failLoadedInventory = false;
     QJsonValue snapshotId = QJsonValue::Undefined;
@@ -98,6 +100,9 @@ class Fixture : public QObject {
                                             {"error", QJsonObject{{"message", forkError}}}})
                                 .toJson()));
                 } else if (method == "thread/search") {
+                    searchIds << m["id"];
+                    if (delaySearch)
+                        return;
                     const bool second = m["params"].toObject().contains("cursor");
                     reply(m["id"],
                           {{"data",

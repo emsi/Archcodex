@@ -1055,3 +1055,68 @@ actual local/remote myCodex TUI use, clipboard/image input and the complete Flat
 host-command boundary still require testing on the user's desktop. Fully quit
 the old application, install the 0.6.1 bundle, relaunch and confirm the version in
 About. Connect / retry alone cannot replace 0.6.0's executable-resolution code.
+
+## 0.6.2 independent Projects search and tab filters
+
+[Issue #1](https://github.com/emsi/Archcodex/issues/1) is implemented. All retains
+explicit Enter-to-submit, server-side conversation search, scoped requests,
+pagination, visibility rules, error reporting and stale-reply rejection. Its
+results can arrive while another tab is visible without replacing that tab's tree
+or feedback. Tab navigation remains enabled.
+
+Active, Running, Waiting and Opened filter cached titles, working-directory paths
+and session IDs as the user types. Matching is case-insensitive literal text, not
+regular expressions or conversation-body search. The model intersects text and
+scope with the existing membership and visibility rules before rebuilding compact
+folders and counts. Pushed session changes and terminal lifecycle signals update
+matches through the same path. Query editing, clearing and tab switching do not
+search the backend, fetch history, open terminals or introduce polling.
+
+Window state stores each tab's query, captured scope and navigation separately,
+including a snapshot of navigation before filtering. A selected scope remains
+anchored when filtering removes its row; missing selection fails closed. Queries
+remain transient for this application run. The UI distinguishes search from local
+filtering in placeholders, accessible names, tooltips and result feedback. See
+[the interaction specification](ui.md#6-search-and-connections).
+
+### Decisions not agreed in advance
+
+Addressing the issue authorized the behavior, regression coverage and UI-document
+update. The standing instruction explicitly requires committing completed work.
+The following implementation and delivery choices were made during this task:
+
+| Choice/action | Reason, files, consequences and status |
+| --- | --- |
+| Search cached title, cwd and session ID using case-insensitive literal substrings. | `src/sessionmodel.*`, `src/window.cpp`; explicit, inexpensive semantics with no new index, dependency, conversation cache, regular-expression syntax or network calls. Implemented and covered by model/window tests. |
+| Apply the local predicate in the source model before grouping; keep the global results model separate. | `src/sessionmodel.*`, `src/window.*`; preserves compact paths, counts, visibility exceptions and backend identity. An All search may finish in the background; stale tokens still reject superseded replies. Implemented and tested. |
+| Retain per-tab queries and navigation in memory, anchor selected scopes, initially expand matches, and restore pre-filter navigation on clearing. | `src/window.*`, `docs/ui.md`; no settings migration or persistence of transient queries. Manual collapses survive refinements/events. To retarget a local scope, select All servers, choose a row, then select the scoped option. Missing selection never widens scope. Implemented and tested. |
+| Enable Load more history only in All outside search results. | `src/window.cpp`; keeps explicit history loading in the history view and avoids unrelated history requests from local-filter tabs. Existing automatic connection snapshots remain unchanged. Implemented and tested through request-count assertions. |
+| Extend protocol fixtures and model/window regressions, and verify with native, SDK and X11 tests. | `tests/fixture.h`, `tests/test_model.cpp`, `tests/test_window.cpp`; delayed search replies exercise background completion, stale results and disconnect errors. Test data, logs, screenshots and runtime launcher are under ignored `.build/issue-1*`. No real Codex conversations or credentials are used. |
+| Use authenticated GitHub CLI read access after the connector returned 404; package a local 0.6.2 development build. | CMake, README, AppStream, build script and this document; existing SDK/runtime, staging and local OSTree repository reused. Bundle/checksum/build information are in ignored `dist/`; isolated installation uses `.build/flatpak`. No dependency or Flatpak permission changes, public release, tag, push, issue comment or closure. Commit is required by the user's standing instruction. |
+
+### Validation
+
+All eight suites pass across the native build, KDE SDK and X11/Konsole environment:
+discovery, containers, transport, core, runtime, model, window and terminal. The
+window suite passes all 16 cases under X11; terminal testing passes all 10 cases.
+The new tests cover independent queries/scope, live membership, title changes,
+opened/exited/closed terminals, scope boundaries, compressed grouping, navigation
+restoration and zero additional protocol requests during local filtering.
+
+The first direct-runtime X11 run could not find the fixture bridge because
+launching via the runtime ELF loader makes Qt locate its application directory
+beside that loader. `strace` confirmed ENOENT for that path. A temporary symlink
+in the ignored runtime tree supplied the built bridge for the corrected run and
+was removed afterward. This was a test-launcher issue; no application fallback
+or packaging workaround was added. The filtered Waiting screenshot was reviewed.
+Formatting, whitespace, shell syntax and desktop-entry checks pass. AppStream
+retains the pre-existing missing-homepage warning.
+
+The 0.6.2 bundle installs into the isolated project-local Flatpak installation;
+installed binaries match the staged bytes and the bundle checksum passes. The
+stripped application reports 0.6.2 and passes the direct-runtime Konsole smoke
+test. Flatpak metadata/permissions are byte-identical to 0.6.1. Full sandbox launch
+remains untestable here because this build environment prohibits user namespaces;
+the isolated installation reports the corresponding cache-trigger warnings. The
+normal desktop installation has not been changed. Fully quit the previous app,
+install the new bundle and relaunch for desktop acceptance testing.

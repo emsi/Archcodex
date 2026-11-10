@@ -64,8 +64,9 @@ customizable docking. These are not implied by the IDE resemblance.
 
 The five views share one model, one connection per backend and one set of pushed
 state updates. Filtering never opens/closes a terminal or resumes/cancels work.
-All is the initial view; search temporarily covers all states and restores the
-selected filter when cleared.
+All is the initial view. Each tab retains its own query, scope, selection and
+expansion state while the application is open. Search never changes the selected
+tab or disables tab navigation.
 
 | View | Membership |
 | --- | --- |
@@ -255,17 +256,42 @@ the interaction design is finalized.
 
 ## 6. Search and connections
 
-Retain the existing requirement to search titles and conversation text. The
-proposed initial placement is one search field in the left pane with an explicit
-scope: all servers, or the selected server/folder. Folder scope includes
-descendants; a selected session scopes by its working directory on that server. Results identify their project,
-session and backend and open the corresponding conversation.
+The search field has two explicit modes:
 
-Searching conversation history is distinct from filtering the Active view. A
-global search should include idle history; its scope must be visible. A simple
-results view can temporarily replace the tree while keeping session-filter state
-available when search is cleared. Offline or incomplete coverage is shown as
-such. Final result presentation and keyboard interaction remain open.
+- **All:** search titles and full conversation text on connected servers when
+  Enter is pressed. The results temporarily replace All's history tree. Clearing
+  the query restores its tree and navigation. A submitted search may finish while
+  another tab is selected; its results and errors belong only to All. New searches
+  and clearing invalidate older replies. Partial/offline coverage remains visible.
+- **Active, Running, Waiting, Opened:** immediately filter the tab's existing
+  members by **cached title, working-directory path or session ID**, using a
+  case-insensitive literal substring. Conversation bodies are not searched in
+  these views. Enter performs no additional action. There is no backend search,
+  history loading, new connection or status polling. Load more history is available
+  only in All, outside search results.
+
+Each tab remembers its own query and scope during the current application run;
+these transient states are not written to settings. Clearing one tab does not
+clear any other tab. Membership still follows server and terminal events while a
+filter is active, including retained exited clients in Opened. Existing unsaved
+and myCodex WORKDIR visibility rules apply, with Opened's existing exceptions.
+
+The scope selector offers all servers or the selected host group, server, folder
+or session. Folder scope includes descendants on that backend; a session scopes
+by its working directory. For local filtering, the selected scope is captured
+when chosen (or on first typing) and stays anchored even if its row disappears.
+To change it, choose All servers, select a row and choose the selected scope again.
+A missing selection matches nothing and shows guidance; it never falls back to
+all servers. Clearing the query restores the full tab membership. All captures
+its selected scope on each explicit submission, as before.
+
+Matching is applied before constructing compact folders and aggregate counts.
+Host/server grouping and backend identity remain intact. Filtered branches expand
+initially to reveal matches; manual collapses survive subsequent edits, events
+and tab switches. Clearing restores the selection and expansion from before the
+query, where those nodes still exist. Filtering never changes the active terminal.
+The field's placeholder and tooltip identify its current mode; local result
+feedback names the cached fields and any selected scope.
 
 Backend setup is reached through **Connections**, outside the project hierarchy.
 Use a small connection summary in the status bar rather than an initial

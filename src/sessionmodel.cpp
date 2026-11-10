@@ -51,6 +51,13 @@ void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
         setItemData(item->index(), values);
 }
 bool SessionModel::visible(const Session &s) const {
+    if (query.scoped && (!query.backends.contains(s.backendId) ||
+                         (!query.path.isEmpty() && !within(normalized(s.cwd), query.path))))
+        return false;
+    if (!query.text.isEmpty() && !s.title.contains(query.text, Qt::CaseInsensitive) &&
+        !s.cwd.contains(query.text, Qt::CaseInsensitive) &&
+        !s.id.contains(query.text, Qt::CaseInsensitive))
+        return false;
     // Opened is an inventory of GUI terminal views, even if another visibility
     // setting excludes their history or the client has exited.
     if (view == SessionView::Opened)
@@ -77,10 +84,11 @@ bool SessionModel::visible(const Session &s) const {
     }
     return false;
 }
-void SessionModel::setView(SessionView value) {
-    if (view == value)
+void SessionModel::setView(SessionView value, const SessionQuery &selection) {
+    if (view == value && query == selection)
         return;
     view = value;
+    query = selection;
     // Build paths and aggregates from the selected sessions, not the full history.
     // Records remain intact so switching views never discards metadata or clients.
     for (const auto &backend : backendNames.keys())
@@ -486,9 +494,9 @@ SessionFilter::SessionFilter(QObject *parent) : QSortFilterProxyModel(parent) {
     setDynamicSortFilter(true);
     sort(0, Qt::DescendingOrder);
 }
-void SessionFilter::setView(View value) {
+void SessionFilter::setView(View value, const SessionQuery &query) {
     if (auto *model = qobject_cast<SessionModel *>(sourceModel()))
-        model->setView(value);
+        model->setView(value, query);
     invalidate();
 }
 bool SessionFilter::filterAcceptsRow(int row, const QModelIndex &parent) const {

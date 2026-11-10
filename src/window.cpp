@@ -29,6 +29,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QScopedValueRollback>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -167,9 +168,16 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     scope->setAccessibleName("Search scope");
     left->addWidget(scope);
     connect(searchBox, &QLineEdit::returnPressed, this, &Window::search);
-    connect(searchBox, &QLineEdit::textChanged, this, [this](const QString &text) {
-        if (text.isEmpty())
-            clearSearch();
+    connect(searchBox, &QLineEdit::textChanged, this, &Window::queryChanged);
+    connect(scope, &QComboBox::currentIndexChanged, this, [this](int index) {
+        auto &state = explorer[tabs->currentIndex()];
+        state.scopeIndex = index;
+        state.scopeCaptured = false;
+        captureScope();
+        if (tabs->currentIndex() != int(SessionView::All))
+            queryChanged(searchBox->text());
+        else
+            updateSearchControls();
     });
     searchNotice = new QLabel;
     searchNotice->setObjectName("searchFeedback");
@@ -188,36 +196,22 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(tree, &QWidget::customContextMenuRequested, this, &Window::sessionContextMenu);
     left->addWidget(tree, 1);
     connect(tree, &QTreeView::activated, this, &Window::activate);
-    connect(tabs, &QTabBar::currentChanged, this, [this](int index) {
-        const QSignalBlocker block(tree);
-        const auto saved = expandedKeys(tree);
-        expanded[previousTab] = saved;
-        const auto selectedKey = tree->currentIndex().data(KeyRole).toString();
-        filter->setView(static_cast<SessionFilter::View>(index));
-        tree->collapseAll();
-        restoreTree(tree, expanded.value(index, saved), selectedKey);
-        expandActivityViews();
-        previousTab = index;
-        if (!searchingView)
-            updateSummary();
-    });
+    connect(tabs, &QTabBar::currentChanged, this, &Window::switchExplorer);
     connect(tree, &QTreeView::collapsed, this, [this](const QModelIndex &index) {
-        if (!searchingView && expandsByDefault(tabs->currentIndex()))
-            collapsed[tabs->currentIndex()].insert(index.data(KeyRole).toString());
+        explorer[tabs->currentIndex()].navigation.collapsed.insert(index.data(KeyRole).toString());
     });
     connect(tree, &QTreeView::expanded, this, [this](const QModelIndex &index) {
-        if (!searchingView && expandsByDefault(tabs->currentIndex()))
-            collapsed[tabs->currentIndex()].remove(index.data(KeyRole).toString());
+        explorer[tabs->currentIndex()].navigation.collapsed.remove(index.data(KeyRole).toString());
     });
     for (auto *source : {model, results}) {
         connect(source, &SessionModel::topologyAboutToChange, this, [this, source] {
-            if (filter->sourceModel() == source) {
+            if (!changingExplorer && filter->sourceModel() == source) {
                 topologyExpanded = expandedKeys(tree);
                 topologySelected = tree->currentIndex().data(KeyRole).toString();
             }
         });
         connect(source, &SessionModel::topologyChanged, this, [this, source] {
-            if (filter->sourceModel() != source)
+            if (changingExplorer || filter->sourceModel() != source)
                 return;
             const QSignalBlocker block(tree);
             restoreTree(tree, topologyExpanded, topologySelected);
@@ -237,6 +231,10 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     loadMore = new QPushButton("Load more history");
     loadMore->setEnabled(false);
     left->addWidget(loadMore);
+    connect(model, &SessionModel::topologyChanged, this, [this] {
+        if (!changingExplorer)
+            updateSearchControls();
+    });
     connect(loadMore, &QPushButton::clicked, this, [this] {
         for (auto *b : backends)
             b->loadMore();
@@ -326,7 +324,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         settings.sync();
         model->setHideUnsaved(hide);
         results->setHideUnsaved(hide);
-        if (searchingView)
+        if (globalSearchActive)
             updateSearchSummary();
     });
     view->addAction("Focus project navigator", QKeySequence("Ctrl+Shift+P"), tree,
@@ -502,7 +500,7 @@ void Window::attach(const BackendProfile &p, bool start) {
                         }
                     model->upsertMany(updates);
                     results->upsertMany(matches);
-                    if (searchingView && searching.remove(id)) {
+                    if (globalSearchActive && searching.remove(id)) {
                         searchErrors
                             << profiles.value(id).name + ": Search interrupted by disconnection.";
                         updateSearchSummary();
@@ -529,19 +527,18 @@ void Window::attach(const BackendProfile &p, bool start) {
             searchSessions.remove(key);
             results->remove(id, thread);
         }
-        if (searchingView)
+        if (globalSearchActive)
             updateSearchSummary();
         persist([&] { store->removeSession(id, thread); });
     });
     connect(b, &Backend::moreAvailable, this, [this, id = p.id](bool available) {
         more[id] = available;
-        loadMore->setEnabled(!searchingView &&
-                             std::any_of(more.begin(), more.end(), [](bool x) { return x; }));
+        updateSearchControls();
     });
     connect(b, &Backend::searchResults, this,
             [this, id = p.id](quint64 token, const QList<Session> &matches, const QString &error,
                               bool complete) {
-                if (token != searchToken || !searchingView)
+                if (token != searchToken || !globalSearchActive)
                     return;
                 QList<Session> updates;
                 for (auto s : matches) {
@@ -564,7 +561,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                 if (complete)
                     searching.remove(id);
                 updateSearchSummary();
-                tree->expandAll();
+                if (showingSearch())
+                    expandActivityViews();
             });
     connect(b, &Backend::identityReceived, this, [this, id = p.id](const QJsonObject &identity) {
         if (!profiles.contains(id))
@@ -697,10 +695,11 @@ void Window::sessionContextMenu(const QPoint &position) {
     menu->popup(tree->viewport()->mapToGlobal(position));
 }
 void Window::expandActivityViews() {
-    if (searchingView || !expandsByDefault(tabs->currentIndex()))
+    const auto &state = explorer[tabs->currentIndex()];
+    if (!state.filtering && !expandsByDefault(tabs->currentIndex()))
         return;
     const QSignalBlocker block(tree);
-    const auto &closed = collapsed[tabs->currentIndex()];
+    const auto &closed = state.navigation.collapsed;
     walkTree(filter, {}, [&](const QModelIndex &index) {
         if (filter->rowCount(index))
             tree->setExpanded(index, !closed.contains(index.data(KeyRole).toString()));
@@ -734,7 +733,7 @@ void Window::applySessions(const QList<Session> &items) {
     }
     model->upsertMany(updates);
     results->upsertMany(matches);
-    if (searchingView && !matches.isEmpty())
+    if (globalSearchActive && !matches.isEmpty())
         updateSearchSummary();
 }
 void Window::addContainerHost(const QString &id, const QString &host, bool start) {
@@ -1186,7 +1185,7 @@ void Window::updateSummary() {
             ? "Connections ready"
             : QString("%1 of %2 connections ready").arg(count).arg(profiles.size()));
     connections->setToolTip(descriptions.join('\n'));
-    searchNotice->setVisible(searchingView);
+    updateSearchControls();
     const bool failed = !discoveryReport.failure.isEmpty();
     const bool limited = !discoveryReport.issues.isEmpty();
     const bool empty = discoveryReport.checked.isValid() && !discoveryReport.endpoints;
@@ -1224,7 +1223,7 @@ void Window::showSettings() {
                     configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
                 model->setMyCodexWorkdirOnly(!showAll);
                 results->setMyCodexWorkdirOnly(!showAll);
-                if (searchingView)
+                if (globalSearchActive)
                     updateSearchSummary();
             });
     dialog.exec();
@@ -1538,7 +1537,142 @@ void Window::activate(const QModelIndex &index) {
     pendingOpen = key;
     backends[backend]->verifySession(id);
 }
+bool Window::showingSearch() const {
+    return globalSearchActive && tabs->currentIndex() == int(SessionView::All);
+}
+void Window::rememberNavigation(int tab) {
+    auto &navigation = explorer[tab].navigation;
+    navigation.expanded = expandedKeys(tree);
+    if (tree->currentIndex().isValid())
+        navigation.selected = tree->currentIndex().data(KeyRole).toString();
+    navigation.saved = true;
+}
+void Window::beginFiltering() {
+    auto &state = explorer[tabs->currentIndex()];
+    rememberNavigation(tabs->currentIndex());
+    if (!state.filtering) {
+        state.unfiltered = state.navigation;
+        state.navigation.collapsed.clear();
+        state.filtering = true;
+    }
+}
+void Window::endFiltering() {
+    auto &state = explorer[tabs->currentIndex()];
+    if (state.filtering) {
+        state.navigation = state.unfiltered;
+        state.filtering = false;
+    }
+}
+bool Window::captureScope() {
+    auto &state = explorer[tabs->currentIndex()];
+    state.selection.scoped = state.scopeIndex == 1;
+    if (!state.selection.scoped) {
+        state.selection.backends.clear();
+        state.selection.path.clear();
+        state.scopeLabel.clear();
+        state.scopeCaptured = false;
+        return true;
+    }
+    if (state.scopeCaptured)
+        return true;
+    const auto index = tree->currentIndex();
+    const auto ids = index.data(BackendsRole).toStringList();
+    state.selection.backends = QSet<QString>(ids.begin(), ids.end());
+    const auto kind = static_cast<NodeKind>(index.data(KindRole).toInt());
+    state.selection.path = kind == NodeKind::Folder || kind == NodeKind::Session
+                               ? index.data(PathRole).toString()
+                               : QString();
+    state.scopeLabel =
+        state.selection.path.isEmpty() ? index.data().toString() : state.selection.path;
+    state.scopeCaptured = index.isValid();
+    return state.scopeCaptured;
+}
+void Window::queryChanged(const QString &text) {
+    auto &state = explorer[tabs->currentIndex()];
+    state.query = text;
+    if (tabs->currentIndex() == int(SessionView::All)) {
+        if (text.trimmed().isEmpty())
+            clearSearch();
+        return;
+    }
+    // Scope is captured once, before filtering can hide the selected row.
+    // Editing the query never silently widens or retargets it.
+    if (text.trimmed().isEmpty()) {
+        if (!state.filtering) {
+            updateSearchControls();
+            return;
+        }
+        endFiltering();
+        state.selection.text.clear();
+    } else {
+        captureScope();
+        beginFiltering();
+        state.selection.text = text.trimmed();
+    }
+    showExplorer();
+}
+void Window::switchExplorer(int tab) {
+    rememberNavigation(previousTab);
+    auto &state = explorer[tab];
+    if (!state.navigation.saved) {
+        state.navigation.expanded = explorer[previousTab].navigation.expanded;
+        state.navigation.selected = explorer[previousTab].navigation.selected;
+    }
+    const QSignalBlocker queryBlock(searchBox), scopeBlock(scope);
+    searchBox->setText(state.query);
+    scope->setCurrentIndex(state.scopeIndex);
+    previousTab = tab;
+    showExplorer();
+}
+void Window::showExplorer() {
+    const QScopedValueRollback changing(changingExplorer, true);
+    const QSignalBlocker block(tree);
+    const auto &state = explorer[tabs->currentIndex()];
+    filter->setSourceModel(showingSearch() ? results : model);
+    filter->setView(static_cast<SessionView>(tabs->currentIndex()),
+                    tabs->currentIndex() != int(SessionView::All) && state.filtering
+                        ? state.selection
+                        : SessionQuery{});
+    tree->collapseAll();
+    tree->setCurrentIndex({});
+    restoreTree(tree, state.navigation.expanded, state.navigation.selected);
+    expandActivityViews();
+    updateSearchControls();
+    if (showingSearch())
+        updateSearchSummary();
+}
+void Window::updateSearchControls() {
+    const bool all = tabs->currentIndex() == int(SessionView::All);
+    searchBox->setPlaceholderText(all ? "Search conversation text — Enter"
+                                      : "Filter titles, paths and session IDs");
+    searchBox->setAccessibleName(all ? "Search conversations" : "Filter cached sessions");
+    searchBox->setToolTip(
+        all ? "Search titles and full conversation text on connected servers. Press Enter."
+            : "Filter this tab immediately by cached title, working-directory path or session ID. "
+              "Case-insensitive literal text; conversation bodies are not searched.");
+    loadMore->setEnabled(all && !globalSearchActive &&
+                         std::any_of(more.begin(), more.end(), [](bool x) { return x; }));
+    const auto &state = explorer[tabs->currentIndex()];
+    scope->setToolTip(state.scopeLabel.isEmpty()
+                          ? "Choose all servers or select a row to set the search scope."
+                          : "Selected scope: " + state.scopeLabel);
+    searchNotice->setVisible(showingSearch() || (!all && state.filtering));
+    if (!all && state.filtering) {
+        int count = 0;
+        for (int i = 0; i < filter->rowCount(); ++i)
+            count += filter->index(i, 0).data(CountRole).toInt();
+        searchNotice->setText(
+            state.selection.scoped && !state.scopeCaptured
+                ? "Select a host group, server, folder or session, then choose the selected scope "
+                  "again."
+                : QString("%1 matching sessions — cached titles, paths and IDs%2")
+                      .arg(count)
+                      .arg(state.selection.scoped ? "\nScope: " + state.scopeLabel : QString()));
+    }
+}
 void Window::search() {
+    if (tabs->currentIndex() != int(SessionView::All))
+        return; // Local filters have already been applied; Enter never requests history.
     const auto query = searchBox->text().trimmed();
     if (query.isEmpty()) {
         clearSearch();
@@ -1548,35 +1682,24 @@ void Window::search() {
         error("Search text is too long.");
         return;
     }
-    scopeBackends.clear();
-    scopedSearch = scope->currentIndex() == 1;
-    scopePath.clear();
-    if (scopedSearch) {
-        const auto index = tree->currentIndex();
-        if (!index.isValid()) {
-            error("Select a host group, server, folder or session first.");
-            return;
-        }
-        const auto backends = index.data(BackendsRole).toStringList();
-        scopeBackends = QSet<QString>(backends.cbegin(), backends.cend());
-        if (index.data(KindRole).toInt() == int(NodeKind::Folder) ||
-            index.data(KindRole).toInt() == int(NodeKind::Session))
-            scopePath = index.data(PathRole).toString();
+    // Each explicit submission may choose a new scope from the selected row.
+    explorer[0].scopeCaptured = false;
+    if (!captureScope()) {
+        error("Select a host group, server, folder or session first.");
+        return;
     }
-    if (!searchingView) {
-        expanded[tabs->currentIndex()] = expandedKeys(tree);
-        searchSelection = tree->currentIndex().data(KeyRole).toString();
-    }
+    const auto &selection = explorer[0].selection;
+    scopedSearch = selection.scoped;
+    scopeBackends = selection.backends;
+    scopePath = selection.path;
+    beginFiltering();
     ++searchToken;
-    searchingView = true;
+    globalSearchActive = true;
     searchSessions.clear();
     results->resetResults();
     searchErrors.clear();
     searching.clear();
-    filter->setSourceModel(results);
-    filter->setView(SessionFilter::View::All);
-    tabs->setEnabled(false);
-    loadMore->setEnabled(false);
+    showExplorer();
     for (auto it = backends.begin(); it != backends.end(); ++it)
         if (!scopedSearch || scopeBackends.contains(it.key()))
             searching.insert(it.key());
@@ -1586,27 +1709,27 @@ void Window::search() {
     updateSearchSummary();
 }
 void Window::clearSearch() {
-    const bool wasSearching = searchingView;
-    const QSignalBlocker block(tree);
+    if (!globalSearchActive)
+        return;
+    if (tabs->currentIndex() != int(SessionView::All))
+        rememberNavigation(tabs->currentIndex());
     ++searchToken;
     for (auto *b : backends)
         b->search({}, searchToken);
-    searchingView = false;
+    globalSearchActive = false;
     searching.clear();
     searchSessions.clear();
     results->resetResults();
-    filter->setSourceModel(model);
-    filter->setView(static_cast<SessionFilter::View>(tabs->currentIndex()));
-    if (wasSearching) {
-        restoreTree(tree, expanded.value(tabs->currentIndex()), searchSelection);
-        expandActivityViews();
-    }
-    tabs->setEnabled(true);
-    loadMore->setEnabled(std::any_of(more.begin(), more.end(), [](bool x) { return x; }));
-    updateSummary();
+    // This can also be called when a connection is removed from another tab.
+    auto &all = explorer[int(SessionView::All)];
+    all.navigation = all.unfiltered;
+    all.filtering = false;
+    showExplorer();
 }
 void Window::updateSearchSummary() {
-    searchNotice->setVisible(searchingView);
+    if (!showingSearch())
+        return;
+    searchNotice->setVisible(true);
     int visible = 0;
     for (int i = 0; i < results->rowCount(); ++i)
         visible += results->item(i)->data(CountRole).toInt();
@@ -1627,9 +1750,8 @@ void Window::closeEvent(QCloseEvent *event) {
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
     settings.setValue("geometry", saveGeometry());
     settings.setValue("splitter", splitter->saveState());
-    if (!searchingView) {
-        settings.setValue("expanded", expandedKeys(tree));
-    }
+    const auto &state = explorer[tabs->currentIndex()];
+    settings.setValue("expanded", state.filtering ? state.unfiltered.expanded : expandedKeys(tree));
     for (auto *b : backends)
         b->disconnectServer();
     QMainWindow::closeEvent(event);

@@ -1,7 +1,7 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.6.1** supports **existing local Unix-socket app-servers** and
+Version **0.6.2** supports **existing local Unix-socket app-servers** and
 **myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
 SSH socket profiles remain planned.
 
@@ -13,7 +13,10 @@ their own host groups. Short server/container names sit below these roots, with
 compact project folders underneath. No project creation is needed; process IDs
 remain confined to details and terminal headers retain their full context.
 It provides All, Active, Running, Waiting and Opened views, conversation search
-and the existing Codex TUI. Active includes live sessions at an idle prompt.
+and the existing Codex TUI. **All** searches full conversations on Enter; the other
+tabs filter cached titles, paths and session IDs as you type, without server
+requests. Each tab keeps its own query and scope. Active includes live sessions
+at an idle prompt.
 Exited terminal clients retain their output, remain in Active, and offer an explicit restart.
 Restart rechecks the selected session and uses the current connection profile.
 **Opened** lists all open terminal views, including retained exited/error output,
@@ -47,13 +50,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.6.1-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.6.2-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.6.1-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.6.2-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -159,7 +162,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, host groups, expandable projects and
   sessions, and the five session views.
-- [Implementation and testing](docs/implementation.md): what 0.6.1 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.6.2 delivers and
   how to exercise it on your host.
 
 ## Project status

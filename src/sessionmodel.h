@@ -2,6 +2,7 @@
 #pragma once
 #include "types.h"
 #include <QHash>
+#include <QSet>
 #include <QSortFilterProxyModel>
 #include <QStandardItemModel>
 
@@ -29,6 +30,15 @@ enum ModelRole {
 };
 enum class SessionView { All, Active, Running, Waiting, Opened };
 enum class NodeKind { Server, Folder, Session, Group };
+// Literal, case-insensitive matching of metadata already held in memory.
+// An empty selected scope deliberately matches nothing, never all backends.
+struct SessionQuery {
+    QString text;
+    bool scoped = false;
+    QSet<QString> backends;
+    QString path;
+    bool operator==(const SessionQuery &) const = default;
+};
 class SessionModel : public QStandardItemModel {
     Q_OBJECT
   public:
@@ -48,7 +58,7 @@ class SessionModel : public QStandardItemModel {
     void setHideUnsaved(bool hide);
     void setContainerWorkdir(const QString &backend, const QString &path);
     void setMyCodexWorkdirOnly(bool enabled);
-    void setView(SessionView view);
+    void setView(SessionView view, const SessionQuery &query = {});
     SessionView currentView() const {
         return view;
     }
@@ -60,6 +70,7 @@ class SessionModel : public QStandardItemModel {
     bool hideUnsaved = true;
     bool myCodexWorkdirOnly = true;
     SessionView view = SessionView::All;
+    SessionQuery query;
     QHash<QString, QString> backendNames, details, environments, projectNames;
     QHash<QString, QString> containerWorkdirs;
     QHash<QString, QStandardItem *> roots, folders, threads;
@@ -80,7 +91,7 @@ class SessionFilter : public QSortFilterProxyModel {
   public:
     using View = SessionView;
     explicit SessionFilter(QObject *parent = nullptr);
-    void setView(View view);
+    void setView(View view, const SessionQuery &query = {});
 
   protected:
     bool filterAcceptsRow(int row, const QModelIndex &parent) const override;

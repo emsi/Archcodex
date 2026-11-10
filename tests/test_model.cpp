@@ -8,6 +8,95 @@ using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
+    void cachedFiltersIntersectMembershipScopeAndVisibility() {
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        QAbstractItemModelTester tester(&filter,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        model.backendGroup("a", "host", "alice @ host");
+        model.backendGroup("b", "host", "alice @ host");
+        model.backendName("a", "Main");
+        model.backendName("b", "Other");
+        QList<Session> records;
+        auto add = [&](const QString &backend, const QString &id, const QString &path,
+                       const QString &status) {
+            auto s = Session::fromThread(
+                backend,
+                {{"id", id},
+                 {"cwd", path},
+                 {"name", "Needle [literal]"},
+                 {"path", "/saved/" + id},
+                 {"ephemeral", false},
+                 {"status", QJsonObject{{"type", status}, {"activeFlags", QJsonArray{}}}}});
+            records << s;
+        };
+        add("a", "waiting", "/work/project/deep", "idle");
+        add("a", "running", "/work/project/build", "active");
+        add("a", "history", "/other/history", "notLoaded");
+        add("a", "sibling", "/work/project-other", "idle");
+        add("b", "other-server", "/work/project", "idle");
+        model.upsertMany(records);
+        SessionQuery query{"nEeDlE [literal]", true, {"a"}, "/work/project"};
+        filter.setView(SessionView::Waiting, query);
+        auto group = [&] { return filter.index(0, 0); };
+        auto server = [&] { return filter.index(0, 0, group()); };
+        auto folder = [&] { return filter.index(0, 0, server()); };
+        auto session = [&] { return filter.index(0, 0, folder()); };
+        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(group().data(KindRole).toInt(), int(NodeKind::Group));
+        QCOMPARE(group().data(CountRole).toInt(), 1);
+        QCOMPARE(server().data(BackendRole).toString(), "a");
+        QCOMPARE(folder().data().toString(), "deep");
+        QCOMPARE(session().data(ThreadRole).toString(), "waiting");
+        filter.setView(SessionView::Running, query);
+        QCOMPARE(session().data(ThreadRole).toString(), "running");
+        records[1].status = {{"type", "idle"}};
+        model.upsert(records[1]);
+        QCOMPARE(filter.rowCount(), 0);
+        records[1].status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        model.upsert(records[1]);
+        QCOMPARE(session().data(ThreadRole).toString(), "running");
+        filter.setView(SessionView::Active, query);
+        QCOMPARE(group().data(CountRole).toInt(), 2);
+        query.text = "WAITING"; // Session IDs are searchable even if not in the title.
+        filter.setView(SessionView::Waiting, query);
+        QCOMPARE(session().data(ThreadRole).toString(), "waiting");
+        query.text = "/PROJECT/DEEP";
+        filter.setView(SessionView::Waiting, query);
+        QCOMPARE(group().data(CountRole).toInt(), 1);
+        records[0].status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        model.upsert(records[0]);
+        QCOMPARE(filter.rowCount(), 0);
+        records[0].status = {{"type", "idle"}};
+        model.upsert(records[0]);
+        QCOMPARE(group().data(CountRole).toInt(), 1);
+        query.text = "Needle";
+        filter.setView(SessionView::Waiting, query);
+        records[0].title = "Renamed";
+        model.upsert(records[0]);
+        QCOMPARE(filter.rowCount(), 0);
+        records[0].title = "Needle";
+        records[0].rolloutPath.clear();
+        records[0].ephemeral = true;
+        model.upsert(records[0]);
+        QCOMPARE(filter.rowCount(), 0); // Text matching never bypasses unsaved visibility.
+        model.setContainerWorkdir("a", "/elsewhere");
+        records[0].terminalOpen = true;
+        model.upsert(records[0]);
+        QCOMPARE(filter.rowCount(), 0); // Nor the container WORKDIR restriction.
+        filter.setView(SessionView::Opened, query);
+        QCOMPARE(session().data(ThreadRole).toString(), "waiting"); // Opened's existing exception.
+        records[0].terminalOpen = false;
+        model.upsert(records[0]);
+        QCOMPARE(filter.rowCount(), 0);
+        query.backends.clear();
+        filter.setView(SessionView::Waiting, query);
+        QCOMPARE(filter.rowCount(), 0); // Missing scope fails closed.
+        model.setMyCodexWorkdirOnly(false);
+        filter.setView(SessionView::Waiting);
+        QCOMPARE(group().data(CountRole).toInt(), 2);
+    }
     void groupedActivityViewsKeepAncestryAndResortOnEvents_data() {
         QTest::addColumn<bool>("running");
         QTest::newRow("waiting") << false;

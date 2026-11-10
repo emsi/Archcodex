@@ -45,11 +45,254 @@ QList<QModelIndex> serverNodes(QTreeView *tree) {
 QModelIndex serverNode(QTreeView *tree, int row = 0) {
     return serverNodes(tree).value(row);
 }
+QModelIndex nodeWithKey(QTreeView *tree, const QString &key) {
+    QModelIndex found;
+    const auto walk = [&](auto &&self, const QModelIndex &parent) -> void {
+        for (int i = 0; i < tree->model()->rowCount(parent); ++i) {
+            const auto index = tree->model()->index(i, 0, parent);
+            if (index.data(KeyRole).toString() == key)
+                found = index;
+            self(self, index);
+        }
+    };
+    walk(walk, {});
+    return found;
+}
+QStringList visibleThreads(QTreeView *tree) {
+    QStringList ids;
+    const auto walk = [&](auto &&self, const QModelIndex &parent) -> void {
+        for (int i = 0; i < tree->model()->rowCount(parent); ++i) {
+            const auto index = tree->model()->index(i, 0, parent);
+            if (index.data(KindRole).toInt() == int(NodeKind::Session))
+                ids << index.data(ThreadRole).toString();
+            self(self, index);
+        }
+    };
+    walk(walk, {});
+    ids.sort();
+    return ids;
+}
 } // namespace
 
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void tabFiltersAreIndependentLocalAndLive() {
+        Fixture fixture;
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            store.save(fixture.profile());
+            store.save(BackendProfile{"other", "Other"});
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
+        Backend *backend = nullptr, *other = nullptr;
+        for (auto *b : window.findChildren<Backend *>())
+            (b->profile.id == "other" ? other : backend) = b;
+        backend->connectServer();
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        auto *query = window.findChild<QLineEdit *>();
+        auto *scope = window.findChild<QComboBox *>();
+        auto *feedback = window.findChild<QLabel *>("searchFeedback");
+        auto *terminal = window.findChild<TerminalArea *>();
+        QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
+        QTRY_VERIFY(backend->ready());
+        QPushButton *loadMore = nullptr;
+        for (auto *button : window.findChildren<QPushButton *>())
+            if (button->text() == "Load more history")
+                loadMore = button;
+        QVERIFY(loadMore);
+        backend->moreAvailable(true);
+        QVERIFY(loadMore->isEnabled());
+        auto put = [&](Backend *b, const QString &id, const QString &cwd, const QString &type) {
+            auto fields = fixture.thread(id);
+            fields["name"] = "Needle " + id;
+            fields["cwd"] = cwd;
+            fields["status"] = QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}};
+            auto s = Session::fromThread(b->profile.id, fields);
+            b->sessionChanged(s);
+            return s;
+        };
+        auto waiting = put(backend, "waiting", "/work/project/deep", "idle");
+        auto running = put(backend, "running", "/work/project/build", "active");
+        auto sibling = put(backend, "sibling", "/work/project-other", "idle");
+        put(backend, "history", "/history", "notLoaded");
+        put(other, "remote", "/work/project/deep", "idle");
+        QTest::qWait(50); // Let the initial snapshot finish before counting requests.
+        const auto requests = fixture.methods;
+        query->setText("all draft"); // All only submits on Enter.
+        tabs->setCurrentIndex(1);
+        QVERIFY(query->text().isEmpty());
+        query->setText("NEEDLE");
+        QCOMPARE(visibleThreads(tree), (QStringList{"remote", "running", "sibling", "waiting"}));
+        QVERIFY(query->toolTip().contains("conversation bodies are not searched"));
+        QVERIFY(feedback->text().contains("4 matching sessions"));
+        QTest::keyClick(query, Qt::Key_Return);
+        QVERIFY(tabs->isEnabled());
+        tabs->setCurrentIndex(2);
+        query->setText("running");
+        QCOMPARE(visibleThreads(tree), QStringList{"running"});
+        tabs->setCurrentIndex(3);
+        auto waitingNode = [&] {
+            return nodeWithKey(tree, sessionKey(waiting.backendId, waiting.id));
+        };
+        tree->setCurrentIndex(waitingNode());
+        const auto folderKey = waitingNode().parent().data(KeyRole).toString();
+        tree->collapse(nodeWithKey(tree, folderKey));
+        const auto selectedBeforeFiltering = tree->currentIndex().data(KeyRole).toString();
+        scope->setCurrentIndex(1); // Session scope means its directory and descendants.
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), selectedBeforeFiltering);
+        query->setText("needle");
+        QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        QCOMPARE(serverNode(tree).parent().data(KindRole).toInt(), int(NodeKind::Group));
+        QCOMPARE(waitingNode().parent().data().toString(), "deep");
+        QVERIFY(feedback->text().contains(waiting.cwd));
+        query->setText("no match");
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        query->setText("needle"); // Scope must survive an empty result tree.
+        QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        tree->collapse(waitingNode().parent());
+        query->setText("Needle waiting");
+        QVERIFY(!tree->isExpanded(waitingNode().parent()));
+        query->setText("needle");
+        waiting.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        backend->sessionChanged(waiting);
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        QCOMPARE(query->text(), "needle");
+        waiting.status = {{"type", "idle"}};
+        backend->sessionChanged(waiting);
+        QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        waiting.title = "Changed title";
+        backend->sessionChanged(waiting);
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        waiting.title = "Needle waiting";
+        backend->sessionChanged(waiting);
+        QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        tabs->setCurrentIndex(4);
+        query->setText("waiting");
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        waiting.terminalOpen = true;
+        waiting.clientIssue = "Retained exit output";
+        terminal->clientStateChanged(waiting);
+        QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        waiting.terminalOpen = false;
+        waiting.clientIssue.clear();
+        terminal->clientStateChanged(waiting);
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        for (const auto tab : {0, 1, 2, 3, 4}) {
+            tabs->setCurrentIndex(tab);
+            QCOMPARE(loadMore->isEnabled(), tab == 0);
+            QCOMPARE(query->text(),
+                     (QStringList{"all draft", "NEEDLE", "running", "needle", "waiting"})[tab]);
+            QCOMPARE(scope->currentIndex(), tab == 3 ? 1 : 0);
+        }
+        tabs->setCurrentIndex(3);
+        query->clear();
+        QVERIFY(visibleThreads(tree).contains("remote"));
+        QVERIFY(visibleThreads(tree).contains("sibling"));
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), selectedBeforeFiltering);
+        QVERIFY(!tree->isExpanded(nodeWithKey(tree, folderKey)));
+        // Server and group scopes are intersections with Waiting, never a global search.
+        scope->setCurrentIndex(0);
+        tree->setCurrentIndex(nodeWithKey(tree, "server:" + waiting.backendId));
+        scope->setCurrentIndex(1);
+        query->setText("needle");
+        QCOMPARE(visibleThreads(tree), (QStringList{"sibling", "waiting"}));
+        query->clear();
+        scope->setCurrentIndex(0);
+        tree->setCurrentIndex(serverNode(tree).parent());
+        scope->setCurrentIndex(1);
+        query->setText("needle");
+        QCOMPARE(visibleThreads(tree), (QStringList{"remote", "sibling", "waiting"}));
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty())
+            QVERIFY(window.grab().save(screenshots + "/waiting-filter.png"));
+        query->clear();
+        // A directory scope must exclude a sibling with the same path prefix.
+        scope->setCurrentIndex(0);
+        tree->setCurrentIndex(
+            nodeWithKey(tree, "folder:" + projectKey(waiting.backendId, "/work/project")));
+        QVERIFY(tree->currentIndex().isValid());
+        scope->setCurrentIndex(1);
+        query->setText("needle");
+        QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        QTest::keyClick(query, Qt::Key_Return);
+        QTest::qWait(50);
+        QCOMPARE(fixture.methods, requests);
+        window.close();
+    }
+    void allSearchFinishesInBackgroundAndRejectsStaleResults() {
+        Fixture fixture;
+        fixture.delaySearch = true;
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            store.save(fixture.profile());
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        backend->connectServer();
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        auto *query = window.findChild<QLineEdit *>();
+        auto *feedback = window.findChild<QLabel *>("searchFeedback");
+        QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
+        query->setText("conversation text");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(fixture.searchIds.size(), 1);
+        QVERIFY(tabs->isEnabled());
+        tabs->setCurrentIndex(3);
+        query->setText("example");
+        QCOMPARE(visibleThreads(tree), QStringList{"thread-1"});
+        fixture.reply(fixture.searchIds[0],
+                      {{"data", QJsonArray{QJsonObject{{"thread", fixture.thread("found")}}}},
+                       {"nextCursor", QJsonValue::Null}});
+        QTest::qWait(50);
+        QCOMPARE(query->text(), "example");
+        QCOMPARE(visibleThreads(tree), QStringList{"thread-1"});
+        QVERIFY(feedback->text().contains("cached titles"));
+        tabs->setCurrentIndex(0);
+        QCOMPARE(query->text(), "conversation text");
+        QTRY_COMPARE(visibleThreads(tree), QStringList{"found"});
+        QVERIFY(!feedback->text().contains("searching"));
+        query->clear();
+        QCOMPARE(visibleThreads(tree), QStringList{"thread-1"});
+        query->setText("old request");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(fixture.searchIds.size(), 2);
+        query->setText("new request");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(fixture.searchIds.size(), 3);
+        fixture.reply(fixture.searchIds[1],
+                      {{"data", QJsonArray{QJsonObject{{"thread", fixture.thread("stale")}}}},
+                       {"nextCursor", QJsonValue::Null}});
+        fixture.reply(fixture.searchIds[2],
+                      {{"data", QJsonArray{QJsonObject{{"thread", fixture.thread("fresh")}}}},
+                       {"nextCursor", QJsonValue::Null}});
+        QTRY_COMPARE(visibleThreads(tree), QStringList{"fresh"});
+        backend->searchResults(
+            1, {Session::fromThread(backend->profile.id, fixture.thread("stale-signal"))},
+            "old error", true);
+        QCOMPARE(visibleThreads(tree), QStringList{"fresh"});
+        QVERIFY(!feedback->text().contains("old error"));
+        query->setText("interrupted search");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(fixture.searchIds.size(), 4);
+        tabs->setCurrentIndex(3);
+        fixture.peer->close();
+        QTRY_VERIFY(!backend->ready());
+        QCOMPARE(query->text(), "example");
+        QVERIFY(!feedback->text().contains("interrupted"));
+        tabs->setCurrentIndex(0);
+        QVERIFY(feedback->text().contains("interrupted", Qt::CaseInsensitive));
+        query->clear();
+        window.close();
+    }
     void contextMenusUseClickedRowsAndExpandOnlyTheirSubtree() {
         Fixture first, second;
         QTemporaryDir data;
@@ -686,7 +929,7 @@ class WindowTests : public QObject {
         tabs->setCurrentIndex(3);
         QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "waiting");
         QVERIFY(tree->isExpanded(folder()));
-        // Search may show history but must restore the filtered tree and its defaults.
+        // A local query must restore the tab tree, selection and expansion when cleared.
         auto *query = window.findChild<QLineEdit *>();
         query->setText("needle");
         QTest::keyClick(query, Qt::Key_Return);

@@ -4,6 +4,7 @@
 #include "backend.h"
 #include "containerdiscovery.h"
 #include "discovery.h"
+#include "sessionmodel.h"
 #include "store.h"
 #include <QMainWindow>
 #include <QModelIndex>
@@ -19,8 +20,6 @@ class QPushButton;
 class QSplitter;
 class QToolButton;
 namespace Archcodex {
-class SessionModel;
-class SessionFilter;
 class TerminalArea;
 class DiscoveryDialog;
 class Window : public QMainWindow {
@@ -73,7 +72,9 @@ class Window : public QMainWindow {
     void showDiscoveryDetails();
     QSet<QString> paused, ignoredSockets, discoveredPresent;
     QHash<QString, QString> discoveredPaths;
-    bool searchingView = false, storageFailed = false;
+    // A submitted All search may continue while a different tab is visible.
+    bool globalSearchActive = false, storageFailed = false;
+    bool changingExplorer = false;
     SessionModel *model, *results;
     SessionFilter *filter;
     QTreeView *tree;
@@ -85,9 +86,30 @@ class Window : public QMainWindow {
     QSplitter *splitter;
     TerminalArea *terminal;
     HostDiscovery *discovery;
-    QHash<int, QStringList> expanded;
-    QHash<int, QSet<QString>> collapsed;
-    QString searchSelection;
+    struct NavigationState {
+        QStringList expanded;
+        QSet<QString> collapsed;
+        QString selected;
+        bool saved = false;
+    };
+    struct ExplorerState {
+        QString query;
+        int scopeIndex = 0;
+        SessionQuery selection;
+        QString scopeLabel;
+        bool scopeCaptured = false, filtering = false;
+        NavigationState navigation, unfiltered;
+    };
+    QHash<int, ExplorerState> explorer;
+    void rememberNavigation(int tab);
+    void beginFiltering();
+    void endFiltering();
+    bool captureScope();
+    void queryChanged(const QString &text);
+    void switchExplorer(int tab);
+    void showExplorer();
+    void updateSearchControls();
+    bool showingSearch() const;
     void expandActivityViews();
     int previousTab = 0;
     QStringList topologyExpanded;
