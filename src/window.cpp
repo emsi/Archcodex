@@ -5,6 +5,7 @@
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "launch.h"
+#include "notifications.h"
 #include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
@@ -362,6 +363,15 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     hideUnsaved->setCheckable(true);
     QSettings settings(directory + "/window.ini", QSettings::IniFormat);
     configuredLocalCodex = settings.value("application/localCodexExecutable").toString();
+    notifications = new Notifications(this);
+    notifications->setEnabled(settings.value("notifications/enabled", true).toBool());
+    connect(notifications, &Notifications::openRequested, this,
+            [this](const QString &backend, const QString &thread, const QString &token) {
+                if (closing)
+                    return;
+                Notifications::presentWindow(this, token);
+                activateSession(backend, thread, true);
+            });
     terminal->setLocalCodexExecutable(configuredLocalCodex);
     hideUnsaved->setChecked(settings.value("hideUnsavedSessions", true).toBool());
     model->setHideUnsaved(hideUnsaved->isChecked());
@@ -700,6 +710,11 @@ void Window::attach(const BackendProfile &p, bool start) {
             });
     connect(b, &Backend::sessionChanged, this, [this](const Session &s) { applySessions({s}); });
     connect(b, &Backend::sessionsChanged, this, &Window::applySessions);
+    connect(b, &Backend::attentionRequested, this,
+            [this, b, id = p.id](const SessionAttention &event) {
+                if (!closing && backends.value(id) == b && b->ready() && profiles.contains(id))
+                    notifications->show(event, profiles[id]);
+            });
     connect(b, &Backend::sessionRemoved, this, [this, id = p.id](const QString &thread) {
         const auto key = sessionKey(id, thread);
         if (sessions.value(key).terminalOpen) {
@@ -1468,24 +1483,27 @@ void Window::showSettings() {
     SettingsDialog dialog(hideUnsaved->isChecked(),
                           settings.value("backends/myCodex/showAllSessions", false).toBool(),
                           configuredLocalCodex, this, commands,
-                          settings.value("application/restoreOpenedTerminals", true).toBool());
-    connect(
-        &dialog, &SettingsDialog::settingsApplied, this,
-        [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable, bool restore) {
-            hideUnsaved->setChecked(hide);
-            QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
-            settings.setValue("backends/myCodex/showAllSessions", showAll);
-            settings.setValue("application/localCodexExecutable", localExecutable);
-            settings.setValue("application/restoreOpenedTerminals", restore);
-            settings.sync();
-            configuredLocalCodex = localExecutable;
-            terminal->setLocalCodexExecutable(
-                configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
-            model->setMyCodexWorkdirOnly(!showAll);
-            results->setMyCodexWorkdirOnly(!showAll);
-            if (globalSearchActive)
-                updateSearchSummary();
-        });
+                          settings.value("application/restoreOpenedTerminals", true).toBool(),
+                          settings.value("notifications/enabled", true).toBool());
+    connect(&dialog, &SettingsDialog::settingsApplied, this,
+            [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable,
+                                bool restore, bool notify) {
+                hideUnsaved->setChecked(hide);
+                QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+                settings.setValue("backends/myCodex/showAllSessions", showAll);
+                settings.setValue("application/localCodexExecutable", localExecutable);
+                settings.setValue("application/restoreOpenedTerminals", restore);
+                settings.setValue("notifications/enabled", notify);
+                notifications->setEnabled(notify);
+                settings.sync();
+                configuredLocalCodex = localExecutable;
+                terminal->setLocalCodexExecutable(
+                    configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
+                model->setMyCodexWorkdirOnly(!showAll);
+                results->setMyCodexWorkdirOnly(!showAll);
+                if (globalSearchActive)
+                    updateSearchSummary();
+            });
     dialog.exec();
 }
 void Window::showDiscoveryDetails() {
@@ -1783,6 +1801,9 @@ void Window::activate(const QModelIndex &index) {
     if (id.isEmpty())
         return;
     const auto backend = index.data(BackendRole).toString();
+    activateSession(backend, id);
+}
+void Window::activateSession(const QString &backend, const QString &id, bool requireAvailable) {
     const auto key = sessionKey(backend, id);
     if (terminal->focusSession(key)) {
         // A visit prioritizes a pending restore, but never restarts an exited client.
@@ -1791,7 +1812,14 @@ void Window::activate(const QModelIndex &index) {
             opening->request(view, false);
         return;
     }
-    openSession(backend, sessions.value(key, searchSessions.value(key)));
+    const auto session = sessions.value(key, searchSessions.value(key));
+    if (requireAvailable && (!backends.contains(backend) || !backends[backend]->ready() ||
+                             session.id.isEmpty() || session.unavailable)) {
+        statusBar()->showMessage(
+            "This session is unavailable. Reconnect its server or refresh discovery.", 10000);
+        return;
+    }
+    openSession(backend, session);
 }
 bool Window::showingSearch() const {
     return globalSearchActive && tabs->currentIndex() == int(SessionView::All);

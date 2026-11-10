@@ -3,6 +3,7 @@
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "fixture.h"
+#include "notifications.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
@@ -26,6 +27,7 @@
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSettings>
+#include <QStatusBar>
 #include <QTabBar>
 #include <QToolButton>
 #include <QToolTip>
@@ -100,6 +102,47 @@ class SettingsShown : public QObject {
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void notificationClicksRouteByIdentityAcrossFiltersAndHandleStaleTargets() {
+        QTemporaryDir data;
+        Fixture first, second;
+        auto a = first.profile(), b = second.profile();
+        b.id = "other-backend";
+        a.executable = b.executable = "/bin/true";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(a);
+            store.save(b);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
+        for (auto *backend : window.findChildren<Backend *>())
+            backend->connectServer();
+        QTRY_VERIFY(first.methods.contains("thread/read") &&
+                    second.methods.contains("thread/read"));
+        auto *notifications = window.findChild<Notifications *>();
+        auto *area = window.findChild<TerminalArea *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        auto *tree = window.findChild<QTreeView *>();
+        QTRY_COMPARE(visibleThreads(tree).size(), 2);
+        tabs->setCurrentIndex(int(SessionView::Running)); // Both sessions are hidden.
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        emit notifications->openRequested(b.id, "thread-1", {});
+        QTRY_COMPARE(area->currentKey(), sessionKey(b.id, "thread-1"));
+        const auto existing = area->view(area->currentKey()).id;
+        emit notifications->openRequested(a.id, "thread-1", {});
+        QTRY_COMPARE(area->currentKey(), sessionKey(a.id, "thread-1"));
+        emit notifications->openRequested(b.id, "thread-1", {});
+        QCOMPARE(area->view(area->currentKey()).id, existing);
+        QCOMPARE(area->workspace().views.size(), 2);
+        emit notifications->openRequested("removed-backend", "thread-1", {});
+        QVERIFY(window.statusBar()->currentMessage().contains("unavailable"));
+        QCOMPARE(area->workspace().views.size(), 2);
+        emit notifications->openRequested(a.id, "removed-session", {});
+        QVERIFY(window.statusBar()->currentMessage().contains("unavailable"));
+        QCOMPARE(area->workspace().views.size(), 2);
+        window.close();
+    }
     void contextMenuNewTracksRenameStatusAndRestoresTheSameConversation() {
         QTemporaryDir data;
         Fixture fixture;
@@ -379,7 +422,9 @@ class WindowTests : public QObject {
         bool savedScreenshot = true;
         SettingsShown shown([&](SettingsDialog *dialog) {
             sawSettings = true;
-            dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(2);
+            auto *categories = dialog->findChild<QListWidget *>("settingsCategories");
+            categories->setCurrentItem(
+                categories->findItems("Keyboard Shortcuts", Qt::MatchExactly).first());
             if (!screenshots.isEmpty()) {
                 QApplication::processEvents();
                 savedScreenshot = dialog->grab().save(screenshots + "/keyboard-settings.png");
@@ -1100,7 +1145,9 @@ class WindowTests : public QObject {
             QVERIFY(dialog);
             QVERIFY(dialog->findChild<QCheckBox *>("hideUnsavedSetting")->isChecked());
             QVERIFY(!dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
-            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 3);
+            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 4);
+            QVERIFY(dialog->findChild<QCheckBox *>("notificationsEnabled")->isChecked());
+            dialog->findChild<QCheckBox *>("notificationsEnabled")->setChecked(false);
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
             auto *buttons = dialog->findChild<QDialogButtonBox *>();
@@ -1117,7 +1164,9 @@ class WindowTests : public QObject {
                 dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(0);
                 QApplication::processEvents();
                 QVERIFY(dialog->grab().save(screenshots + "/settings-application.png"));
-                dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(1);
+                auto *categories = dialog->findChild<QListWidget *>("settingsCategories");
+                categories->setCurrentItem(
+                    categories->findItems("Backends", Qt::MatchExactly).first());
                 QApplication::processEvents();
                 QVERIFY(dialog->grab().save(screenshots + "/settings.png"));
             }
@@ -1127,6 +1176,7 @@ class WindowTests : public QObject {
         settings.sync();
         QVERIFY(settings.value("backends/myCodex/showAllSessions").toBool());
         QVERIFY(!settings.value("hideUnsavedSessions").toBool());
+        QVERIFY(!settings.value("notifications/enabled", true).toBool());
         QCOMPARE(settings.value("application/localCodexExecutable").toString(),
                  "/local Codex/bin/codex");
         window.close();

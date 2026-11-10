@@ -7,10 +7,31 @@ class BackendPump : public QObject {
   public:
     LocalBackend *core;
     QHash<QString, Session> pending;
+    QQueue<QPair<SessionAttention, quint64>> attention;
+    std::shared_ptr<std::atomic<quint64>> epoch;
+    quint64 connectionEpoch = 0; // Worker-owned identity of the actual transport.
     bool inFlight = false, scheduled = false;
+    bool attentionOverflow = false;
     BackendPump(const BackendProfile &p, const QString &bridge, AsyncBackend *target,
-                QObject *parent)
-        : QObject(parent), core(new LocalBackend(p, bridge, this)) {
+                std::shared_ptr<std::atomic<quint64>> generation, QObject *parent)
+        : QObject(parent), core(new LocalBackend(p, bridge, this)), epoch(std::move(generation)) {
+        connect(core, &Backend::attentionRequested, this, [this](const SessionAttention &event) {
+            // A stalled GUI cannot create an unbounded Qt queued-signal backlog.
+            if (attention.size() == 256) {
+                attention.dequeue();
+                if (!attentionOverflow)
+                    qWarning("Session notification backlog exceeded 256; oldest event discarded.");
+                attentionOverflow = true;
+            }
+            attention.enqueue({event, connectionEpoch});
+            schedule();
+        });
+        connect(core, &Backend::connectionChanged, this, [this](const QString &, bool ready) {
+            if (!ready) {
+                connectionEpoch = ++*epoch;
+                attention.clear();
+            }
+        });
         connect(core, &Backend::sessionChanged, this, [this](const Session &s) {
             pending[s.id] = s;
             if (pending.size() > 16384) {
@@ -51,10 +72,16 @@ class BackendPump : public QObject {
                     emit started(token, session, error);
                 });
         connect(this, &BackendPump::started, target, &Backend::sessionStarted);
-        connect(this, &BackendPump::batch, target, [target](const QList<Session> &items) {
-            emit target->sessionsChanged(items);
-            emit target->batchAccepted();
-        });
+        connect(this, &BackendPump::batch, target,
+                [target, generation = epoch](const QList<Session> &items,
+                                             const QList<SessionAttention> &events,
+                                             quint64 eventEpoch) {
+                    emit target->sessionsChanged(items);
+                    for (const auto &event : events)
+                        if (eventEpoch == generation->load() && target->ready())
+                            emit target->attentionRequested(event);
+                    emit target->batchAccepted();
+                });
         connect(target, &AsyncBackend::batchAccepted, this, [this] {
             inFlight = false;
             schedule();
@@ -67,12 +94,12 @@ class BackendPump : public QObject {
         connect(core, &Backend::searchResults, target, &Backend::searchResults);
     }
     void schedule() {
-        if (inFlight || scheduled || pending.isEmpty())
+        if (inFlight || scheduled || (pending.isEmpty() && attention.isEmpty()))
             return;
         scheduled = true;
         QTimer::singleShot(0, this, [this] {
             scheduled = false;
-            if (inFlight || pending.isEmpty())
+            if (inFlight || (pending.isEmpty() && attention.isEmpty()))
                 return;
             QList<Session> items;
             while (!pending.isEmpty() && items.size() < 64) {
@@ -81,11 +108,21 @@ class BackendPump : public QObject {
                 pending.erase(it);
             }
             inFlight = true;
-            emit batch(items);
+            const auto eventEpoch = connectionEpoch;
+            QList<SessionAttention> events;
+            while (!attention.isEmpty() && events.size() < 32) {
+                const auto event = attention.dequeue();
+                if (event.second == eventEpoch)
+                    events << event.first;
+            }
+            if (attention.isEmpty())
+                attentionOverflow = false;
+            emit batch(items, events, eventEpoch);
         });
     }
   signals:
-    void batch(const QList<Archcodex::Session> &items);
+    void batch(const QList<Archcodex::Session> &items,
+               const QList<Archcodex::SessionAttention> &events, quint64 epoch);
     void selected(const Archcodex::Session &session);
     void removed(const QString &id);
     void verified(const QString &id, const QString &error, quint64 token,
@@ -95,12 +132,15 @@ class BackendPump : public QObject {
 };
 AsyncBackend::AsyncBackend(BackendProfile p, const QString &bridge, QObject *parent)
     : Backend(std::move(p), parent), state(std::make_shared<State>()),
-      worker(Worker::forHost("backend:" + profile.sshHost)) {
+      worker(Worker::forHost("backend:" + profile.sshHost)),
+      attentionEpoch(std::make_shared<std::atomic<quint64>>(0)) {
     qRegisterMetaType<Session>();
     qRegisterMetaType<QList<Session>>();
+    qRegisterMetaType<SessionAttention>();
+    qRegisterMetaType<QList<SessionAttention>>();
     connect(this, &Backend::connectionChanged, this,
             [this](const QString &, bool ready) { connected = ready; });
-    state->pump = new BackendPump(profile, bridge, this, nullptr);
+    state->pump = new BackendPump(profile, bridge, this, attentionEpoch, nullptr);
     state->pump->moveToThread(worker->context->thread());
 }
 AsyncBackend::~AsyncBackend() {
@@ -110,9 +150,12 @@ AsyncBackend::~AsyncBackend() {
     });
 }
 void AsyncBackend::connectServer() {
+    ++*attentionEpoch;
+    connected = false;
     worker->post([s = state] { s->pump->core->connectServer(); });
 }
 void AsyncBackend::disconnectServer() {
+    ++*attentionEpoch;
     connected = false;
     worker->post([s = state] { s->pump->core->disconnectServer(); });
 }

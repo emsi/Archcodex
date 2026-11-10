@@ -59,6 +59,7 @@ CodexBackend::~CodexBackend() {
 }
 void CodexBackend::shutdownProcess() {
     ++generation;
+    liveTurns.clear();
     initialized = false;
     listing = false;
     pending.clear();
@@ -286,6 +287,9 @@ void CodexBackend::message(const QJsonObject &m) {
     }
     if ((method == "thread/status/changed" || method == "thread/closed") && !id.isEmpty()) {
         const auto previous = statuses.value(id, sessions.value(id).status);
+        auto before = sessions.value(id);
+        before.status = previous;
+        before.known = statuses.contains(id) || before.known;
         statuses[id] =
             method == "thread/closed" ? QJsonObject{{"type", "notLoaded"}} : p["status"].toObject();
         // Only real activity advances MRU. Inventory reads, duplicate notifications
@@ -312,6 +316,15 @@ void CodexBackend::message(const QJsonObject &m) {
                 readThread(id, true); // Persistence may have materialized with this turn.
         } else
             readThread(id, true);
+        auto after = sessions.value(id);
+        after.backendId = profile.id;
+        after.id = id;
+        after.status = statuses[id];
+        after.known = true;
+        if (method == "thread/status/changed" && before.isRunning() && after.isWaiting())
+            emit attentionRequested({after, SessionAttention::Reason::Waiting});
+        if (method == "thread/closed")
+            liveTurns.remove(id);
     } else if (method == "thread/started") {
         const auto thread = p["thread"].toObject();
         const auto startedId = thread["id"].toString();
@@ -332,10 +345,42 @@ void CodexBackend::message(const QJsonObject &m) {
         statuses.remove(id);
         names.remove(id);
         activityRecency.remove(id);
+        liveTurns.remove(id);
         emit sessionRemoved(id);
     } else if (method == "thread/unarchived") {
         removed.remove(id);
         readThread(id);
+    } else if (method == "turn/started" && !id.isEmpty()) {
+        const auto turn = p["turn"].toObject()["id"].toString();
+        if (!turn.isEmpty() && validText(turn, 128) &&
+            (liveTurns.contains(id) || liveTurns.size() < 4096) && liveTurns.value(id).id != turn)
+            liveTurns[id] = {turn, {}};
+    } else if (method == "turn/completed") {
+        if (liveTurns.value(id).id == p["turn"].toObject()["id"].toString())
+            liveTurns.remove(id);
+    } else if (method == "item/completed" && liveTurns.contains(id)) {
+        // Only structured asynchronous questions from a turn observed live on this
+        // connection. History, replayed responses and server requests are not a source.
+        const auto item = p["item"].toObject();
+        const auto itemId = item["id"].toString();
+        auto &turn = liveTurns[id];
+        if (p["turnId"] != turn.id || item["type"] != "agentMessage" ||
+            item["delivery"] != "async" || item["questions"].toArray().isEmpty() ||
+            itemId.isEmpty() || !validText(itemId, 128) || turn.questions.contains(itemId) ||
+            turn.questions.size() >= 256)
+            return;
+        for (const auto &question : item["questions"].toArray()) {
+            const auto object = question.toObject();
+            if (object["question"].toString().isEmpty() || object["id"].toString().isEmpty())
+                return;
+        }
+        turn.questions.insert(itemId);
+        auto session = sessions.value(id);
+        session.backendId = profile.id;
+        session.id = id;
+        // Blocking questions are covered solely by the status transition. Do not
+        // copy any question text or choices into the notification event.
+        emit attentionRequested({session, SessionAttention::Reason::Question});
     }
 }
 void CodexBackend::upsert(QJsonObject t, bool verified) {

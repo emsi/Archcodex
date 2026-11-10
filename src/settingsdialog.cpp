@@ -15,7 +15,7 @@
 
 namespace Archcodex {
 SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExecutable,
-                               QWidget *parent, Commands *registry, bool restore)
+                               QWidget *parent, Commands *registry, bool restore, bool notify)
     : QDialog(parent), commands(registry) {
     setWindowTitle("Configure Archcodex");
     setObjectName("settingsDialog");
@@ -85,6 +85,18 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
          "If needed, enter the absolute path reported by command -v codex in your local terminal. "
          "This does not change the executable of a local host server or start an app-server.");
 
+    auto *notifications = page("Notifications", "Desktop notifications");
+    notificationsEnabled = new QCheckBox("Notify when Codex needs attention");
+    notificationsEnabled->setObjectName("notificationsEnabled");
+    notificationsEnabled->setChecked(notify);
+    notifications->addWidget(notificationsEnabled);
+    help(notifications,
+         "Notify when a running session becomes waiting, or when a server delivers a live "
+         "structured asynchronous question. Question text and answer choices are kept out of "
+         "notifications. Click a notification to open its session.\n\n"
+         "Some servers do not broadcast asynchronous questions to observers. Those questions "
+         "cannot notify unless the session also becomes waiting. Notification availability "
+         "and window activation depend on your desktop settings.");
     auto *backends = page("Backends", "myCodex");
     showAllMyCodexSessions =
         new QCheckBox("Show sessions outside the container's working directory");
@@ -151,7 +163,7 @@ bool SettingsDialog::apply() {
         }
     }
     emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked(), executable,
-                         restoreOpened->isChecked());
+                         restoreOpened->isChecked(), notificationsEnabled->isChecked());
     return true;
 }
 } // namespace Archcodex

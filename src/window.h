@@ -25,6 +25,7 @@ class TerminalArea;
 class DiscoveryDialog;
 class Commands;
 class OpeningCoordinator;
+class Notifications;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -90,6 +91,7 @@ class Window : public QMainWindow {
     QSplitter *splitter;
     TerminalArea *terminal;
     OpeningCoordinator *opening;
+    Notifications *notifications;
     QToolButton *workspaceStatus;
     bool workspaceLoaded = false, workspaceWritable = false, workspaceSaving = false;
     bool closing = false;
@@ -157,6 +159,8 @@ class Window : public QMainWindow {
     void discover();
     void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues);
     void activate(const QModelIndex &index);
+    void activateSession(const QString &backend, const QString &thread,
+                         bool requireAvailable = false);
     void sessionContextMenu(const QPoint &position);
     void newSession(const QString &backend, const QString &path);
     void forkSession(const QString &backend, const QString &thread);

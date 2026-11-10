@@ -71,6 +71,9 @@ planned protocol-observation option that requires no Codex changes.
   conversations, with recent-use ordering.
 - **Live status:** distinguish running and waiting sessions using app-server
   events, without status polling.
+- **Desktop notifications:** open the right session from a Running → Waiting
+  alert. Configure these in **Settings → Notifications**; see
+  [notification behavior and compatibility](docs/notifications.md).
 - **Embedded terminal:** use the Codex TUI in Konsole, with local clipboard and
   image input even when the workspace is in a remote myCodex container.
 - **Search and filters:** search full conversations across connected servers,

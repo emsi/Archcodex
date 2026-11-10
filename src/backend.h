@@ -33,6 +33,7 @@ class Backend : public QObject {
     void connectionChanged(const QString &description, bool ready);
     void sessionChanged(const Archcodex::Session &session);
     void sessionsChanged(const QList<Archcodex::Session> &sessions);
+    void attentionRequested(const Archcodex::SessionAttention &event);
     void sessionRemoved(const QString &id);
     void loadedInventory(const QSet<QString> &ids);
     void loadedInventoryFailed();
@@ -88,6 +89,11 @@ class CodexBackend : public Backend {
     QSet<QString> observed;
     bool loadedKnown = false;
     QHash<QString, Session> sessions;
+    struct LiveTurn {
+        QString id;
+        QSet<QString> questions;
+    };
+    QHash<QString, LiveTurn> liveTurns;
     QQueue<QString> reads;
     QSet<QString> scheduledReads, dirtyReads;
     int reading = 0;

@@ -63,6 +63,12 @@ struct Session {
     static Session fromThread(const QString &backend, const QJsonObject &thread);
     QJsonObject metadata() const;
 };
+// A live occurrence, separate from the replaceable session inventory. Never persisted.
+struct SessionAttention {
+    enum class Reason { Waiting, Question };
+    Session session;
+    Reason reason = Reason::Waiting;
+};
 QString sessionKey(const QString &backend, const QString &thread);
 QString projectKey(const QString &backend, const QString &path);
 bool validText(const QString &text, int maxLength = 4096);
@@ -76,3 +82,4 @@ QString serverDetails(const BackendProfile &profile);
 } // namespace Archcodex
 
 Q_DECLARE_METATYPE(Archcodex::Session)
+Q_DECLARE_METATYPE(Archcodex::SessionAttention)
