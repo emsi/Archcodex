@@ -1,5 +1,12 @@
 # myCodex transport options and adopted route
 
+Update, 2026-11-10: the [local TUI connection plan](local-tui-connections.md)
+supersedes the future terminal-placement direction in this earlier discussion.
+The [new security analysis](container-transport-security.md) recommends evaluating
+shared helpers without remote listeners or socket mounts. That recommendation
+has not been adopted for implementation. The description below still records
+the route shipped in 0.5.1 and the earlier alternatives.
+
 Status: the implementation request adopts direct container integration for 0.4.0.
 Use Docker exec and native `codex app-server proxy` without a PTY for protocol
 traffic; launch the container's Codex TUI with a PTY. Remote hosts use the same

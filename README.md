@@ -131,6 +131,10 @@ capability error.
   generic SSH socket profiles remain planned.
 - [myCodex integration](docs/mycodex.md): agreed identity, discovery,
   responsiveness and shared-history requirements.
+- [Local TUI connection plan](docs/local-tui-connections.md): desktop clients,
+  shared SSH transports, process counts and disconnect requirements; not yet implemented.
+- [Container transport security](docs/container-transport-security.md): proposed
+  shared helpers, socket exposure boundaries and lifecycle tradeoffs.
 - [myCodex transport discussion](docs/mycodex-transport-options.md): volume/socket
   exposure and SSH forwarding compared with an optional container exec relay.
 - [Flatpak design](docs/flatpak.md): runtime, terminal integration, host commands,

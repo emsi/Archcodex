@@ -1,5 +1,10 @@
 # myCodex integration: 0.5.1
 
+The [local TUI connection plan](local-tui-connections.md), recorded on 2026-11-10,
+describes the next direction. It does not change the implemented routes below;
+the [container transport analysis](container-transport-security.md) recommends
+a shared helper route for discussion, not an implemented or adopted transport.
+
 Implemented on 2026-11-09 following the request to adopt direct container
 integration. Existing containers are the primary workflow. No new myCodex
 command, image update, container recreation, socket mount or permanent service
