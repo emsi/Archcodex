@@ -8,7 +8,7 @@ interface.
 
 ## Install from Flatpak
 
-Download **`Archcodex-0.7.0-x86_64.flatpak`** and **`SHA256SUMS`** from the
+Download **`Archcodex-0.7.1-x86_64.flatpak`** and **`SHA256SUMS`** from the
 [latest GitHub release](https://github.com/emsi/Archcodex/releases/latest) into
 the same directory.
 
@@ -17,7 +17,7 @@ in your **local host terminal**, outside myCodex or any other container:
 
 ```sh
 sha256sum -c SHA256SUMS
-flatpak install --user --or-update ./Archcodex-0.7.0-x86_64.flatpak
+flatpak install --user --or-update ./Archcodex-0.7.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -155,7 +155,7 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-Version **0.7.0** supports existing local Unix-socket app-servers and local or
+Version **0.7.1** supports existing local Unix-socket app-servers and local or
 SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
 to non-container app-servers remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.
@@ -185,7 +185,7 @@ produces the bundle and checksums in `dist/`. On x86_64:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.7.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.7.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 

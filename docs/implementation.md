@@ -1208,3 +1208,59 @@ unverified here: this environment prohibits user namespaces, and installation
 cache triggers report that restriction. The normal desktop installation was not
 modified. Fully quit the old application, install the bundle and relaunch for
 desktop acceptance testing.
+
+## 0.7.1 release of fa62908
+
+The user requested a new GitHub release containing `fa62908a109fc6d5e5963c0d61fd84641df031a3`.
+That commit pins Konsole 26.04.3 and adds a real-PTY scrollback regression.
+Version 0.7.1 adds release metadata on top; it does not change the requested fix.
+The bundled terminal uses legacy keyboard handling to keep Shift+Page Up/Down
+and Shift+Home/End local when a client requests the enhanced keyboard protocol.
+See [the release notes](releases/v0.7.1.md).
+
+### Validation
+
+The pinned Konsole archive checksum matched, both existing embedding patches
+applied, and the component built in the KDE 6.11 SDK. Fresh staging contains
+Konsole 26.04.3 libraries and plugin without stale 26.08.2 libraries; the plugin's
+ELF dependency and the Konsole executable's version both confirm 26.04.3.
+Application version and AppStream metadata are 0.7.1. Effective Flatpak
+permissions are byte-identical to 0.7.0.
+
+All eight suites pass across native, SDK and X11 environments: discovery,
+containers, transport, core, runtime, model, window and terminal. There are
+21 passing X11 window cases and 15 real-terminal cases, including both scrollback
+variants and existing shortcut, switching and client-lifecycle coverage. The
+stripped application passes the window/Konsole smoke test. Full Flatpak sandbox
+launch remains unavailable because this environment rejects user namespaces;
+direct runtime checks do not replace desktop acceptance. AppStream retains its
+existing missing-homepage warning.
+
+### Decisions not agreed in advance
+
+Building and publishing a release containing fa62908 is explicitly authorized.
+These supporting choices were made for that release:
+
+- Use patch version 0.7.1 and update CMake, README, AppStream and the bundle script.
+  The release tag points to a version-metadata commit containing fa62908, so
+  source, executable, metadata and asset names agree. Historical tags/assets stay
+  intact; the release catalog is updated in a separate provenance commit.
+- Rebuild Konsole from the manifest-pinned archive with the existing patches and
+  stage the package from fresh component installs, including the manifest's
+  bundled license files. Reuse the existing KDE SDK/runtime and native build
+  directories; no installed desktop application or host configuration is changed.
+- Run the eight suites and verify packaged versions, library dependencies,
+  metadata, checksums, isolated installation and smoke behavior. Logs, source
+  archive, temporary runtime/configuration, staging and verification downloads
+  remain under ignored `.build/release-0.7.1/`, `.build/package-0.7.1` and the SDK
+  work directory; the bundle and local build record remain in ignored `dist/`.
+  A temporary fixture-bridge symlink is removed after X11 testing.
+- Follow the established GitHub draft/upload/download-verify/publish procedure
+  using the CLI because the connector lacks release APIs. Publish the Flatpak
+  and a per-release checksum file with reviewed notes and the explicit
+  v0.7.0-to-v0.7.1 comparison. Mark 0.7.1 Latest as a normal GitHub release
+  explicitly described as a development build. Keep the repository's current
+  visibility (now public); no visibility or signing-policy change is made.
+- Commit and push the release metadata, provenance and annotated version tag
+  without force. No CI publisher, Flathub submission, unrelated source fix or
+  rebuild of previous versions is included.

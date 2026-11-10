@@ -9,8 +9,8 @@ Konsole patches needed to build the bundled component.
 
 These 0.x versions are development builds for Linux host testing. GitHub's
 Latest label identifies the recommended download; it does not mean every
-desktop acceptance scenario has been qualified. Only v0.7.0 is marked Latest
-in this historical publication. Earlier versions remain available for reference.
+desktop acceptance scenario has been qualified. Earlier versions remain
+available for reference; the newest recommended release carries Latest.
 Standalone GitHub bundles do not create a Flatpak update repository or a Flathub
 listing.
 
@@ -18,6 +18,7 @@ listing.
 
 | Version | Changes |
 | --- | --- |
+| [0.7.1](v0.7.1.md) | Restore terminal scrollback shortcuts with Konsole 26.04.3 |
 | [0.7.0](v0.7.0.md) | Configurable keyboard navigation and deferred recent-terminal/project switching |
 | [0.6.2](v0.6.2.md) | Independent conversation search and per-tab local filters |
 | [0.6.1](v0.6.1.md) | myCodex startup discovery and local Codex executable lookup |
@@ -78,24 +79,24 @@ history and preserve known limitations.
    normal release, and false for historical releases. A prerelease cannot be
    Latest. Recheck published downloads and the Latest endpoint afterward.
 
-The historical 0.x releases are normal GitHub releases explicitly described as
-development builds, allowing v0.7.0 to carry Latest. Future prereleases should
+The 0.x releases are normal GitHub releases explicitly described as
+development builds. Future prereleases should
 use GitHub's prerelease flag when they should not replace the recommended build.
 Publication always needs task authorization; this procedure is not an unattended
 release workflow.
 
-## Publication verification — 2026-11-10
+## Initial history publication — 2026-11-10
 
 All 14 versions, v0.1.0 through v0.7.0, were published after draft verification.
 Each has exactly two uploaded assets: its original Flatpak and `SHA256SUMS`.
 All 28 uploaded files were downloaded and hashed before publication. Published
 release bodies, asset IDs/digests and peeled tag commits were checked against
 the catalog afterward. The v0.7.0 published assets were downloaded and checked
-again, and GitHub's Latest endpoint resolves to v0.7.0.
+again, and GitHub's Latest endpoint resolved to v0.7.0 at that time.
 
-The repository was private at publication, and remains private. Releases and
-downloads inherit repository access; publication did not make them anonymous
-public downloads or change repository visibility. No application tests were
+The repository was private at the initial publication. Releases and
+downloads inherit repository access; that publication did not change repository
+visibility. No application tests were
 rerun because this task changed only release documentation and distribution;
 the artifact checks above supplement the version-specific recorded test history.
 
