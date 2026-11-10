@@ -1,63 +1,19 @@
 # Archcodex
 
-Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.7.0** supports **existing local Unix-socket app-servers** and
-**myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
-SSH socket profiles remain planned.
+Archcodex is a native Linux desktop app for managing multiple Codex instances
+and their sessions in one workspace. Connect to local Codex app-servers and
+[myCodex](https://github.com/emsi/myCodex) containers on your computer or remote
+hosts over SSH, browse their projects, and work in the existing Codex terminal
+interface.
 
-Its primary workflow is returning to **existing Codex sessions**. On startup it
-discovers the current user’s host-visible local Codex servers and loads their
-sessions. Projects groups local servers under **username @ hostname**, local
-containers under **myCodex @ hostname**, and remote myCodex connections under
-their own host groups. Short server/container names sit below these roots, with
-compact project folders underneath. No project creation is needed; process IDs
-remain confined to details and terminal headers retain their full context.
-It provides All, Active, Running, Waiting and Opened views, conversation search
-and the existing Codex TUI. **All** searches full conversations on Enter; the other
-tabs filter cached titles, paths and session IDs as you type, without server
-requests. Each tab keeps its own query and scope. Active includes live sessions
-at an idle prompt.
-Exited terminal clients retain their output, remain in Active, and offer an explicit restart.
-Restart rechecks the selected session and uses the current connection profile.
-**Opened** lists all open terminal views, including retained exited/error output,
-regardless of history visibility settings. **Ctrl+Tab** opens a recent-terminal switcher; **Ctrl+Shift+Tab** reverses direction.
-Only releasing Ctrl switches the terminal; Escape cancels. **Ctrl+backtick** cycles
-projects with open terminals, selecting each project's most recently activated view.
-**Alt+1–5** selects the Projects views; **Alt+0** focuses the terminal.
-**Ctrl+Shift+P** opens the command palette; **Ctrl+Alt+P/F** focuses Projects or its
-search/filter field. **Ctrl+Shift+F** searches terminal scrollback. Bindings are
-configurable under **Settings → Keyboard Shortcuts**.
-Right-click a session for **Fork**, **New** in the same directory, or **Close**
-its terminal view. Folders offer **New** and **Expand All**; host/server nodes
-offer **Expand All** for their branch. Newer activity transitions can update
-recent-use ordering from server events; the existing ordering is unchanged.
-**View → Hide unsaved sessions** is enabled by default and remembered; open
-terminal entries remain accessible even when their conversation is unsaved.
-**Settings → Configure Archcodex…** organizes preferences into Application,
-Backends and Keyboard Shortcuts pages. myCodex lists only sessions in each container's WORKDIR and
-subdirectories by default, in history/activity tabs and search. Enable **Show sessions outside
-the container's working directory** under Backends to include other shared history.
-Each view compresses its own folder paths. Running, Waiting and Opened open expanded;
-waiting sessions use green indicators, running sessions blue.
-Selecting a row preserves its status colour. A red retained-client error clears
-when its terminal closes; the server's waiting state does not prove a successful reconnect.
-Session and project indicators reflect **server events, without status
-polling**. Multiple local and container servers connect independently.
-Discovery issues appear in the status bar; click **Discovery limited** or use
-**Connections → Discovery details** for explanations, technical details and
-retry/add-connection/copy-report actions. Discovery never opens a popup on its own.
+## Install from Flatpak
 
-The adopted foundation is **C++20, Qt 6 Widgets, KDE Frameworks 6 and Konsole
-KPart**, distributed primarily as a **Flatpak**. Linux is the only target; KDE on
-Debian 13 and Ubuntu 26.04 or newer is the initial desktop baseline. X11 support
-is required. This first package uses X11, including XWayland where available.
-
-## Install and test
-
-Download the Flatpak and `SHA256SUMS` from the
+Download **`Archcodex-0.7.0-x86_64.flatpak`** and **`SHA256SUMS`** from the
 [latest GitHub release](https://github.com/emsi/Archcodex/releases/latest) into
-the same directory. Quit any older Archcodex instance, then run these commands
-there in your **host KDE terminal**, outside myCodex or any other container:
+the same directory.
+
+With Flatpak installed, quit any older Archcodex instance and run the following
+in your **local host terminal**, outside myCodex or any other container:
 
 ```sh
 sha256sum -c SHA256SUMS
@@ -65,12 +21,167 @@ flatpak install --user --or-update ./Archcodex-0.7.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
-Each version has its own release notes, matching source tag and bundle checksum;
-see the [release history and publishing procedure](docs/releases/README.md).
-These are development builds for host testing. GitHub distributes standalone
-bundles; this does not configure an automatic Flatpak update repository.
+The package targets **x86_64 Linux with X11 or XWayland**. KDE on Debian 13 and
+Ubuntu 26.04 or newer is the initial desktop baseline. Flatpak may prompt to
+download the KDE 6.11 runtime; matching host Qt/KDE libraries are not required.
 
-For a local build, the equivalent files are in `dist/`:
+To update, download a newer release and repeat the installation command with
+its filename. These are standalone development bundles for host testing;
+installing one does not configure an automatic Flatpak update repository.
+See [all releases](https://github.com/emsi/Archcodex/releases) for version-specific
+notes and checksums.
+
+### Requirements
+
+- **Codex on the local computer** and an independently running app-server.
+  Codex 0.166.0 was used for protocol validation; myCodex connections require a
+  local Codex CLI version of **0.166.0 or newer**. Archcodex does not install
+  Codex or start app-servers.
+- **Host Python 3** at `/usr/bin/python3` for local discovery. No third-party
+  Python packages are required.
+- **For myCodex:** Docker access and Python 3 on each selected host, plus a
+  running systemd user manager on the local computer. Remote hosts also need
+  an accepted SSH host key and non-interactive authentication, such as an SSH
+  agent.
+
+## Features
+
+- **Automatic discovery:** find existing local Codex servers and running
+  myCodex containers without creating projects manually.
+- **Organized sessions:** browse hosts, servers, compact project folders and
+  conversations, with recent-use ordering.
+- **Live status:** distinguish running and waiting sessions using app-server
+  events, without status polling.
+- **Embedded terminal:** use the Codex TUI in Konsole, with local clipboard and
+  image input even when the workspace is in a remote myCodex container.
+- **Search and filters:** search full conversations across connected servers,
+  or filter live and opened sessions as you type.
+- **Keyboard navigation:** use a command palette, configurable shortcuts and
+  recent-terminal/project switchers.
+- **Retained output:** keep exited or failed terminal views available to
+  inspect and restart explicitly.
+
+## Using Archcodex
+
+### Connect and open a session
+
+1. Start Codex normally on your local computer, or start your myCodex containers.
+2. Launch Archcodex. Local servers and containers are discovered automatically.
+3. For remote myCodex containers, open **Connections → myCodex hosts…** and add
+   an SSH host alias from your existing SSH configuration.
+4. Expand a host, server and project in **Projects**. Press Enter or double-click
+   a session to open its terminal.
+
+Projects are groups of existing working directories; no project setup is needed.
+Local Codex, local myCodex and remote myCodex hosts have separate roots, and
+identical paths on different servers remain separate.
+
+Use **Discover** to refresh local discovery explicitly, or
+**Connections → Manage connections → Add** for a custom local socket.
+An empty socket path selects Codex's default endpoint.
+
+Right-click a session for **Fork**, **New** in the same directory, or **Close**
+its terminal view. Directories offer **New** and **Expand All**; other parent
+nodes offer **Expand All**. Closing a terminal does not delete its conversation
+history. An exited client retains its output and offers **Restart client**.
+
+### Choose a view and search
+
+| View | What it shows |
+| --- | --- |
+| **All** | Saved and live sessions; search full conversations by pressing Enter. |
+| **Active** | Live sessions, including idle prompts, plus retained exited/error terminals. |
+| **Running** | Sessions currently executing a turn. |
+| **Waiting** | Sessions at an input prompt or waiting for input or approval. |
+| **Opened** | All open terminal views, including retained exited/error output. |
+
+Each view keeps its own query and scope. In **All**, choose all servers or a
+selected server/folder to scope conversation search. **Load more history**
+retrieves older session entries.
+
+In **Active**, **Running**, **Waiting** and **Opened**, typing filters cached
+titles, working-directory paths and session IDs without making server search
+requests. Each view compresses its own folder paths. Running, Waiting and Opened
+start expanded; waiting indicators are green and running indicators are blue.
+
+### Navigate with the keyboard
+
+| Shortcut | Action |
+| --- | --- |
+| Ctrl+Shift+P | Open the command palette |
+| Ctrl+Shift+F | Search terminal scrollback |
+| Ctrl+Alt+P / Ctrl+Alt+F | Focus Projects / its search or filter field |
+| Alt+1–5 | Select All / Active / Running / Waiting / Opened |
+| Alt+0 | Return to the terminal |
+| F6 / Shift+F6 | Switch pane |
+| Ctrl+Tab / Ctrl+Shift+Tab | Cycle recent terminals |
+| Ctrl+backtick / Ctrl+Shift+backtick | Cycle projects with open terminals |
+| Ctrl+Shift+W | Close the current terminal |
+| Ctrl+Shift+, | Open Settings |
+| Menu / Shift+F10 | Open the selected project/session row's context menu |
+
+For either recent-item switcher, keep Ctrl held to choose an entry, release it
+to activate, or press Escape to cancel. Project cycling selects that project's
+most recently activated open terminal.
+
+Change bindings in **Settings → Configure Archcodex… → Keyboard Shortcuts**.
+
+### Settings and connection details
+
+**Settings → Configure Archcodex…** organizes preferences into Application,
+Backends and Keyboard Shortcuts:
+
+- **Hide unsaved sessions** is enabled by default and also available in the
+  View menu. Open terminal views remain accessible.
+- **myCodex visibility** defaults to each container's WORKDIR and subdirectories.
+  Enable **Show sessions outside the container's working directory** under
+  Backends to include other shared history. Visibility alone does not authorize
+  resuming a session in a different container.
+- **Local Codex executable**, under Application, lets you choose an absolute
+  executable path when automatic discovery or the GUI's PATH finds the wrong
+  version or none at all.
+
+If discovery is incomplete, click **Discovery limited** in the status bar or
+open **Connections → Discovery details**. The details include explanations,
+technical information and retry/add-connection/copy-report actions. Use
+**Connections → myCodex hosts…** to retry or disable a container host.
+
+The Codex TUI runs on the **local computer running Archcodex**. For myCodex
+connections, the app-server, tools and workspace stay in the selected container.
+Transports are shared per host/container, and no remote listening socket is
+created. A conversation marked **History only** cannot be resumed in a container
+unless Archcodex has observed it loaded in that execution environment.
+See [myCodex integration](docs/mycodex.md) for details.
+
+### Current scope
+
+Version **0.7.0** supports existing local Unix-socket app-servers and local or
+SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
+to non-container app-servers remain planned. Native Wayland is not yet qualified;
+the Flatpak uses X11/XWayland.
+
+Conversation search depends on the server's experimental search API. See
+[implementation and host testing](docs/implementation.md) for compatibility,
+permissions, validation and known limitations.
+
+## Development
+
+Archcodex uses **C++20, Qt 6 Widgets, KDE Frameworks 6, Konsole KPart,
+Boost.Beast and SQLite**. Linux is the only target; the application UI contains
+no JavaScript or TypeScript.
+
+### Build a Flatpak
+
+On a Linux machine with Git, Flatpak, flatpak-builder and working user namespaces:
+
+```sh
+git clone https://github.com/emsi/Archcodex.git
+cd Archcodex
+./scripts/build-flatpak.sh
+```
+
+The script keeps build runtimes in a separate `.build/flatpak` installation and
+produces the bundle and checksums in `dist/`. On x86_64:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
@@ -78,76 +189,15 @@ flatpak install --user --or-update ./dist/Archcodex-0.7.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
-The bundle declares the KDE 6.11 runtime and its Flathub runtime source. Flatpak
-may prompt to download that runtime. The application also requires a compatible
-**host Codex CLI** and an independently running app-server. Codex **0.166.0** was
-used for protocol validation. Archcodex does not install or update Codex.
+The build script itself does not install Archcodex into your normal user
+installation. Dependency sources and hashes are pinned in the
+[Flatpak manifest](packaging/io.github.emsi.Archcodex.json).
 
-1. Start Codex normally on the host if it is not already running. Archcodex
-   discovers existing local servers automatically; it does not start servers.
-2. Expand a server and folder, then press Enter or double-click a session to attach
-   its TUI. Identical directories on different servers remain separate.
-3. **Discover** takes an explicit new snapshot, useful for nonstandard socket
-   locations. Normal Codex socket creation is handled through filesystem events.
-4. Search conversation text by entering a query and pressing Enter; choose all
-   servers or the selected server/folder (including its descendants). **Load more history** retrieves older pages.
-5. **Connections → Manage connections → Add** is an advanced fallback for custom
-   endpoints. An empty socket path selects Codex's default. The optional **Session
-   → New session in selected project** action is secondary to existing sessions.
+### Build and test the core
 
-Discovery requires **host Python 3** at `/usr/bin/python3`, using only its standard
-library. It inspects same-user socket/process metadata and waits for Linux
-inotify events; session state comes exclusively from app-server notifications.
-It does not read account credentials. Container discovery uses a separate Docker adapter; other users' host
-processes remain outside host discovery. See [local discovery](docs/discovery.md).
-
-Local myCodex containers are detected automatically. Use **Connections → myCodex
-hosts…** to add an SSH alias, retry a connection or disable discovery. Docker CLI
-access and Python 3 are required on each host; remote background connections need
-an accepted host key and non-interactive authentication through host OpenSSH.
-No myCodex update, container recreation or additional Flatpak permission is required.
-
-The Codex TUI runs **on the local computer running Archcodex**, using local clipboard/image input
-and an explicit private relay endpoint. App-server, tools and workspaces remain
-in the selected container. Observers and TUIs share one pipe-only transport per
-host, with one Docker attachment per container and one SSH connection per remote
-host profile. No remote listener or socket mount is created. The desktop needs
-**Codex 0.166.0 or newer** and a **running systemd user manager** for
-transport supervision. SSH keepalives use 15 seconds / three missed replies;
-session status remains event-driven. The local client is selected from
-**Settings → Configure Archcodex → Application → Local Codex executable** when
-specified, otherwise from live local server discovery, then local PATH. Automatic
-selection prefers the default local server; several other detected versions use
-stable path order. Set an explicit absolute path if you want a particular version.
-Flatpak does not need that path in its own PATH. The version check applies to this
-local TUI, not the SSH host outside its containers. See the [transport design](docs/container-transport-security.md).
-
-Version 0.6.1 also fixes startup request ordering that could leave a configured
-myCodex host permanently at “Discovering…” when several hosts start together.
-
-A shared conversation appears as
-**History only** unless Archcodex has observed it loaded in that execution
-environment. Shared files alone never authorize resuming it there. Private
-storage without explicit mode metadata is labeled **Custom storage**.
-See [myCodex integration](docs/mycodex.md) for requirements and boundaries.
-
-See [implementation and host testing](docs/implementation.md) for scope,
-permissions, tested behavior and known limitations.
-
-## Build
-
-On a Linux machine with Flatpak, flatpak-builder and working user namespaces:
-
-```sh
-./scripts/build-flatpak.sh
-```
-
-The script uses a separate `.build/flatpak` installation for build runtimes. It
-does not install Archcodex into your normal Flatpak installation. Source releases
-and checksums are pinned in the [manifest](packaging/io.github.emsi.Archcodex.json).
-
-Core tests can also be built with Qt 6 development packages, its SQLite driver,
-Qt Test/WebSockets, Boost headers and Python 3:
+Install CMake 3.22 or newer, Ninja, a C++20 compiler, Qt 6 development packages
+(Core, Network, SQL, Test and WebSockets), Qt's SQLite driver, Boost headers
+and Python 3, then run:
 
 ```sh
 cmake -S . -B build -G Ninja -DARCHCODEX_GUI=OFF -DBUILD_TESTING=ON
@@ -155,43 +205,34 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-The full native build additionally requires KDE Frameworks 6 and the Konsole
-KPart with the lifecycle patch in `packaging/` at runtime. The Flatpak supplies
-the matching components; an unpatched system KPart is rejected with an explicit
-capability error.
+A full native GUI build additionally needs Qt Widgets and KDE Frameworks 6
+CoreAddons, Parts, XmlGui and ConfigWidgets. At runtime it requires the Konsole
+KPart with the patches in `packaging/`; an unpatched system component is rejected
+with a capability error. The Flatpak supplies the matching components.
 
-## Design documents
+### Architecture and contributing
 
-- [Project design](docs/design.md): requirements, architecture, event handling,
-  session lifetime, search, technology choices and validation.
-- [Backend design](docs/backends.md): adapter contracts and the implementation
-  roadmap. Local Unix and local/SSH myCodex are implemented; direct TCP and
-  generic SSH socket profiles remain planned.
-- [myCodex integration](docs/mycodex.md): agreed identity, discovery,
-  responsiveness and shared-history requirements.
-- [Local TUI connection plan](docs/local-tui-connections.md): desktop clients,
-  shared transports, process counts and disconnect requirements; myCodex route implemented.
-- [Container transport security](docs/container-transport-security.md): adopted
-  shared helpers, socket exposure boundaries and lifecycle tradeoffs.
-- [myCodex transport discussion](docs/mycodex-transport-options.md): volume/socket
-  exposure and SSH forwarding compared with an optional container exec relay.
-- [Flatpak design](docs/flatpak.md): runtime, terminal integration, host commands,
-  proposed permissions and packaging checks.
-- [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
-- [Initial UI design](docs/ui.md): a simple IDE layout, host groups, expandable projects and
-  sessions, and the five session views.
-- [Implementation and testing](docs/implementation.md): what 0.7.0 delivers and
-  how to exercise it on your host.
+Read the implementation notes before changing connection or session behavior.
+Session status must remain event-driven; backend work must not block the GUI.
+Run the checks relevant to your change and use the documented host acceptance
+steps for terminal, Docker, SSH or Flatpak integration changes.
 
-## Project status
+- [Project design](docs/design.md): requirements, architecture and technology choices.
+- [Backend design](docs/backends.md): adapter contracts and planned connection types.
+- [Local discovery](docs/discovery.md): host discovery and namespace boundaries.
+- [myCodex integration](docs/mycodex.md): discovery, identity and shared history.
+- [Local TUI connections](docs/local-tui-connections.md): desktop clients and shared transports.
+- [Container transport security](docs/container-transport-security.md): socket boundaries and cleanup.
+- [Transport alternatives](docs/mycodex-transport-options.md): socket forwarding and container relays.
+- [Flatpak design](docs/flatpak.md): packaging, runtime and host commands.
+- [UI design](docs/ui.md): project navigation, session views and interaction behavior.
+- [Implementation and testing](docs/implementation.md): delivered behavior and validation boundaries.
+- [Release history and publishing](docs/releases/README.md): notes, provenance and publication procedure.
 
-Initial implementation for hands-on testing. The design documents also describe
-future stages; the implementation document identifies the current boundary.
+Design documents also describe future stages; their presence does not imply
+that every proposed feature is implemented.
 
-The documents distinguish agreed requirements from proposed implementation
-details and work that still needs validation. Upstream observations were checked
-on **2026-11-09**; they are not a promise that every Codex version supports the
-same protocol capabilities.
+## License
 
 Application code is licensed under **GPL-3.0-or-later**; see [LICENSE](LICENSE).
 Bundled components retain their own licenses. The Flatpak ID is
