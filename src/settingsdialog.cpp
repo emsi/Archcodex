@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "settingsdialog.h"
+#include "commands.h"
 #include "types.h"
+#include <KShortcutsEditor>
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -13,8 +15,8 @@
 
 namespace Archcodex {
 SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExecutable,
-                               QWidget *parent)
-    : QDialog(parent) {
+                               QWidget *parent, Commands *registry)
+    : QDialog(parent), commands(registry) {
     setWindowTitle("Configure Archcodex");
     setObjectName("settingsDialog");
     auto *layout = new QVBoxLayout(this);
@@ -65,7 +67,6 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
     validation->setWordWrap(true);
     validation->setTextFormat(Qt::PlainText);
     validation->hide();
-    application->addWidget(validation);
     help(application,
          "Hide entries without saved history. Open terminals bypass this unsaved-session filter. "
          "This setting also appears in the View menu.\n\n"
@@ -88,6 +89,25 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
          "Shared-history sessions can be opened only where Archcodex has already observed them "
          "running. "
          "The separate unsaved-session setting still applies.");
+    if (commands) {
+        auto *shortcuts = page("Keyboard Shortcuts", "Keyboard shortcuts");
+        shortcutDraft = commands->draft(this);
+        shortcutDraft->setObjectName("shortcutDraft");
+        auto *editor = new KShortcutsEditor(
+            shortcutDraft, this, KShortcutsEditor::WindowAction | KShortcutsEditor::WidgetAction,
+            KShortcutsEditor::LetterShortcutsDisallowed);
+        editor->setObjectName("shortcutEditor");
+        shortcuts->addWidget(editor, 1);
+        auto *defaults = new QPushButton("Restore Defaults");
+        defaults->setObjectName("restoreShortcutDefaults");
+        shortcuts->addWidget(defaults);
+        connect(defaults, &QPushButton::clicked, editor, &KShortcutsEditor::allDefault);
+        help(shortcuts,
+             "Shortcuts work in this window, including inside terminals. "
+             "Archcodex bindings take precedence over terminal bindings. "
+             "Use single key combinations. Apply saves; Cancel discards unapplied edits.");
+    }
+    layout->addWidget(validation);
     connect(categories, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
     categories->setCurrentRow(0);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Apply |
@@ -100,7 +120,7 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
             accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    resize(760, 430);
+    resize(900, 600);
 }
 bool SettingsDialog::apply() {
     const auto executable = localCodex->text().trimmed();
@@ -112,6 +132,14 @@ bool SettingsDialog::apply() {
         return false;
     }
     validation->hide();
+    if (commands) {
+        QString error;
+        if (!commands->apply(Commands::bindings(shortcutDraft), &error)) {
+            validation->setText(error);
+            validation->show();
+            return false;
+        }
+    }
     emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked(), executable);
     return true;
 }

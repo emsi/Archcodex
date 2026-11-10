@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "terminal.h"
+#include "commands.h"
 #include <KActionCollection>
 #include <KPluginFactory>
 #include <KPluginMetaData>
@@ -7,10 +8,13 @@
 #include <QAction>
 #include <QApplication>
 #include <QDir>
+#include <QFrame>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QListWidget>
 #include <QMetaObject>
 #include <QPushButton>
+#include <QSignalBlocker>
 #include <QStackedWidget>
 #include <QUuid>
 #include <QVBoxLayout>
@@ -54,6 +58,7 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
 }
 TerminalArea::~TerminalArea() {
     qApp->removeEventFilter(this);
+    delete switcher;
     stack->disconnect(this);
     for (auto *p : findChildren<KParts::ReadOnlyPart *>())
         p->disconnect(this);
@@ -99,6 +104,9 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
             self(self, child);
     };
     disableTracking(disableTracking, part);
+    connect(part, SIGNAL(overrideShortcut(QKeyEvent *, bool &)), this,
+            SLOT(overrideShortcut(QKeyEvent *, bool &)), Qt::DirectConnection);
+    updateShortcuts();
     stack->addWidget(part->widget());
     connect(part, &QObject::destroyed, this, [this] {
         for (auto it = parts.begin(); it != parts.end();)
@@ -112,6 +120,58 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
         updateCurrent();
     });
     return part;
+}
+void TerminalArea::setCommands(Commands *value) {
+    commands = value;
+    connect(commands, &Commands::bindingsChanged, this, &TerminalArea::updateShortcuts);
+    updateShortcuts();
+}
+void TerminalArea::updateShortcuts() {
+    if (!commands)
+        return;
+    const auto visit = [this](auto &&self, KXMLGUIClient *client) -> void {
+        for (auto *action : client->actionCollection()->actions()) {
+            if (!action->property("archcodexOriginalShortcuts").isValid())
+                action->setProperty("archcodexOriginalShortcuts",
+                                    QVariant::fromValue(action->shortcuts()));
+            auto keys = action->property("archcodexOriginalShortcuts").value<QList<QKeySequence>>();
+            keys.removeIf([this](const QKeySequence &key) { return commands->owns(key); });
+            action->setShortcuts(keys);
+        }
+        for (auto *child : client->childClients())
+            self(self, child);
+    };
+    for (auto *part : findChildren<KParts::ReadOnlyPart *>())
+        visit(visit, part);
+}
+void TerminalArea::overrideShortcut(QKeyEvent *event, bool &override) {
+    if (commands && commands->matches(event))
+        override = false;
+}
+void TerminalArea::focusCurrent() {
+    if (auto *part = parts.value(currentKey()).data())
+        part->widget()->setFocus(Qt::ShortcutFocusReason);
+}
+Session TerminalArea::currentSession() const {
+    return clients.value(currentKey());
+}
+bool TerminalArea::triggerAction(const QString &name) {
+    auto *part = parts.value(currentKey()).data();
+    if (!part)
+        return false;
+    const auto find = [&](auto &&self, KXMLGUIClient *client) -> QAction * {
+        if (auto *action = client->actionCollection()->action(name))
+            return action;
+        for (auto *child : client->childClients())
+            if (auto *action = self(self, child))
+                return action;
+        return nullptr;
+    };
+    if (auto *action = find(find, part); action && action->isEnabled()) {
+        action->trigger();
+        return true;
+    }
+    return false;
 }
 bool TerminalArea::open(const BackendProfile &p, const Session &s, QString *error) {
     if (focusSession(sessionKey(p.id, s.id)))
@@ -180,7 +240,7 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh", arguments);
     stack->setCurrentWidget(part->widget());
     delete old;
-    finishCycle();
+    finishCycle(false);
     remember(key);
     part->widget()->setFocus();
     updateCurrent();
@@ -190,7 +250,7 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
 bool TerminalArea::focusSession(const QString &key) {
     if (!parts.value(key))
         return false;
-    finishCycle();
+    finishCycle(false);
     remember(key);
     return showSession(key);
 }
@@ -210,64 +270,231 @@ void TerminalArea::remember(const QString &key) {
     recent.removeAll(key);
     recent.prepend(key);
 }
-void TerminalArea::finishCycle() {
-    if (cycle.isEmpty())
-        return;
-    cycle.clear();
-    remember(currentKey());
+QStringList TerminalArea::candidates(const QStringList &order, bool projects) const {
+    QStringList result;
+    QSet<QString> seen;
+    for (const auto &key : order) {
+        if (!parts.value(key))
+            continue;
+        const auto &session = clients.value(key);
+        const auto project = projectKey(session.backendId, QDir::cleanPath(session.cwd));
+        if (projects && seen.contains(project))
+            continue;
+        seen.insert(project);
+        result << key;
+    }
+    return result;
 }
-void TerminalArea::cycleSession(bool backwards) {
+void TerminalArea::finishCycle(bool commit) {
+    if (cycleOrder.isEmpty() && cycle.isEmpty())
+        return;
+    const auto selected = cycle.value(cycleIndex);
+    const auto previousFocus = cycleFocus;
+    cycleOrder.clear();
+    cycleProjectOrder.clear();
+    cycle.clear();
+    cycleOrigin.clear();
+    cycleModifier = {};
+    if (switcher)
+        switcher->hide();
+    if (commit && parts.value(selected)) {
+        remember(selected);
+        showSession(selected); // Only this path changes focus and records a visit.
+    } else if (previousFocus && previousFocus->isVisible() && window()->isActiveWindow() &&
+               !QApplication::activeModalWidget()) {
+        previousFocus->setFocus(Qt::OtherFocusReason);
+    }
+}
+void TerminalArea::refreshCycle() {
+    if (cycleOrder.isEmpty()) {
+        if (!cycle.isEmpty())
+            finishCycle(false);
+        return;
+    }
+    const auto selected = cycle.value(cycleIndex);
+    const auto previous = clients.value(selected);
+    const auto previousProject = projectKey(previous.backendId, QDir::cleanPath(previous.cwd));
+    cycle = candidates(cycleOrder, cycleProjects);
+    if (cycleProjects) {
+        QHash<QString, QString> representatives;
+        for (const auto &key : cycle) {
+            const auto session = clients.value(key);
+            representatives[projectKey(session.backendId, QDir::cleanPath(session.cwd))] = key;
+        }
+        cycle.clear();
+        for (const auto &project : cycleProjectOrder)
+            if (representatives.contains(project))
+                cycle << representatives[project];
+        if (representatives.contains(previousProject))
+            cycleIndex = cycle.indexOf(representatives[previousProject]);
+    }
     if (cycle.isEmpty()) {
-        for (const auto &key : recent)
-            if (parts.value(key))
-                cycle.append(key);
-        cycleIndex = cycle.indexOf(currentKey());
+        finishCycle(false);
+        return;
+    }
+    const auto index = cycle.indexOf(selected);
+    cycleIndex = index < 0 ? qBound(0, cycleIndex, int(cycle.size()) - 1) : index;
+    const QSignalBlocker block(switcherList);
+    switcherList->clear();
+    for (const auto &key : cycle) {
+        const auto &session = clients.value(key);
+        auto *item =
+            new QListWidgetItem(titles.value(key) + "\n" + session.stateText(), switcherList);
+        item->setData(Qt::UserRole, key);
+        item->setToolTip(titles.value(key) + "\n" + session.id);
+    }
+    switcherList->setCurrentRow(cycleIndex);
+    const auto modifierName = QKeySequence(cycleModifier | Qt::Key_Space)
+                                  .toString(QKeySequence::NativeText)
+                                  .section('+', 0, 0);
+    switcherTitle->setText(
+        QString("%1 — release %2 to switch; Esc cancels")
+            .arg(cycleProjects ? "Recent projects" : "Recent terminals", modifierName));
+    const int width = qMin(850, qMax(200, window()->width() - 40));
+    const int height = qMin(qMax(120, window()->height() - 80),
+                            qMin(480, 70 + int(cycle.size()) * (fontMetrics().height() * 2 + 8)));
+    switcher->setGeometry((window()->width() - width) / 2, (window()->height() - height) / 2, width,
+                          height);
+}
+void TerminalArea::cycleSession(bool backwards, bool projects, Qt::KeyboardModifiers modifier) {
+    if (!cycleOrder.isEmpty() && (cycleProjects != projects || cycleModifier != modifier))
+        finishCycle(false);
+    if (cycleOrder.isEmpty()) {
+        const auto available = candidates(recent, projects);
+        if (available.isEmpty() || (available.size() == 1 && available.first() == currentKey()))
+            return;
+        cycleProjects = projects;
+        cycleModifier = modifier;
+        cycleOrder = recent;
+        cycle = available;
+        for (const auto &key : cycle) {
+            const auto session = clients.value(key);
+            cycleProjectOrder << projectKey(session.backendId, QDir::cleanPath(session.cwd));
+        }
+        cycleOrigin = currentKey();
+        cycleFocus = QApplication::focusWidget();
+        cycleIndex = cycle.indexOf(cycleOrigin);
         if (cycleIndex < 0 && backwards)
             cycleIndex = 0;
+        if (!switcher) {
+            switcher = new QFrame(window());
+            switcher->setObjectName("recentSwitcher");
+            switcher->setFrameShape(QFrame::StyledPanel);
+            switcher->setAutoFillBackground(true);
+            auto *layout = new QVBoxLayout(switcher);
+            switcherTitle = new QLabel;
+            switcherTitle->setTextFormat(Qt::PlainText);
+            switcherTitle->setWordWrap(true);
+            layout->addWidget(switcherTitle);
+            switcherList = new QListWidget;
+            switcherList->setObjectName("recentSwitcherList");
+            switcherList->setAccessibleName("Recent terminals or projects");
+            switcherList->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+            layout->addWidget(switcherList);
+            connect(switcherList, &QListWidget::currentRowChanged, this, [this](int row) {
+                if (row >= 0 && row < cycle.size())
+                    cycleIndex = row;
+            });
+        }
     }
-    if (cycle.isEmpty())
-        return;
     cycleIndex = (cycleIndex + (backwards ? -1 : 1) + cycle.size()) % cycle.size();
-    showSession(cycle[cycleIndex]);
+    refreshCycle();
+    switcher->show();
+    switcher->raise();
+    switcherList->setFocus(Qt::ShortcutFocusReason);
 }
-void TerminalArea::switchRecent(bool backwards) {
-    cycleSession(backwards);
-    finishCycle();
+void TerminalArea::switchRecent(bool backwards, bool projects) {
+    const auto available = candidates(recent, projects);
+    if (available.isEmpty() || (available.size() == 1 && available.first() == currentKey()))
+        return;
+    auto index = available.indexOf(currentKey());
+    if (index < 0 && backwards)
+        index = 0;
+    focusSession(available[(index + (backwards ? -1 : 1) + available.size()) % available.size()]);
 }
 bool TerminalArea::eventFilter(QObject *watched, QEvent *event) {
     if (event->type() == QEvent::ApplicationDeactivate) {
-        finishCycle();
+        finishCycle(false);
         return false;
     }
     auto *widget = qobject_cast<QWidget *>(watched);
     if (!widget || widget->window() != window())
         return false;
-    if (event->type() == QEvent::WindowDeactivate || event->type() == QEvent::MouseButtonPress)
-        finishCycle();
+    if (event->type() == QEvent::WindowDeactivate || QApplication::activeModalWidget()) {
+        finishCycle(false);
+        return false;
+    }
+    if (event->type() == QEvent::MouseButtonPress &&
+        (!switcher || (widget != switcher && !switcher->isAncestorOf(widget))))
+        finishCycle(false);
+    if (event->type() == QEvent::Resize && watched == window())
+        refreshCycle();
     if (event->type() == QEvent::KeyRelease) {
-        const auto *key = static_cast<QKeyEvent *>(event);
-        if (key->key() == Qt::Key_Control && !key->isAutoRepeat())
-            finishCycle();
+        auto *key = static_cast<QKeyEvent *>(event);
+        const bool released =
+            !key->isAutoRepeat() &&
+            ((key->key() == Qt::Key_Control && cycleModifier == Qt::ControlModifier) ||
+             (key->key() == Qt::Key_Alt && cycleModifier == Qt::AltModifier) ||
+             (key->key() == Qt::Key_Meta && cycleModifier == Qt::MetaModifier));
+        if (released && !cycleOrder.isEmpty()) {
+            consumedKeys.remove(key->key());
+            finishCycle(true);
+            key->accept();
+            return true;
+        }
+        if (consumedKeys.remove(key->key())) {
+            key->accept();
+            return true;
+        }
     }
     if (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress)
         return false;
     auto *key = static_cast<QKeyEvent *>(event);
-    const auto modifiers = key->modifiers();
-    if ((modifiers & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier)) ==
-            Qt::ControlModifier &&
-        (key->key() == Qt::Key_Tab || key->key() == Qt::Key_Backtab)) {
-        if (event->type() == QEvent::KeyPress)
-            cycleSession(modifiers.testFlag(Qt::ShiftModifier) || key->key() == Qt::Key_Backtab);
+    auto *action = commands ? commands->cycleAction(key) : nullptr;
+    if (!cycleOrder.isEmpty() ||
+        (action && action->isEnabled() && !QApplication::activePopupWidget())) {
+        if (event->type() == QEvent::KeyPress) {
+            consumedKeys.insert(key->key());
+            if (action) {
+                cycleSession(action->property("cycleBackwards").toBool(),
+                             action->property("cycleKind").toInt() == 2,
+                             key->modifiers() &
+                                 (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier));
+            } else if (key->key() == Qt::Key_Escape) {
+                finishCycle(false);
+            } else if (key->key() == Qt::Key_Up || key->key() == Qt::Key_Down) {
+                cycleIndex = (cycleIndex + (key->key() == Qt::Key_Up ? -1 : 1) + cycle.size()) %
+                             cycle.size();
+                switcherList->setCurrentRow(cycleIndex);
+            } else if (key->key() == Qt::Key_Home || key->key() == Qt::Key_End) {
+                cycleIndex = key->key() == Qt::Key_Home ? 0 : cycle.size() - 1;
+                switcherList->setCurrentRow(cycleIndex);
+            }
+        }
         key->accept();
         return true;
     }
-    if (event->type() == QEvent::KeyPress && !modifiers.testFlag(Qt::ControlModifier))
-        finishCycle();
     return false;
 }
+void TerminalArea::updateSession(const Session &session, const QString &serverName) {
+    const auto key = sessionKey(session.backendId, session.id);
+    if (!clients.contains(key))
+        return;
+    auto current = session;
+    current.terminalOpen = true;
+    current.clientIssue = clients[key].clientIssue;
+    clients[key] = current;
+    titles[key] = current.title + "  ·  " + serverName + "  ·  " + current.cwd;
+    if (currentKey() == key)
+        updateCurrent();
+    refreshCycle();
+}
 void TerminalArea::forgetClient(const QString &key) {
-    finishCycle();
+    if (key == cycleOrigin)
+        finishCycle(false);
     recent.removeAll(key);
+    cycleOrder.removeAll(key);
+    refreshCycle();
     auto s = clients.take(key);
     if (s.id.isEmpty())
         return;
@@ -300,6 +527,7 @@ void TerminalArea::processExited(int exitCode, bool crashed) {
             clients[key].clientIssue = exits[key];
             emit clientStateChanged(clients[key]);
             updateCurrent();
+            refreshCycle();
             emit clientExited(key, exitCode, crashed);
             return;
         }

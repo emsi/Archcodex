@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "commands.h"
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "fixture.h"
@@ -6,11 +7,14 @@
 #include "settingsdialog.h"
 #include "terminal.h"
 #include "window.h"
+#include <KCommandBar>
+#include <KShortcutsEditor>
 #include <QAction>
 #include <QCheckBox>
 #include <QClipboard>
 #include <QComboBox>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDialogButtonBox>
 #include <QHelpEvent>
 #include <QLabel>
@@ -72,11 +76,255 @@ QStringList visibleThreads(QTreeView *tree) {
     ids.sort();
     return ids;
 }
+class SettingsShown : public QObject {
+    std::function<void(SettingsDialog *)> callback;
+    bool eventFilter(QObject *object, QEvent *event) override {
+        if (event->type() == QEvent::Show)
+            if (auto *dialog = qobject_cast<SettingsDialog *>(object))
+                QTimer::singleShot(0, dialog, [this, dialog] { callback(dialog); });
+        return false;
+    }
+
+  public:
+    explicit SettingsShown(std::function<void(SettingsDialog *)> callback)
+        : callback(std::move(callback)) {
+        qApp->installEventFilter(this);
+    }
+    ~SettingsShown() override {
+        qApp->removeEventFilter(this);
+    }
+};
 } // namespace
 
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void keyboardNavigationPaletteAndContextMenus() {
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            store.save(BackendProfile{"b", "Main"});
+        }
+        Window window(data.path(), false);
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        for (const auto &id : {"waiting", "running"}) {
+            auto s = Session::fromThread(
+                "b", {{"id", id},
+                      {"name", id},
+                      {"cwd", "/work/" + QString(id)},
+                      {"path", "/saved/" + QString(id)},
+                      {"status", QJsonObject{{"type", QString(id) == "waiting" ? "idle" : "active"},
+                                             {"activeFlags", QJsonArray{}}}}});
+            backend->sessionChanged(s);
+        }
+        auto *tree = window.findChild<QTreeView *>();
+        auto *query = window.findChild<QLineEdit *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        auto *terminal = window.findChild<TerminalArea *>();
+        auto *commands = window.findChild<Commands *>();
+        QSignalSpy focused(terminal, &TerminalArea::sessionFocused);
+        QCOMPARE(commands->collection()->action("focus_projects")->shortcut(),
+                 QKeySequence("Ctrl+Alt+P"));
+        QCOMPARE(commands->collection()->action("focus_search")->shortcut(),
+                 QKeySequence("Ctrl+Alt+F"));
+        QCOMPARE(commands->collection()->action("command_palette")->shortcut(),
+                 QKeySequence("Ctrl+Shift+P"));
+        QCOMPARE(commands->collection()->action("terminal_find")->shortcut(),
+                 QKeySequence("Ctrl+Shift+F"));
+        for (int i = 0; i < 5; ++i) {
+            query->setFocus();
+            QTest::keyClick(query, Qt::Key(Qt::Key_1 + i), Qt::AltModifier);
+            QCOMPARE(tabs->currentIndex(), i);
+            QCOMPARE(QApplication::focusWidget(), tree);
+        }
+        QTest::keyClick(tree, Qt::Key_4, Qt::AltModifier);
+        QTest::keyClick(tree, Qt::Key_F, Qt::ControlModifier | Qt::AltModifier);
+        QCOMPARE(QApplication::focusWidget(), query);
+        query->setText("waiting");
+        QTest::keyClick(query, Qt::Key_P, Qt::ControlModifier | Qt::AltModifier);
+        QCOMPARE(QApplication::focusWidget(), tree);
+        QTest::keyClick(tree, Qt::Key_P, Qt::ControlModifier | Qt::ShiftModifier);
+        QPointer<KCommandBar> palette = window.findChild<KCommandBar *>("commandPalette");
+        QVERIFY(palette && palette->isVisible());
+        auto *commandSearch = palette->findChild<QLineEdit *>();
+        QVERIFY(commandSearch);
+        commandSearch->setText("Show Running");
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty()) {
+            QApplication::processEvents();
+            QVERIFY(window.grab().save(screenshots + "/command-palette.png"));
+        }
+        QTest::keyClick(commandSearch, Qt::Key_Return);
+        QTRY_COMPARE(tabs->currentIndex(), 2);
+        QTRY_VERIFY(!palette);
+        QCOMPARE(QApplication::focusWidget(), tree);
+        QTest::keyClick(tree, Qt::Key_4, Qt::AltModifier);
+        QCOMPARE(query->text(), "waiting");
+        auto session = nodeWithKey(tree, sessionKey("b", "waiting"));
+        auto folder = session.parent();
+        tree->setCurrentIndex(folder);
+        QVERIFY(tree->isExpanded(folder));
+        QTest::keyClick(tree, Qt::Key_Return);
+        QVERIFY(!tree->isExpanded(folder));
+        QTest::keyClick(tree, Qt::Key_Return);
+        QVERIFY(tree->isExpanded(folder));
+        QTest::keyClick(tree, Qt::Key_F10, Qt::ShiftModifier);
+        QPointer<QMenu> menu = tree->findChild<QMenu *>("sessionContextMenu");
+        QVERIFY(menu && menu->isVisible());
+        QCOMPARE(menu->actions().size(), 2);
+        QCOMPARE(menu->actions().last()->text(), "Expand All");
+        QTest::keyClick(menu, Qt::Key_Escape);
+        QTRY_VERIFY(!menu);
+        QCOMPARE(focused.size(), 0);
+        bool sawSettings = false;
+        bool savedScreenshot = true;
+        SettingsShown shown([&](SettingsDialog *dialog) {
+            sawSettings = true;
+            dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(2);
+            if (!screenshots.isEmpty()) {
+                QApplication::processEvents();
+                savedScreenshot = dialog->grab().save(screenshots + "/keyboard-settings.png");
+            }
+            dialog->reject();
+        });
+        // Offscreen has no window manager to reactivate the owner after a menu.
+        if (QGuiApplication::platformName() == "offscreen")
+            window.activateWindow();
+        tree->setFocus();
+        QTRY_COMPARE(QApplication::activeWindow(), &window);
+        QCOMPARE(QApplication::activePopupWidget(), nullptr);
+        QVERIFY(commands->collection()->action("configureArchcodex")->isEnabled());
+        QCOMPARE(commands->collection()->action("configureArchcodex")->shortcut(),
+                 QKeySequence(Qt::ControlModifier | Qt::ShiftModifier | Qt::Key_Comma));
+        QTest::keyClick(tree, Qt::Key_Comma, Qt::ControlModifier | Qt::ShiftModifier);
+        QTRY_VERIFY(sawSettings);
+        QVERIFY(savedScreenshot);
+        window.close();
+    }
+    void shortcutSettingsAreDraftedValidatedAndPersisted() {
+        QTemporaryDir data;
+        QWidget host;
+        Commands commands(&host);
+        auto *projects = commands.add("focus_projects", "Projects", "Navigation",
+                                      {QKeySequence("Ctrl+Alt+P")}, [] {});
+        auto *terminal = commands.add("focus_terminal", "Terminal", "Navigation",
+                                      {QKeySequence("Alt+0")}, [] {});
+        const auto config = data.filePath("shortcutsrc");
+        QVERIFY(commands.load(config).isEmpty());
+        {
+            SettingsDialog dialog(true, false, {}, &host, &commands);
+            dialog.show();
+            auto *draft = dialog.findChild<KActionCollection *>("shortcutDraft");
+            QVERIFY(draft);
+            draft->action("focus_projects")->setShortcuts({QKeySequence("Ctrl+Alt+J")});
+            QCOMPARE(projects->shortcut(), QKeySequence("Ctrl+Alt+P"));
+            dialog.reject();
+        }
+        QCOMPARE(projects->shortcut(), QKeySequence("Ctrl+Alt+P"));
+        {
+            SettingsDialog dialog(true, false, {}, &host, &commands);
+            dialog.show();
+            auto *draft = dialog.findChild<KActionCollection *>("shortcutDraft");
+            auto *apply = dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Apply);
+            draft->action("focus_projects")->setShortcuts({QKeySequence("Alt+0")});
+            QSignalSpy applied(&dialog, &SettingsDialog::settingsApplied);
+            apply->click();
+            QCOMPARE(applied.size(), 0); // Duplicate shortcuts reject the entire Apply.
+            QCOMPARE(projects->shortcut(), QKeySequence("Ctrl+Alt+P"));
+            draft->action("focus_projects")->setShortcuts({QKeySequence("Ctrl+K, Ctrl+P")});
+            apply->click();
+            QCOMPARE(applied.size(), 0);
+            draft->action("focus_projects")->setShortcuts({QKeySequence("Ctrl+Alt+J")});
+            apply->click();
+            QCOMPARE(applied.size(), 1);
+            QCOMPARE(projects->shortcut(), QKeySequence("Ctrl+Alt+J"));
+            QCOMPARE(terminal->shortcut(), QKeySequence("Alt+0"));
+            dialog.findChild<KShortcutsEditor *>()->allDefault();
+            QCOMPARE(projects->shortcut(), QKeySequence("Ctrl+Alt+J"));
+            dialog.reject(); // Apply survives subsequent unapplied draft edits.
+        }
+        QWidget secondHost;
+        Commands reloaded(&secondHost);
+        auto *again = reloaded.add("focus_projects", "Projects", "Navigation",
+                                   {QKeySequence("Ctrl+Alt+P")}, [] {});
+        reloaded.add("focus_terminal", "Terminal", "Navigation", {QKeySequence("Alt+0")}, [] {});
+        QVERIFY(reloaded.load(config).isEmpty());
+        QCOMPARE(again->shortcut(), QKeySequence("Ctrl+Alt+J"));
+        SettingsDialog reset(true, false, {}, &secondHost, &reloaded);
+        reset.findChild<KShortcutsEditor *>()->allDefault();
+        reset.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Apply)->click();
+        QCOMPARE(again->shortcut(), QKeySequence("Ctrl+Alt+P"));
+    }
+    void heldShortcutValidation() {
+        QWidget host;
+        Commands commands(&host);
+        auto *next = commands.add("next", "Next", "Navigation", {QKeySequence("Ctrl+Tab")}, [] {});
+        auto *previous = commands.add("previous", "Previous", "Navigation",
+                                      {QKeySequence("Ctrl+Shift+Tab")}, [] {});
+        next->setProperty("cycleKind", 1);
+        previous->setProperty("cycleKind", 1);
+        auto values = Commands::bindings(commands.collection());
+        QVERIFY(commands.validate(values).isEmpty());
+        values["next"] = {QKeySequence("Ctrl+Alt+Tab")};
+        QVERIFY(!commands.validate(values).isEmpty());
+        values["next"] = {QKeySequence("Alt+Tab")};
+        QVERIFY(!commands.validate(values).isEmpty()); // Mixed held modifiers.
+        values["next"] = {QKeySequence("Ctrl+Tab"), QKeySequence("Ctrl+F8")};
+        QVERIFY(!commands.validate(values).isEmpty());
+        values["next"] = {QKeySequence(Qt::ControlModifier | Qt::Key_Backtab)};
+        QVERIFY(!commands.validate(values).isEmpty()); // Same as Ctrl+Shift+Tab.
+        values["next"] = {QKeySequence("Alt+F8")};
+        values["previous"] = {QKeySequence("Alt+Shift+F8")};
+        QVERIFY(commands.validate(values).isEmpty());
+    }
+    void existingOrderingAfterBackgroundTransition_data() {
+        QTest::addColumn<bool>("separateProjects");
+        QTest::newRow("sessions") << false;
+        QTest::newRow("projects") << true;
+    }
+    void existingOrderingAfterBackgroundTransition() {
+        QFETCH(bool, separateProjects);
+        Fixture fixture;
+        fixture.loaded = {"thread-1", "background"};
+        fixture.threadFields["status"] =
+            QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        QTemporaryDir data;
+        {
+            Store store(data.path() + "/metadata.sqlite");
+            store.save(fixture.profile());
+        }
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        backend->connectServer();
+        auto *tree = window.findChild<QTreeView *>();
+        QTRY_COMPARE(visibleThreads(tree).size(), 2);
+        const auto foregroundKey = sessionKey(backend->profile.id, "thread-1");
+        const auto backgroundKey = sessionKey(backend->profile.id, "background");
+        if (separateProjects) {
+            auto foreground = Session::fromThread(backend->profile.id, fixture.thread());
+            foreground.cwd = "/work/foreground";
+            backend->sessionChanged(foreground);
+        }
+        window.findChild<TerminalArea *>()->sessionFocused(foregroundKey);
+        const auto opened = nodeWithKey(tree, foregroundKey).data(RecencyRole).toLongLong();
+        QCOMPARE(nodeWithKey(tree, foregroundKey).row(), 0);
+        // Events and visits currently use whole seconds. Cross that boundary so
+        // this exercises a strictly newer transition rather than the tie breaker.
+        QTRY_VERIFY(QDateTime::currentSecsSinceEpoch() > opened);
+        fixture.notify("thread/status/changed",
+                       {{"threadId", "background"}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_VERIFY(nodeWithKey(tree, backgroundKey).data(WaitingRole).toBool());
+        QVERIFY(nodeWithKey(tree, backgroundKey).data(RecencyRole).toLongLong() > opened);
+        QCOMPARE(nodeWithKey(tree, backgroundKey).row(), 0);
+        if (separateProjects)
+            QCOMPARE(nodeWithKey(tree, backgroundKey).parent().row(), 0);
+        window.close();
+    }
     void tabFiltersAreIndependentLocalAndLive() {
         Fixture fixture;
         QTemporaryDir data;
@@ -657,7 +905,7 @@ class WindowTests : public QObject {
             QVERIFY(dialog);
             QVERIFY(dialog->findChild<QCheckBox *>("hideUnsavedSetting")->isChecked());
             QVERIFY(!dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
-            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 2);
+            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 3);
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
             auto *buttons = dialog->findChild<QDialogButtonBox *>();

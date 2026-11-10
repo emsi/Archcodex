@@ -1,7 +1,7 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.6.2** supports **existing local Unix-socket app-servers** and
+Version **0.7.0** supports **existing local Unix-socket app-servers** and
 **myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
 SSH socket profiles remain planned.
 
@@ -20,17 +20,21 @@ at an idle prompt.
 Exited terminal clients retain their output, remain in Active, and offer an explicit restart.
 Restart rechecks the selected session and uses the current connection profile.
 **Opened** lists all open terminal views, including retained exited/error output,
-regardless of history visibility settings. **Ctrl+Tab** switches through recently
-used terminals; **Ctrl+Shift+Tab** reverses direction. Hold Ctrl to cycle through
-the list and release it to make the selected terminal most recent.
+regardless of history visibility settings. **Ctrl+Tab** opens a recent-terminal switcher; **Ctrl+Shift+Tab** reverses direction.
+Only releasing Ctrl switches the terminal; Escape cancels. **Ctrl+backtick** cycles
+projects with open terminals, selecting each project's most recently activated view.
+**Alt+1–5** selects the Projects views; **Alt+0** focuses the terminal.
+**Ctrl+Shift+P** opens the command palette; **Ctrl+Alt+P/F** focuses Projects or its
+search/filter field. **Ctrl+Shift+F** searches terminal scrollback. Bindings are
+configurable under **Settings → Keyboard Shortcuts**.
 Right-click a session for **Fork**, **New** in the same directory, or **Close**
 its terminal view. Folders offer **New** and **Expand All**; host/server nodes
-offer **Expand All** for their branch. Activity transitions update recent-use
-ordering immediately from server events.
+offer **Expand All** for their branch. Newer activity transitions can update
+recent-use ordering from server events; the existing ordering is unchanged.
 **View → Hide unsaved sessions** is enabled by default and remembered; open
 terminal entries remain accessible even when their conversation is unsaved.
-**Settings → Configure Archcodex…** organizes preferences into Application and
-Backends pages. myCodex lists only sessions in each container's WORKDIR and
+**Settings → Configure Archcodex…** organizes preferences into Application,
+Backends and Keyboard Shortcuts pages. myCodex lists only sessions in each container's WORKDIR and
 subdirectories by default, in history/activity tabs and search. Enable **Show sessions outside
 the container's working directory** under Backends to include other shared history.
 Each view compresses its own folder paths. Running, Waiting and Opened open expanded;
@@ -50,13 +54,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.6.2-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.7.0-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.6.2-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.7.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -162,7 +166,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, host groups, expandable projects and
   sessions, and the five session views.
-- [Implementation and testing](docs/implementation.md): what 0.6.2 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.7.0 delivers and
   how to exercise it on your host.
 
 ## Project status

@@ -10,6 +10,7 @@
 #include <QModelIndex>
 #include <QPointer>
 #include <memory>
+#include <optional>
 
 class QTreeView;
 class QTabBar;
@@ -22,6 +23,7 @@ class QToolButton;
 namespace Archcodex {
 class TerminalArea;
 class DiscoveryDialog;
+class Commands;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -85,6 +87,18 @@ class Window : public QMainWindow {
     QPushButton *loadMore;
     QSplitter *splitter;
     TerminalArea *terminal;
+    Commands *commands;
+    QWidget *projectPane;
+    bool projectsContext = true;
+    struct CommandTarget {
+        QString backend, thread, path, key;
+        NodeKind kind = NodeKind::Group;
+    };
+    std::optional<CommandTarget> paletteTarget;
+    CommandTarget commandTarget() const;
+    void updateCommandAvailability();
+    void showCommandPalette();
+    void contextualCommand(const QString &name);
     HostDiscovery *discovery;
     struct NavigationState {
         QStringList expanded;

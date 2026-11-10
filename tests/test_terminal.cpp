@@ -1,20 +1,165 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+#include "commands.h"
 #include "terminal.h"
+#include <KXMLGUIClient>
 #include <QAccessible>
+#include <QDialog>
 #include <QFile>
+#include <QFrame>
+#include <QHBoxLayout>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLineEdit>
+#include <QListWidget>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QTemporaryDir>
 #include <QtTest>
 using namespace Archcodex;
 
+namespace {
+void addCycles(Commands &commands, TerminalArea &area) {
+    for (bool projects : {false, true})
+        for (bool backwards : {false, true}) {
+            auto *action = commands.add(
+                QString("cycle_%1_%2")
+                    .arg(projects ? "projects" : "terminals", backwards ? "previous" : "next"),
+                "Cycle", "Navigation",
+                {QKeySequence(Qt::ControlModifier |
+                              (backwards ? Qt::ShiftModifier : Qt::NoModifier) |
+                              (projects ? Qt::Key_QuoteLeft : Qt::Key_Tab))},
+                [&area, projects, backwards] { area.switchRecent(backwards, projects); });
+            action->setProperty("cycleKind", projects ? 2 : 1);
+            action->setProperty("cycleBackwards", backwards);
+        }
+    area.setCommands(&commands);
+}
+void cycleKey(int key, Qt::KeyboardModifiers modifiers) {
+    auto *input = QApplication::focusWidget();
+    QKeyEvent shortcut(QEvent::ShortcutOverride, key, modifiers);
+    QApplication::sendEvent(input, &shortcut);
+    QKeyEvent press(QEvent::KeyPress, key, modifiers);
+    QApplication::sendEvent(input, &press);
+    QKeyEvent release(QEvent::KeyRelease, key, modifiers);
+    QApplication::sendEvent(QApplication::focusWidget(), &release);
+}
+void releaseControl() {
+    QKeyEvent release(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier);
+    QApplication::sendEvent(QApplication::focusWidget(), &release);
+}
+QString candidate(TerminalArea &area) {
+    auto *list = area.window()->findChild<QListWidget *>("recentSwitcherList");
+    return list && list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString()
+                                       : QString();
+}
+} // namespace
+
 class TerminalTests : public QObject {
     Q_OBJECT
   private slots:
+    void windowCommandsOverrideKonsoleWithoutLeakingIntoThePty() {
+        QTemporaryDir dir;
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(
+            "#!/bin/sh\nprintf 'READY\n'\nIFS= read -r answer\nprintf '%s' \"$answer\" > '" +
+            dir.filePath("received").toUtf8() + "'\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QWidget host;
+        auto *layout = new QHBoxLayout(&host);
+        auto *navigator = new QLineEdit;
+        auto *area = new TerminalArea;
+        layout->addWidget(navigator);
+        layout->addWidget(area);
+        Commands commands(&host);
+        int palette = 0, waiting = 0, searches = 0;
+        commands.add("focus_projects", "Projects", "Navigation", {QKeySequence("Ctrl+Alt+P")},
+                     [&] { navigator->setFocus(); });
+        commands.add("focus_search", "Filter", "Navigation", {QKeySequence("Ctrl+Alt+F")},
+                     [&] { navigator->setFocus(); });
+        commands.add("focus_terminal", "Terminal", "Navigation", {QKeySequence("Alt+0")},
+                     [&] { area->focusCurrent(); });
+        commands.add("command_palette", "Commands", "Navigation", {QKeySequence("Ctrl+Shift+P")},
+                     [&] { ++palette; });
+        commands.add("terminal_find", "Find", "Terminal", {QKeySequence("Ctrl+Shift+F")}, [&] {
+            if (area->triggerAction("edit_find"))
+                ++searches;
+        });
+        commands.add("view_waiting", "Waiting", "Projects", {QKeySequence("Alt+4")}, [&] {
+            ++waiting;
+            navigator->setFocus();
+        });
+        area->setCommands(&commands);
+        host.resize(900, 500);
+        host.show();
+        host.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        BackendProfile profile{"b", "Fixture", "local-unix", "/unused", script.fileName(), false};
+        QString error;
+        auto session = Session::fromThread("b", {{"id", "test"}, {"cwd", dir.path()}});
+        QVERIFY2(area->open(profile, session, &error), qPrintable(error));
+        QTRY_VERIFY(area->isAncestorOf(QApplication::focusWidget()));
+        auto *input = QApplication::focusWidget();
+        auto *accessible = QAccessible::queryAccessibleInterface(input);
+        QVERIFY(accessible && accessible->textInterface());
+        QTRY_VERIFY(accessible->textInterface()
+                        ->text(0, accessible->textInterface()->characterCount())
+                        .contains("READY"));
+        QTest::keyClicks(input, "before");
+        QTest::keyClick(input, Qt::Key_P, Qt::ControlModifier | Qt::AltModifier);
+        QCOMPARE(QApplication::focusWidget(), navigator);
+        QTest::keyClick(navigator, Qt::Key_0, Qt::AltModifier);
+        QTRY_VERIFY(area->isAncestorOf(QApplication::focusWidget()));
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_P,
+                        Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(palette, 1); // Konsole's Print Screen cannot claim the same key.
+        QVERIFY(!QApplication::activeModalWidget());
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_F,
+                        Qt::ControlModifier | Qt::AltModifier);
+        QCOMPARE(QApplication::focusWidget(), navigator);
+        QTest::keyClick(navigator, Qt::Key_0, Qt::AltModifier);
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_F,
+                        Qt::ControlModifier | Qt::ShiftModifier);
+        QCOMPARE(searches, 1);
+        QVERIFY(area->isAncestorOf(QApplication::focusWidget()));
+        QVERIFY(QApplication::focusWidget() != input); // Native scrollback search field.
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+        area->focusCurrent();
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_4, Qt::AltModifier);
+        QCOMPARE(waiting, 1); // Single-modifier shortcuts use the KPart override hook.
+        QCOMPARE(QApplication::focusWidget(), navigator);
+        QTest::keyClick(navigator, Qt::Key_0, Qt::AltModifier);
+        auto *part = area->findChild<KParts::ReadOnlyPart *>();
+        const auto findAction = [](auto &&self, KXMLGUIClient *client,
+                                   const QString &name) -> QAction * {
+            if (auto *action = client->actionCollection()->action(name))
+                return action;
+            for (auto *child : client->childClients())
+                if (auto *action = self(self, child, name))
+                    return action;
+            return nullptr;
+        };
+        auto *print = findAction(findAction, part, "file_print");
+        QVERIFY(print);
+        QVERIFY(!print->shortcuts().contains(QKeySequence("Ctrl+Shift+P")));
+        auto keys = Commands::bindings(commands.collection());
+        keys["command_palette"] = {QKeySequence("Ctrl+Alt+J")};
+        QVERIFY2(commands.apply(keys, &error), qPrintable(error));
+        QVERIFY(print->shortcuts().contains(QKeySequence("Ctrl+Shift+P")));
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_J,
+                        Qt::ControlModifier | Qt::AltModifier);
+        QCOMPARE(palette, 2);
+        QTest::keyClicks(QApplication::focusWidget(), " after");
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_Return);
+        QTRY_VERIFY(QFile::exists(dir.filePath("received")));
+        QFile received(dir.filePath("received"));
+        QVERIFY(received.open(QIODevice::ReadOnly));
+        QCOMPARE(received.readAll(), QByteArray("before after"));
+        area->closeCurrent();
+    }
     void containerTerminalUsesSelectedLocalExecutableAndExplicitRelay() {
         QTemporaryDir dir;
         QFile script(dir.path() + "/local codex ; literal");
@@ -67,6 +212,8 @@ class TerminalTests : public QObject {
         script.close();
         QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
         TerminalArea area;
+        Commands commands(&area);
+        addCycles(commands, area);
         area.resize(800, 500);
         area.show();
         area.activateWindow();
@@ -82,37 +229,32 @@ class TerminalTests : public QObject {
         }
         QVERIFY(titles.last()[0].toString().contains(p.name));
         QTRY_VERIFY(QApplication::focusWidget() && area.isAncestorOf(QApplication::focusWidget()));
+        QSignalSpy focuses(&area, &TerminalArea::sessionFocused);
         const auto tab = [&](bool backwards = false) {
-            const auto modifiers =
-                Qt::ControlModifier | (backwards ? Qt::ShiftModifier : Qt::NoModifier);
-            QKeyEvent shortcut(QEvent::ShortcutOverride, Qt::Key_Tab, modifiers);
-            auto *input = QApplication::focusWidget();
-            QVERIFY(input && area.isAncestorOf(input));
-            QApplication::sendEvent(input, &shortcut);
-            QVERIFY(shortcut.isAccepted());
-            QKeyEvent press(QEvent::KeyPress, backwards ? Qt::Key_Backtab : Qt::Key_Tab, modifiers);
-            QApplication::sendEvent(input, &press);
-        };
-        const auto release = [&] {
-            QKeyEvent event(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier);
-            QApplication::sendEvent(QApplication::focusWidget(), &event);
+            cycleKey(backwards ? Qt::Key_Backtab : Qt::Key_Tab,
+                     Qt::ControlModifier | (backwards ? Qt::ShiftModifier : Qt::NoModifier));
         };
         QCOMPARE(area.currentKey(), sessionKey("b", "c"));
         tab();
-        QCOMPARE(area.currentKey(), sessionKey("b", "b"));
+        QCOMPARE(candidate(area), sessionKey("b", "b"));
         tab();
-        QCOMPARE(area.currentKey(), sessionKey("b", "a"));
+        QCOMPARE(candidate(area), sessionKey("b", "a"));
         tab(true);
-        QCOMPARE(area.currentKey(), sessionKey("b", "b"));
-        release();
-        tab();
+        QCOMPARE(candidate(area), sessionKey("b", "b"));
         QCOMPARE(area.currentKey(), sessionKey("b", "c"));
-        release();
-        tab(true);
-        QCOMPARE(area.currentKey(), sessionKey("b", "a"));
-        tab(true);
+        QCOMPARE(focuses.size(), 0);
+        releaseControl();
         QCOMPARE(area.currentKey(), sessionKey("b", "b"));
-        release();
+        QCOMPARE(focuses.size(), 1);
+        tab();
+        QCOMPARE(candidate(area), sessionKey("b", "c"));
+        releaseControl();
+        tab(true);
+        QCOMPARE(candidate(area), sessionKey("b", "a"));
+        tab(true);
+        QCOMPARE(candidate(area), sessionKey("b", "b"));
+        releaseControl();
+        QCOMPARE(focuses.size(), 3);
         QTRY_VERIFY(QApplication::focusWidget() && area.isAncestorOf(QApplication::focusWidget()));
         auto *input = QApplication::focusWidget();
         auto *accessible = QAccessible::queryAccessibleInterface(input);
@@ -139,6 +281,117 @@ class TerminalTests : public QObject {
         area.closeBackend("b");
         area.switchRecent();
         QVERIFY(area.currentKey().isEmpty());
+    }
+    void projectCyclesCancelRebindAndHandleClosedCandidates() {
+        QTemporaryDir dir;
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nprintf 'READY\n'\nIFS= read -r line\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        TerminalArea area;
+        Commands commands(&area);
+        addCycles(commands, area);
+        area.resize(900, 600);
+        area.show();
+        area.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&area));
+        BackendProfile profile{"b",       "Host / container", "local-unix",
+                               "/unused", script.fileName(),  false};
+        QString error;
+        for (const auto &id : {"a1", "b1", "a2", "c1"}) {
+            QVERIFY(QDir().mkpath(dir.path() + "/" + QString(id).left(1)));
+            auto session = Session::fromThread(
+                "b", {{"id", id}, {"name", id}, {"cwd", dir.path() + "/" + QString(id).left(1)}});
+            QVERIFY2(area.open(profile, session, &error), qPrintable(error));
+        }
+        QSignalSpy focused(&area, &TerminalArea::sessionFocused);
+        cycleKey(Qt::Key_QuoteLeft, Qt::ControlModifier);
+        QCOMPARE(candidate(area), sessionKey("b", "a2"));
+        QCOMPARE(area.findChild<QListWidget *>("recentSwitcherList")->count(), 3);
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty())
+            QVERIFY(area.grab().save(screenshots + "/project-switcher.png"));
+        QCOMPARE(area.currentKey(), sessionKey("b", "c1"));
+        cycleKey(Qt::Key_Escape, Qt::ControlModifier);
+        releaseControl();
+        QVERIFY(!area.findChild<QFrame *>("recentSwitcher")->isVisible());
+        QCOMPARE(focused.size(), 0);
+        cycleKey(Qt::Key_QuoteLeft, Qt::ControlModifier);
+        releaseControl();
+        QCOMPARE(area.currentKey(), sessionKey("b", "a2"));
+        QCOMPARE(focused.size(), 1);
+        cycleKey(Qt::Key_QuoteLeft, Qt::ControlModifier);
+        QCOMPARE(candidate(area), sessionKey("b", "c1"));
+        QEvent deactivated(QEvent::WindowDeactivate);
+        QApplication::sendEvent(&area, &deactivated);
+        QVERIFY(!area.findChild<QFrame *>("recentSwitcher")->isVisible());
+        QCOMPARE(area.currentKey(), sessionKey("b", "a2"));
+        QCOMPARE(focused.size(), 1);
+        // A changed binding is shared by routing, validation and the switcher.
+        auto keys = Commands::bindings(commands.collection());
+        keys["cycle_terminals_next"] = {QKeySequence("Ctrl+F8")};
+        keys["cycle_terminals_previous"] = {QKeySequence("Ctrl+Shift+F8")};
+        QVERIFY2(commands.apply(keys, &error), qPrintable(error));
+        cycleKey(Qt::Key_F8, Qt::ControlModifier);
+        QCOMPARE(candidate(area), sessionKey("b", "c1"));
+        area.closeSession(sessionKey("b", "c1"));
+        QVERIFY(candidate(area) != sessionKey("b", "c1"));
+        releaseControl();
+        QVERIFY(area.currentKey() != sessionKey("b", "c1"));
+        QCOMPARE(focused.size(), 2);
+        // Settings and other dialogs must receive their own navigation keys.
+        QDialog dialog(&area);
+        auto *layout = new QHBoxLayout(&dialog);
+        auto *edit = new QLineEdit;
+        layout->addWidget(edit);
+        dialog.setModal(true);
+        dialog.show();
+        edit->setFocus();
+        QTest::keyClick(edit, Qt::Key_F8, Qt::ControlModifier);
+        QVERIFY(!area.findChild<QFrame *>("recentSwitcher")->isVisible());
+        dialog.close();
+        area.closeBackend("b");
+    }
+    void projectSwitcherKeepsGroupsWhenRepresentativeCloses() {
+        QTemporaryDir dir;
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/bin/sh\nIFS= read -r line\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        TerminalArea area;
+        Commands commands(&area);
+        addCycles(commands, area);
+        area.show();
+        area.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&area));
+        BackendProfile profile{"b", "Fixture", "local-unix", "/unused", script.fileName(), false};
+        QString error;
+        for (const auto &id : {"a1", "b1", "a2", "c1"}) {
+            const auto path = dir.path() + "/" + QString(id).left(1);
+            QVERIFY(QDir().mkpath(path));
+            auto session = Session::fromThread("b", {{"id", id}, {"cwd", path}});
+            QVERIFY2(area.open(profile, session, &error), qPrintable(error));
+        }
+        cycleKey(Qt::Key_QuoteLeft, Qt::ControlModifier);
+        QCOMPARE(candidate(area), sessionKey("b", "a2"));
+        area.closeSession(sessionKey("b", "a2"));
+        QCOMPARE(candidate(area), sessionKey("b", "a1"));
+        QCOMPARE(area.findChild<QListWidget *>("recentSwitcherList")->count(), 3);
+        cycleKey(Qt::Key_QuoteLeft, Qt::ControlModifier);
+        QCOMPARE(candidate(area), sessionKey("b", "b1"));
+        releaseControl();
+        QCOMPARE(area.currentKey(), sessionKey("b", "b1"));
+        profile.id = "other-server";
+        auto other = Session::fromThread(profile.id, {{"id", "a1"}, {"cwd", dir.path() + "/a"}});
+        QVERIFY2(area.open(profile, other, &error), qPrintable(error));
+        cycleKey(Qt::Key_QuoteLeft, Qt::ControlModifier);
+        QCOMPARE(area.findChild<QListWidget *>("recentSwitcherList")->count(), 4);
+        cycleKey(Qt::Key_Escape, Qt::ControlModifier);
+        releaseControl();
+        area.closeBackend("b");
+        area.closeBackend(profile.id);
     }
     void containerHistoryAndChangedEnvironmentCannotLaunch() {
         TerminalArea area;

@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "window.h"
 #include "asyncbackend.h"
+#include "commands.h"
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "launch.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
+#include <KCommandBar>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -19,8 +21,10 @@
 #include <QFileInfo>
 #include <QFormLayout>
 #include <QHelpEvent>
+#include <QHideEvent>
 #include <QInputDialog>
 #include <QJsonDocument>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -52,6 +56,26 @@ class SessionTree : public QTreeView {
     QPersistentModelIndex tooltipIndex;
 
   protected:
+    void keyPressEvent(QKeyEvent *event) override {
+        if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) &&
+            currentIndex().isValid() &&
+            currentIndex().data(KindRole).toInt() != int(NodeKind::Session)) {
+            setExpanded(currentIndex(), !isExpanded(currentIndex()));
+            event->accept();
+            return;
+        }
+        if (event->key() == Qt::Key_Menu ||
+            (event->key() == Qt::Key_F10 && event->modifiers() == Qt::ShiftModifier)) {
+            const auto index = currentIndex();
+            if (index.isValid()) {
+                scrollTo(index);
+                emit customContextMenuRequested(visualRect(index).center());
+            }
+            event->accept();
+            return;
+        }
+        QTreeView::keyPressEvent(event);
+    }
     bool viewportEvent(QEvent *event) override {
         if (event->type() != QEvent::ToolTip)
             return QTreeView::viewportEvent(event);
@@ -71,6 +95,16 @@ class SessionTree : public QTreeView {
                                "<p>" + text + "</p>", viewport(), rect);
         }
         return true;
+    }
+};
+class CommandPalette : public KCommandBar {
+  public:
+    using KCommandBar::KCommandBar;
+
+  protected:
+    void hideEvent(QHideEvent *event) override {
+        KCommandBar::hideEvent(event);
+        deleteLater(); // Keep proxy actions alive until their triggered handler returns.
     }
 };
 void walkTree(QAbstractItemModel *model, const QModelIndex &parent,
@@ -127,6 +161,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     setWindowTitle("Archcodex");
     setWindowIcon(QIcon::fromTheme("io.github.emsi.Archcodex"));
     resize(1150, 760);
+    commands = new Commands(this);
     model = new SessionModel(this);
     results = new SessionModel(this);
     filter = new SessionFilter(this);
@@ -134,6 +169,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     splitter = new QSplitter(this);
     setCentralWidget(splitter);
     auto *sidebar = new QWidget;
+    projectPane = sidebar;
     sidebar->setMinimumWidth(240);
     auto *left = new QVBoxLayout(sidebar);
     auto *heading = new QHBoxLayout;
@@ -280,29 +316,45 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(containerStatus, &QToolButton::clicked, this, &Window::containerHostsDialog);
     connect(discoveryStatus, &QToolButton::clicked, this, &Window::showDiscoveryDetails);
     auto *projectsMenu = menuBar()->addMenu("&Session");
-    projectsMenu->addAction("New session in selected project", this, [this] {
-        const auto index = tree->currentIndex();
-        auto id = index.data(BackendRole).toString();
-        if (!index.isValid() || !profiles.contains(id) ||
-            (index.data(KindRole).toInt() != int(NodeKind::Folder) &&
-             index.data(KindRole).toInt() != int(NodeKind::Session))) {
-            error("Select a project first.");
-            return;
+    projectsMenu->addAction(commands->add("new_session", "New session in current project",
+                                          "Sessions", {}, [this] { contextualCommand("new"); }));
+    projectsMenu->addAction(commands->add("fork_session", "Fork current session", "Sessions", {},
+                                          [this] { contextualCommand("fork"); }));
+    projectsMenu->addAction(commands->add("restart_session", "Restart exited client", "Sessions",
+                                          {}, [this] { contextualCommand("restart"); }));
+    for (const auto projects : {false, true})
+        for (const auto backwards : {false, true}) {
+            const auto id =
+                QString("cycle_%1_%2")
+                    .arg(projects ? "projects" : "terminals", backwards ? "previous" : "next");
+            const auto key = QKeySequence(Qt::ControlModifier |
+                                          (backwards ? Qt::ShiftModifier : Qt::NoModifier) |
+                                          (projects ? Qt::Key_QuoteLeft : Qt::Key_Tab));
+            auto *action = commands->add(
+                id,
+                QString("%1 recent %2")
+                    .arg(backwards ? "Previous" : "Next", projects ? "project" : "terminal"),
+                "Navigation", {key},
+                [this, projects, backwards] { terminal->switchRecent(backwards, projects); });
+            action->setProperty("cycleKind", projects ? 2 : 1);
+            action->setProperty("cycleBackwards", backwards);
+            projectsMenu->addAction(action);
         }
-        newSession(id, index.data(PathRole).toString());
-    });
-    projectsMenu->addAction("Next recent terminal", QKeySequence("Ctrl+Tab"), terminal,
-                            [this] { terminal->switchRecent(false); });
-    projectsMenu->addAction("Previous recent terminal", QKeySequence("Ctrl+Shift+Tab"), terminal,
-                            [this] { terminal->switchRecent(true); });
-    projectsMenu->addAction("Close terminal", terminal, &TerminalArea::closeCurrent);
+    projectsMenu->addAction(commands->add("close_terminal", "Close current terminal", "Sessions",
+                                          {QKeySequence("Ctrl+Shift+W")},
+                                          [this] { terminal->closeCurrent(); }));
     projectsMenu->addSeparator();
-    projectsMenu->addAction("Quit", this, &QWidget::close);
+    projectsMenu->addAction(
+        commands->add("quit", "Quit", "Application", {}, [this] { this->close(); }));
     auto *connectionMenu = menuBar()->addMenu("&Connections");
-    connectionMenu->addAction("Discover local sessions", this, &Window::discover);
-    connectionMenu->addAction("Manage connections…", this, &Window::connectionsDialog);
-    connectionMenu->addAction("Discovery details…", this, &Window::showDiscoveryDetails);
-    connectionMenu->addAction("myCodex hosts…", this, &Window::containerHostsDialog);
+    connectionMenu->addAction(commands->add("discover", "Discover local sessions", "Connections",
+                                            {}, [this] { discover(); }));
+    connectionMenu->addAction(commands->add("connections", "Manage connections…", "Connections", {},
+                                            [this] { connectionsDialog(); }));
+    connectionMenu->addAction(commands->add("discovery_details", "Discovery details…",
+                                            "Connections", {}, [this] { showDiscoveryDetails(); }));
+    connectionMenu->addAction(commands->add("mycodex_hosts", "myCodex hosts…", "Connections", {},
+                                            [this] { containerHostsDialog(); }));
     auto *view = menuBar()->addMenu("&View");
     auto *hideUnsaved = view->addAction("Hide unsaved sessions");
     hideUnsaved->setObjectName("hideUnsavedSessions");
@@ -327,22 +379,89 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         if (globalSearchActive)
             updateSearchSummary();
     });
-    view->addAction("Focus project navigator", QKeySequence("Ctrl+Shift+P"), tree,
-                    qOverload<>(&QWidget::setFocus));
-    view->addAction("Focus search", QKeySequence("Ctrl+Shift+F"), searchBox,
-                    qOverload<>(&QWidget::setFocus));
-    auto *settingsMenu = menuBar()->addMenu("&Settings");
-    auto *configure = settingsMenu->addAction("Configure Archcodex…", QKeySequence::Preferences,
-                                              this, &Window::showSettings);
-    configure->setObjectName("configureArchcodex");
+    view->addAction(commands->add("focus_projects", "Focus Projects", "Navigation",
+                                  {QKeySequence("Ctrl+Alt+P")},
+                                  [this] { tree->setFocus(Qt::ShortcutFocusReason); }));
+    view->addAction(commands->add("focus_search", "Focus project search / filter", "Navigation",
+                                  {QKeySequence("Ctrl+Alt+F")},
+                                  [this] { searchBox->setFocus(Qt::ShortcutFocusReason); }));
+    view->addAction(commands->add("focus_terminal", "Focus terminal", "Navigation",
+                                  {QKeySequence("Alt+0")}, [this] { terminal->focusCurrent(); }));
+    view->addAction(commands->add("focus_next_pane", "Switch focus between Projects and terminal",
+                                  "Navigation", {QKeySequence("F6"), QKeySequence("Shift+F6")},
+                                  [this] {
+                                      if (terminal->isAncestorOf(QApplication::focusWidget()) ||
+                                          terminal->currentKey().isEmpty())
+                                          tree->setFocus(Qt::ShortcutFocusReason);
+                                      else
+                                          terminal->focusCurrent();
+                                  }));
+    view->addAction(commands->add("command_palette", "Command palette…", "Navigation",
+                                  {QKeySequence("Ctrl+Shift+P")},
+                                  [this] { showCommandPalette(); }));
+    view->addAction(
+        commands->add("focus_menu", "Focus menu bar", "Navigation", {QKeySequence("F10")}, [this] {
+            menuBar()->setFocus(Qt::ShortcutFocusReason);
+            menuBar()->setActiveAction(menuBar()->actions().value(0));
+        }));
+    view->addAction(commands->add("expand_branch", "Expand selected branch", "Projects", {},
+                                  [this] { contextualCommand("expand"); }));
+    view->addSeparator();
+    const QStringList viewIds{"all", "active", "running", "waiting", "opened"};
+    for (int i = 0; i < tabs->count(); ++i)
+        view->addAction(commands->add("view_" + viewIds[i], "Show " + tabs->tabText(i), "Projects",
+                                      {QKeySequence(QString("Alt+%1").arg(i + 1))}, [this, i] {
+                                          tabs->setCurrentIndex(i);
+                                          tree->setFocus(Qt::ShortcutFocusReason);
+                                      }));
+    auto *terminalMenu = menuBar()->addMenu("&Terminal");
+    terminalMenu->addAction(commands->add("terminal_find", "Find in terminal scrollback",
+                                          "Terminal", {QKeySequence("Ctrl+Shift+F")}, [this] {
+                                              terminal->focusCurrent();
+                                              terminal->triggerAction("edit_find");
+                                          }));
+    for (const auto &entry : QList<QPair<QString, QString>>{{"copy", "Copy"}, {"paste", "Paste"}}) {
+        const bool copy = entry.first == "copy";
+        terminalMenu->addAction(commands->add(
+            "terminal_" + entry.first, entry.second, "Terminal",
+            {QKeySequence(copy ? "Ctrl+Shift+C" : "Ctrl+Shift+V"),
+             QKeySequence(copy ? "Ctrl+Insert" : "Shift+Insert")},
+            [this, name = "edit_" + entry.first] { terminal->triggerAction(name); }, terminal));
+    }
+    terminalMenu->addAction(commands->add("terminal_print", "Print terminal screen…", "Terminal",
+                                          {}, [this] { terminal->triggerAction("file_print"); }));
+    auto *settingsMenu = menuBar()->addMenu("S&ettings");
+    settingsMenu->addAction(commands->add("configureArchcodex", "Configure Archcodex…",
+                                          "Application", {QKeySequence("Ctrl+Shift+,")},
+                                          [this] { showSettings(); }));
+    terminal->setCommands(commands);
     auto *help = menuBar()->addMenu("&Help");
-    help->addAction("About Archcodex", this, [this] {
+    auto *about = help->addAction("About Archcodex", this, [this] {
         QMessageBox::about(
             this, "Archcodex",
             QString("Archcodex %1\nNative Codex session workspace\n\nLocal Unix sockets · "
                     "event-driven status · Konsole terminal\nGPL-3.0-or-later")
                 .arg(ARCHCODEX_VERSION));
     });
+    commands->adopt("about", about, "Application");
+    commands->adopt("hideUnsavedSessions", hideUnsaved, "Application");
+    connect(qApp, &QApplication::focusChanged, this, [this](QWidget *, QWidget *focused) {
+        if (focused && (focused == projectPane || projectPane->isAncestorOf(focused)))
+            projectsContext = true;
+        else if (focused && (focused == terminal || terminal->isAncestorOf(focused)))
+            projectsContext = false;
+        updateCommandAvailability();
+    });
+    connect(tree->selectionModel(), &QItemSelectionModel::currentChanged, this,
+            [this] { updateCommandAvailability(); });
+    connect(terminal, &TerminalArea::currentChanged, this, [this] { updateCommandAvailability(); });
+    connect(terminal, &TerminalArea::clientStateChanged, this,
+            [this] { updateCommandAvailability(); });
+    connect(this, &Window::connectionSummaryChanged, this, &Window::updateCommandAvailability);
+    updateCommandAvailability();
+    const auto shortcutIssue = commands->load(directory + "/shortcutsrc");
+    if (!shortcutIssue.isEmpty())
+        statusBar()->showMessage("Using default keyboard shortcuts: " + shortcutIssue);
     discovery = new HostDiscovery(this);
     connect(discovery, &HostDiscovery::snapshot, this, &Window::applyDiscovery);
     connect(discovery, &HostDiscovery::failed, this, [this](const QString &message) {
@@ -421,6 +540,7 @@ void Window::restoreCache(bool connectOnStart) {
         discover();
 }
 Window::~Window() {
+    qApp->disconnect(this);
     discovery->disconnect(this);
     delete discovery;
     for (auto *b : backends) {
@@ -477,6 +597,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                     matches << s;
                 }
             }
+        for (const auto &session : updates)
+            terminal->updateSession(session, profiles.value(session.backendId).name);
         model->upsertMany(updates);
         results->upsertMany(matches);
     });
@@ -498,6 +620,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                             it->known = false;
                             matches << *it;
                         }
+                    for (const auto &session : updates)
+                        terminal->updateSession(session, profiles.value(session.backendId).name);
                     model->upsertMany(updates);
                     results->upsertMany(matches);
                     if (globalSearchActive && searching.remove(id)) {
@@ -516,6 +640,7 @@ void Window::attach(const BackendProfile &p, bool start) {
             auto &s = sessions[key];
             s.unavailable = true;
             s.known = false;
+            terminal->updateSession(s, profiles.value(id).name);
             model->upsert(s);
             if (searchSessions.contains(key)) {
                 searchSessions[key] = s;
@@ -724,6 +849,7 @@ void Window::applySessions(const QList<Session> &items) {
             s.executionEnvironment = environment;
         }
         sessions[key] = s;
+        terminal->updateSession(s, profiles[s.backendId].name);
         updates << s;
         store->save(s);
         if (searchSessions.contains(key)) {
@@ -733,6 +859,7 @@ void Window::applySessions(const QList<Session> &items) {
     }
     model->upsertMany(updates);
     results->upsertMany(matches);
+    updateCommandAvailability();
     if (globalSearchActive && !matches.isEmpty())
         updateSearchSummary();
 }
@@ -1205,12 +1332,88 @@ void Window::updateSummary() {
         discoveryDialog->setReport(discoveryReport);
     emit connectionSummaryChanged();
 }
+Window::CommandTarget Window::commandTarget() const {
+    if (paletteTarget)
+        return *paletteTarget;
+    if (projectsContext) {
+        const auto index = tree->currentIndex();
+        return {index.data(BackendRole).toString(), index.data(ThreadRole).toString(),
+                index.data(PathRole).toString(), index.data(KeyRole).toString(),
+                static_cast<NodeKind>(index.data(KindRole).toInt())};
+    }
+    const auto session = terminal->currentSession();
+    return {session.backendId, session.id, session.cwd, terminal->currentKey(), NodeKind::Session};
+}
+void Window::updateCommandAvailability() {
+    const auto target = commandTarget();
+    const auto session = sessions.value(target.key, searchSessions.value(target.key));
+    const bool ready = backends.value(target.backend) && backends[target.backend]->ready();
+    const auto enable = [this](const QString &id, bool enabled) {
+        if (auto *action = commands->collection()->action(id))
+            action->setEnabled(enabled);
+    };
+    enable("new_session", ready && QDir::isAbsolutePath(target.path));
+    enable("fork_session", ready && !target.thread.isEmpty() && !target.thread.startsWith("new-") &&
+                               !session.unavailable && !pendingForks.contains(target.key) &&
+                               (!session.contextRequired || session.executionObserved));
+    enable("restart_session", ready && session.terminalOpen && !session.clientIssue.isEmpty());
+    enable("expand_branch",
+           projectsContext && target.kind != NodeKind::Session && !target.key.isEmpty());
+    enable("close_terminal", !terminal->currentKey().isEmpty());
+    enable("terminal_find", !terminal->currentKey().isEmpty());
+    enable("terminal_print", !terminal->currentKey().isEmpty());
+}
+void Window::contextualCommand(const QString &name) {
+    const auto target = commandTarget();
+    if (name == "new")
+        newSession(target.backend, target.path);
+    else if (name == "fork")
+        forkSession(target.backend, target.thread);
+    else if (name == "restart")
+        restartTerminal(sessions.value(target.key));
+    else if (name == "expand")
+        walkTree(filter, {}, [&](const QModelIndex &index) {
+            if (index.data(KeyRole).toString() == target.key) {
+                tree->expand(index);
+                walkTree(filter, index, [this](const QModelIndex &child) { tree->expand(child); });
+            }
+        });
+}
+void Window::showCommandPalette() {
+    const auto target = commandTarget();
+    updateCommandAvailability();
+    auto *bar = new CommandPalette(this);
+    bar->setObjectName("commandPalette");
+    QMap<QString, QList<QAction *>> groups;
+    for (auto *action : commands->collection()->actions()) {
+        auto *proxy = new QAction(action->icon(), action->text(), bar);
+        proxy->setEnabled(action->isEnabled());
+        proxy->setCheckable(action->isCheckable());
+        proxy->setChecked(action->isChecked());
+        proxy->setShortcuts(action->shortcuts());
+        connect(proxy, &QAction::triggered, this, [this, action, target] {
+            {
+                const QScopedValueRollback captured(paletteTarget,
+                                                    std::optional<CommandTarget>(target));
+                updateCommandAvailability();
+                action->trigger();
+            }
+            updateCommandAvailability();
+        });
+        groups[action->property("category").toString()] << proxy;
+    }
+    QList<KCommandBar::ActionGroup> entries;
+    for (auto it = groups.cbegin(); it != groups.cend(); ++it)
+        entries << KCommandBar::ActionGroup{it.key(), it.value()};
+    bar->setActions(entries);
+    bar->show();
+}
 void Window::showSettings() {
     auto *hideUnsaved = findChild<QAction *>("hideUnsavedSessions");
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
     SettingsDialog dialog(hideUnsaved->isChecked(),
                           settings.value("backends/myCodex/showAllSessions", false).toBool(),
-                          configuredLocalCodex, this);
+                          configuredLocalCodex, this, commands);
     connect(&dialog, &SettingsDialog::settingsApplied, this,
             [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable) {
                 hideUnsaved->setChecked(hide);

@@ -176,10 +176,11 @@ Each server/folder row has an expand/collapse control, a name and an aggregate
 status indicator. Each session row has its title and its own
 status indicator. Full paths, backend details and status descriptions can be
 shown in tooltips and accessible text instead of occupying several columns.
-Use the existing MRU model for both project and session ordering. Expanding a
-project or receiving output does not count as using a conversation. Preserve
-selection and avoid moving rows under an ongoing keyboard or pointer action;
-exact MRU update timing remains a design detail to settle.
+The existing explorer ordering is unchanged: a session uses the newer of its
+last activation and backend recency, and parent rows use their newest descendant.
+Changed loaded-session status can advance backend recency; duplicate statuses
+do not. Timestamps use whole seconds, so a transition need not visibly move a row.
+Keyboard switchers freeze their own activation-only order during a gesture.
 
 Indicators distinguish running, waiting for approval/input, idle, failed and
 unknown/disconnected states. Retained client errors stay in Active only. Do not communicate these differences through color
@@ -218,12 +219,21 @@ The previous terminal and output remain until validation and component creation
 succeed. A live client cannot be replaced through Restart client, and
 Close terminal releases the view. Opening other sessions does not discard it.
 The terminal's lifetime is separate from the server conversation's lifetime.
-Ctrl+Tab switches through recently used open terminals, and Ctrl+Shift+Tab
-reverses direction. Holding Ctrl freezes the list so repeated Tab presses cycle
-through it; releasing Ctrl makes the selected terminal most recent. Exited views
-remain in the list until closed. Ordinary keyboard input stays with the TUI,
-and these shortcuts are not intercepted inside separate dialogs. Switching
-focuses an existing terminal; it does not reconnect, resume or query a server.
+Ctrl+Tab opens a switcher over recently activated open terminals. Ctrl+Shift+Tab
+reverses direction. The candidate list is frozen while the modifier is held;
+only releasing it activates a terminal and records a visit. Escape or application
+focus loss cancels. The terminal behind the switcher remains unchanged. Retained
+exited/error views participate until closed. A disappearing candidate is removed;
+new views join the next cycle. Switching never reconnects, resumes or queries a
+server. Ordinary keyboard input remains with the TUI outside the switcher.
+
+Ctrl+backtick uses the same mechanism for **projects with open terminals only**.
+Each project is a backend ID plus a normalized working directory, independent of
+compressed folder labels. The first terminal for each project in the existing
+activation list is its representative. Shared paths on separate backends are not
+merged. Closing a representative uses the next remaining terminal for that project
+without reordering the frozen project list. No separate persistent project history
+is introduced. The explorer's existing session/project sorting is unchanged.
 A new-session launcher has no conversation ID until Codex creates it. It is
 shown as **New session terminal** until explicitly closed; its independently
 discovered conversation can also appear. Automatic correlation is not guessed
@@ -245,14 +255,66 @@ to show sessions outside it. This applies before tree compression and aggregatio
 in history/activity tabs and search results. Opened always lists open terminal
 views. Hidden sessions are not discarded.
 Apply saves without closing; OK saves and closes; Cancel discards unapplied edits.
-The settings use the existing application-specific `window.ini` file. Additional
+These preferences use the existing application-specific `window.ini` file. Additional
 backend or terminal pages can be added when they contain actual settings; no empty
 pages, plugin ABI or generalized settings schema are introduced.
 
-Opening a session transfers keyboard focus deliberately to the terminal. Tree
-navigation and view switching must remain available by keyboard without stealing
-normal Codex TUI input. Exact shortcuts will follow native KDE conventions when
-the interaction design is finalized.
+### Keyboard navigation and commands (0.7.0)
+
+Commands have stable IDs in one `KActionCollection`. Menus, the command palette
+and shortcut settings use that collection. Navigation bindings apply throughout
+the main window, including Konsole, without desktop-wide shortcut registrations.
+The KPart's native shortcut-override signal allows registered application bindings
+through; conflicting KPart shortcuts are removed while claimed and restored when
+unassigned. Other terminal input is unchanged. Held cycling is the only custom
+press/release controller. Modal dialogs and shortcut recording retain their input.
+
+| Default | Command |
+| --- | --- |
+| Alt+1 / Alt+2 / Alt+3 / Alt+4 / Alt+5 | All / Active / Running / Waiting / Opened; focus the tree without opening a session. |
+| Alt+0 | Focus the current terminal. |
+| Ctrl+Alt+P | Focus Projects in its current view. |
+| Ctrl+Alt+F | Focus that view's search/filter field. |
+| Ctrl+Shift+P | Command palette. |
+| Ctrl+Shift+F | Search terminal scrollback. |
+| F6 / Shift+F6 | Move between Projects and the terminal. |
+| Ctrl+Tab / Ctrl+Shift+Tab | Next / previous recent terminal, committed on Ctrl release. |
+| Ctrl+backtick / Ctrl+Shift+backtick | Next / previous recent project with open terminals. |
+| Ctrl+Shift+W | Close the current terminal view. |
+| Ctrl+Shift+, | Settings. |
+| F10 | Focus the menu bar. |
+| Ctrl+Shift+C / Ctrl+Insert | Copy terminal selection (terminal context). |
+| Ctrl+Shift+V / Shift+Insert | Paste into terminal (terminal context). |
+
+Tree arrows navigate/expand/collapse, Enter opens a session or toggles a parent,
+and Menu/Shift+F10 opens the selected row's context menu without using the pointer.
+Tab and Shift+Tab retain normal widget focus traversal. Opening a session focuses
+its terminal; changing a tab or selecting a row does not. Terminal switching never
+clears explorer filters. Menu mnemonics are distinct. Backtick/tilde and Tab/Backtab
+are normalized for held-cycle matching; settings remain layout-aware Qt sequences.
+
+The native KDE command palette lists actions by category. New/Fork/Restart and
+Expand use the selected explorer target when invoked from Projects, or the current
+terminal's session when invoked there. Palette proxies capture target identities
+before focus moves, so changing rows while the palette is open cannot retarget an
+operation. Availability and existing backend/provenance checks still apply.
+
+**Settings → Keyboard Shortcuts** uses `KShortcutsEditor` on an inert draft
+collection. Apply validates and saves all bindings; OK also closes; Cancel discards
+unapplied edits. Restore Defaults changes the draft until applied. Overrides use
+KDE's native configuration format in the app data directory's `shortcutsrc`,
+separate from existing `window.ini` preferences. This follows the normal Flatpak
+app-specific directory and the explicit `--data-dir` used by tests.
+
+Ordinary actions support primary/alternate bindings. Only single combinations
+are accepted; multi-step sequences and unmodified typing/navigation keys are
+rejected. Function keys and the standard Shift+Insert paste binding are supported.
+Held-cycle actions accept one combination per direction with one held modifier
+(Ctrl, Alt or Meta), optionally Shift; both directions must share that modifier.
+Duplicate bindings are rejected, including equivalent Tab/Backtab and
+grave/tilde spellings. Invalid stored combinations fall back to defaults with a
+status message. No global desktop shortcuts, terminal key-table format or plugin
+command framework is introduced.
 
 ## 6. Search and connections
 

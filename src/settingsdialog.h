@@ -5,12 +5,15 @@
 class QCheckBox;
 class QLineEdit;
 class QLabel;
+class KActionCollection;
 namespace Archcodex {
+class Commands;
 class SettingsDialog : public QDialog {
     Q_OBJECT
   public:
     SettingsDialog(bool hideUnsaved, bool showAllMyCodexSessions,
-                   const QString &localExecutable = {}, QWidget *parent = nullptr);
+                   const QString &localExecutable = {}, QWidget *parent = nullptr,
+                   Commands *commands = nullptr);
   signals:
     void settingsApplied(bool hideUnsaved, bool showAllMyCodexSessions,
                          const QString &localExecutable);
@@ -19,6 +22,8 @@ class SettingsDialog : public QDialog {
     QCheckBox *hideUnsaved, *showAllMyCodexSessions;
     QLineEdit *localCodex;
     QLabel *validation;
+    Commands *commands;
+    KActionCollection *shortcutDraft = nullptr;
     bool apply();
 };
 } // namespace Archcodex

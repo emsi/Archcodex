@@ -1120,3 +1120,88 @@ remains untestable here because this build environment prohibits user namespaces
 the isolated installation reports the corresponding cache-trigger warnings. The
 normal desktop installation has not been changed. Fully quit the previous app,
 install the new bundle and relaunch for desktop acceptance testing.
+
+## 0.7.0 keyboard navigation
+
+Implemented in three steps:
+
+1. A shared command registry and native Konsole shortcut arbitration. Menus,
+   the command palette and keyboard bindings use the same actions. The requested
+   swap is applied: Ctrl+Shift+P opens the palette, Ctrl+Shift+F searches terminal
+   scrollback, and Ctrl+Alt+P/F focuses Projects or its search/filter field.
+   Alt+1–5 selects a Projects tab, Alt+0 returns to the current terminal, F6
+   switches panes, and Enter/Menu/Shift+F10 support tree navigation and actions.
+2. A Keyboard Shortcuts settings page using KDE's editor. Changes are drafts
+   until Apply/OK, with validation, persistence and Restore Defaults. New, Fork,
+   Restart, connection management and other existing actions are available in
+   the palette even when they have no default binding.
+3. Held-key terminal and project switchers. Ctrl+Tab and Ctrl+Shift+Tab choose
+   from a frozen snapshot of activation recency. The current terminal stays
+   visible until Ctrl is released. Escape or deactivation cancels. Ctrl+backtick
+   uses the same mechanism for projects with open terminal views, selecting the
+   last activated open terminal in each project. Retained exited views participate.
+
+The [interaction specification](ui.md#keyboard-navigation-and-commands-070)
+contains the defaults and detailed behavior. These commands are window-local,
+including when the embedded terminal has focus; they are not desktop-wide grabs.
+There are no new backend requests, helper processes or polling paths.
+
+### Ordering verification
+
+The earlier statement that background transitions necessarily reorder the
+explorer was too broad. Controlled tests against the existing backend and Window
+path prove that a strictly newer running-to-waiting transition **can** move a
+session and its project ahead of the opened session. The comparator uses the
+newer of activation and backend recency; parents use the newest descendant.
+Duplicate statuses do not advance recency, timestamps have one-second precision,
+and other newer descendants can keep a project ahead. Those conditions can leave
+the visible order unchanged. The tests do not establish what happened in the
+user's installed application. Backend timestamping and explorer sorting are
+unchanged, as requested. Switcher recency follows actual terminal activation only.
+
+### Decisions not agreed in advance
+
+The three implementation steps, swapped defaults, configurable shortcuts,
+mouse-free navigation and project cycling restricted to open terminals were
+explicitly authorized. The standing instruction requires a commit. The following
+implementation and delivery choices were made while completing that work:
+
+| Choice/action | Reason, affected files/configuration, consequences and status |
+| --- | --- |
+| Centralize stable action IDs in `Commands`, use native QAction dispatch and Konsole's `overrideShortcut` hook. | `src/commands.*`, `src/window.*`, `src/terminal.*`; avoids forwarding synthetic key presses or modifying the terminal key table. Conflicting KPart bindings are removed while owned and restored on reassignment. Implemented and verified with a real PTY, including Print Screen versus the palette. |
+| Use KDE's command palette and shortcut editor; explicitly link ConfigWidgets. | `CMakeLists.txt`, `src/window.cpp`, `src/settingsdialog.*`; ConfigWidgets is already in the selected KDE runtime. No additional Flatpak permission or runtime module. Settings opens at 900×600 to fit the editor, with an Archcodex category label. Implemented and visually checked under X11. |
+| Keep shortcut drafts inert and store bindings in `shortcutsrc` beside existing application metadata. | `src/commands.*`, `src/settingsdialog.*`; existing `window.ini` preferences are preserved. Apply validates before replacing bindings and reports write failures; malformed saved bindings fall back to defaults with a status message. Restore Defaults affects only the draft until Apply. Tested draft cancellation, duplicates, persistence and defaults. |
+| Restrict shortcuts to single combinations and reserve ordinary typing/navigation for widgets and the TUI. | `src/commands.cpp`, `docs/ui.md`; Ctrl/Alt/Meta or function keys are required, with Shift+Insert also allowed. Held switchers allow one binding per direction and one shared Ctrl/Alt/Meta hold modifier, optionally Shift. Duplicate and multi-step bindings are rejected. These restrictions are implemented and tested. |
+| Scope Copy/Paste to the terminal and use native terminal actions for Copy/Paste/Find/Print. | `src/window.cpp`, `src/terminal.cpp`; text fields retain their standard editing shortcuts. Unavailable actions remain discoverable but disabled. Normal shortcuts use Qt contexts, while only held switching needs an event filter. Implemented; terminal search and ownership/rebinding are exercised against Konsole. |
+| Capture contextual targets by identity when opening the palette and recheck availability before execution. | `src/window.*`; background selection/order changes cannot redirect New/Fork/Restart to another row. Commands use the existing connection and execution-context validation. Menus gain distinct mnemonics, and keyboard context menus use the selected row. Implemented; navigation and existing contextual-action regressions pass. |
+| Implement the chooser as a child panel, with snapshots of existing activation history. | `src/terminal.*`; it changes neither terminal focus nor visit timestamps until commit. Project identity is backend plus normalized working-directory path, not a merged host path. Closing a candidate removes it; a project's next open terminal can replace its representative without moving the project. New views join the next gesture. Focus loss, Escape and closing the origin cancel. Implemented and tested. |
+| Refresh chooser titles/status from existing pushed session and lifecycle updates. | `src/window.cpp`, `src/terminal.cpp`; status stays current without changing the frozen candidate order or adding queries. Error output remains accessible through retained terminal views. Implemented; lifecycle, disconnect and activity regressions pass. |
+| Add protocol/window and real-terminal regressions, screenshots and isolated runtime checks. | `tests/test_window.cpp`, `tests/test_terminal.cpp`; fixtures use temporary directories and dummy clients, not real conversations or credentials. Logs, screenshots, an ELF-runtime launcher and builds remain in ignored `.build/keyboard*`. Owned stuck test processes were stopped while debugging; no live Codex helper was stopped. A temporary fixture-bridge symlink was removed after the X11 run. |
+| Deliver a local 0.7.0 development Flatpak and commit the integrated work. | CMake, README, AppStream, build script and docs; reuses the existing pinned Konsole/KDE runtime and project-local package repository. Bundle/checksum/build information are in ignored `dist/`; isolated import updates only `.build/flatpak`. No push, tag, public release, issue comment or normal desktop installation. Full desktop acceptance remains necessary. |
+
+### Validation
+
+All eight suites pass across the native build, KDE SDK and X11/Konsole environment:
+discovery, containers, transport, core, runtime, model, window and terminal. The
+X11 window suite passes 21 cases; the terminal suite passes 13. Tests cover the
+swapped defaults, tab/pane focus, palette navigation, keyboard context menus,
+settings drafts and validation, frozen cycling, cancellation, rebindings,
+candidate closure, project replacement and backend separation. A real PTY
+receives ordinary input without app shortcut bytes. Original Konsole shortcuts
+return after reassignment. The palette, settings and project chooser screenshots
+were visually reviewed.
+
+The offscreen platform cannot reactivate an owner window after a popup without a
+window manager; the test explicitly reactivates it on that platform. The X11 test
+uses normal automatic reactivation. No application focus workaround was added.
+Formatting, whitespace, shell syntax, manifest JSON and desktop-entry validation
+pass. AppStream retains its existing missing-homepage warning.
+
+The stripped package reports 0.7.0 and passes the direct-runtime window/Konsole
+smoke test. The bundle installs into the project-local Flatpak installation;
+installed binary bytes match staging and the bundle checksum passes. Flatpak
+metadata and permissions are byte-identical to 0.6.2. Full sandbox launch remains
+unverified here: this environment prohibits user namespaces, and installation
+cache triggers report that restriction. The normal desktop installation was not
+modified. Fully quit the old application, install the bundle and relaunch for
+desktop acceptance testing.
