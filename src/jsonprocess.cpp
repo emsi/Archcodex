@@ -15,6 +15,7 @@ void JsonProcess::stop() {
     ++generation;
     deadline.stop();
     latest = {};
+    initialRequest = {};
     if (!process)
         return;
     auto *p = process;
@@ -50,6 +51,12 @@ void JsonProcess::request(const QJsonObject &data) {
         fail("Discovery request exceeded its limit.");
         return;
     }
+    // QProcess buffers writes made while Starting. Sending those before the
+    // captured startup request could restore an obsolete host configuration.
+    if (process->state() == QProcess::Starting) {
+        initialRequest = data;
+        return;
+    }
     deadline.start(30000);
     process->write(bytes);
 }
@@ -62,13 +69,18 @@ void JsonProcess::start(const QStringList &command, const QJsonObject &data) {
         return;
     }
     process = new QProcess(this);
+    initialRequest = data;
     const auto epoch = generation;
     connect(process, &QProcess::readyReadStandardError, this, [this] {
         if (process)
             tail = (tail + process->readAllStandardError()).right(4096);
     });
     connect(process, &QProcess::readyReadStandardOutput, this, &JsonProcess::receive);
-    connect(process, &QProcess::started, this, [this, data] { request(data); });
+    connect(process, &QProcess::started, this, [this] {
+        const auto current = initialRequest;
+        initialRequest = {};
+        request(current);
+    });
     connect(process, &QProcess::errorOccurred, this, [this, epoch](auto error) {
         if (epoch == generation && error == QProcess::FailedToStart)
             fail("Cannot start discovery: " + process->errorString());

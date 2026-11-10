@@ -51,6 +51,7 @@ class Window : public QMainWindow {
     QString scopePath, pendingOpen;
     QSet<QString> pendingForks;
     QString localUser, localHost;
+    QString configuredLocalCodex, discoveredLocalCodex;
     bool localIdentityDiscovered = false;
     QHash<QString, QString> containerHostNames;
     bool pendingRestart = false;

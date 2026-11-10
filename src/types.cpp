@@ -196,11 +196,31 @@ QString projectKey(const QString &backend, const QString &path) {
 QStringList terminalArguments(const BackendProfile &p, const QString &id) {
     return clientArguments(p, id);
 }
-QStringList clientArguments(const BackendProfile &p, const QString &id, const QString &cwd) {
+QString detectedLocalCodex(const QJsonArray &endpoints) {
+    QStringList defaults, others;
+    for (const auto &value : endpoints) {
+        const auto endpoint = value.toObject();
+        const auto executable = endpoint["executable"].toString();
+        if (!endpoint["hostEnvironment"].toBool() || !validText(executable) ||
+            !QDir::isAbsolutePath(executable))
+            continue;
+        (endpoint["default"].toBool() ? defaults : others).append(executable);
+    }
+    // Prefer the default local server. Stable order avoids selection changes
+    // caused solely by /proc iteration order when several local versions run.
+    defaults.sort();
+    others.sort();
+    return defaults.isEmpty() ? others.value(0) : defaults.first();
+}
+QStringList clientArguments(const BackendProfile &p, const QString &id, const QString &cwd,
+                            const QString &localExecutable) {
     if (p.isContainer() && p.relaySocket.isEmpty())
         return {}; // Never fall back to a default or a stale container command.
     if (p.isContainer()) {
-        const QJsonObject request{{"socket", p.relaySocket}, {"thread", id}, {"cwd", cwd}};
+        const QJsonObject request{{"socket", p.relaySocket},
+                                  {"thread", id},
+                                  {"cwd", cwd},
+                                  {"executable", localExecutable}};
         return QStringList{"/bin/sh", "-c", "exec \"$@\"", "archcodex"} +
                transportCommand(
                    "client", QString::fromLatin1(

@@ -70,7 +70,10 @@ existing restrictions on sandboxed tools as well as this account boundary.
 
 ## Desktop and server responsibilities
 
-Select the desktop Codex executable independently of the container executable.
+Select the local computer's Codex executable independently of the container
+executable. In 0.6.1 an optional Application setting overrides automatic live
+local discovery, with local PATH as the final fallback. “Desktop” in the diagrams
+means this local computer, not the selected SSH host.
 Do not assign the remote `CODEX_HOME` to the local process or copy credentials.
 Resume the exact thread on the validated backend. New-session working-directory
 paths refer to the remote environment; do not resolve or change into them on the

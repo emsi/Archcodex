@@ -3,16 +3,22 @@
 #include <QDialog>
 
 class QCheckBox;
+class QLineEdit;
+class QLabel;
 namespace Archcodex {
 class SettingsDialog : public QDialog {
     Q_OBJECT
   public:
-    SettingsDialog(bool hideUnsaved, bool showAllMyCodexSessions, QWidget *parent = nullptr);
+    SettingsDialog(bool hideUnsaved, bool showAllMyCodexSessions,
+                   const QString &localExecutable = {}, QWidget *parent = nullptr);
   signals:
-    void settingsApplied(bool hideUnsaved, bool showAllMyCodexSessions);
+    void settingsApplied(bool hideUnsaved, bool showAllMyCodexSessions,
+                         const QString &localExecutable);
 
   private:
     QCheckBox *hideUnsaved, *showAllMyCodexSessions;
-    void apply();
+    QLineEdit *localCodex;
+    QLabel *validation;
+    bool apply();
 };
 } // namespace Archcodex

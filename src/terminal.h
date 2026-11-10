@@ -22,6 +22,7 @@ class TerminalArea : public QWidget {
     void closeSession(const QString &key);
     void closeBackend(const QString &backend);
     bool smokeTest(QString *error);
+    void setLocalCodexExecutable(const QString &path);
   signals:
     void currentChanged(const QString &title);
     void clientStateChanged(const Archcodex::Session &session);
@@ -45,6 +46,7 @@ class TerminalArea : public QWidget {
     QHash<QString, QString> exits;
     QHash<QString, Session> clients;
     QStringList recent, cycle;
+    QString localCodexExecutable;
     int cycleIndex = 0;
     void remember(const QString &key);
     bool showSession(const QString &key);

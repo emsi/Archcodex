@@ -1,7 +1,7 @@
 # Archcodex
 
 Archcodex is a native Linux desktop application for working with Codex sessions.
-Version **0.6.0** supports **existing local Unix-socket app-servers** and
+Version **0.6.1** supports **existing local Unix-socket app-servers** and
 **myCodex containers locally or on configured SSH hosts**. Direct TCP and generic
 SSH socket profiles remain planned.
 
@@ -47,13 +47,13 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.6.0-x86_64.flatpak` and
+The local build produces `dist/Archcodex-0.6.1-x86_64.flatpak` and
 `dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
 myCodex or any other container:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.6.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.6.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
@@ -86,14 +86,23 @@ access and Python 3 are required on each host; remote background connections nee
 an accepted host key and non-interactive authentication through host OpenSSH.
 No myCodex update, container recreation or additional Flatpak permission is required.
 
-The Codex TUI runs **on the desktop host**, using local clipboard/image input
+The Codex TUI runs **on the local computer running Archcodex**, using local clipboard/image input
 and an explicit private relay endpoint. App-server, tools and workspaces remain
 in the selected container. Observers and TUIs share one pipe-only transport per
 host, with one Docker attachment per container and one SSH connection per remote
 host profile. No remote listener or socket mount is created. The desktop needs
-**Codex 0.166.0 or newer** in PATH and a **running systemd user manager** for
+**Codex 0.166.0 or newer** and a **running systemd user manager** for
 transport supervision. SSH keepalives use 15 seconds / three missed replies;
-session status remains event-driven. See the [transport design](docs/container-transport-security.md).
+session status remains event-driven. The local client is selected from
+**Settings → Configure Archcodex → Application → Local Codex executable** when
+specified, otherwise from live local server discovery, then local PATH. Automatic
+selection prefers the default local server; several other detected versions use
+stable path order. Set an explicit absolute path if you want a particular version.
+Flatpak does not need that path in its own PATH. The version check applies to this
+local TUI, not the SSH host outside its containers. See the [transport design](docs/container-transport-security.md).
+
+Version 0.6.1 also fixes startup request ordering that could leave a configured
+myCodex host permanently at “Discovering…” when several hosts start together.
 
 A shared conversation appears as
 **History only** unless Archcodex has observed it loaded in that execution
@@ -150,7 +159,7 @@ capability error.
 - [Local discovery](docs/discovery.md): host discovery, namespace boundaries and event-driven updates.
 - [Initial UI design](docs/ui.md): a simple IDE layout, host groups, expandable projects and
   sessions, and the five session views.
-- [Implementation and testing](docs/implementation.md): what 0.6.0 delivers and
+- [Implementation and testing](docs/implementation.md): what 0.6.1 delivers and
   how to exercise it on your host.
 
 ## Project status

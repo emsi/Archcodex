@@ -2,6 +2,8 @@
 #include "terminal.h"
 #include <QAccessible>
 #include <QFile>
+#include <QJsonArray>
+#include <QJsonDocument>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QPushButton>
@@ -13,6 +15,48 @@ using namespace Archcodex;
 class TerminalTests : public QObject {
     Q_OBJECT
   private slots:
+    void containerTerminalUsesSelectedLocalExecutableAndExplicitRelay() {
+        QTemporaryDir dir;
+        QFile script(dir.path() + "/local codex ; literal");
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(
+            "#!/usr/bin/python3\nimport json,sys\n"
+            "if '--version' in sys.argv: print('codex-cli 0.166.0')\n"
+            "else:\n with open(__file__+'.args','w') as out: json.dump(sys.argv[1:],out)\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        TerminalArea area;
+        area.setLocalCodexExecutable(script.fileName());
+        area.show();
+        BackendProfile p{"container", "Selected remote container", "mycodex",
+                         "/remote/app-server.sock"};
+        p.executable = "/remote-only/codex";
+        p.relaySocket = "/local/explicit-relay.sock";
+        p.sshHost = "must-not-be-contacted";
+        p.containerId = QString(64, 'a');
+        p.containerEpoch = "epoch";
+        p.environmentId = "execution-environment";
+        p.dockerContext = "default";
+        p.runtimeUser = "alice";
+        p.runtimeHome = "/home/alice";
+        p.discoveryHost = "remote-host";
+        auto s = Session::fromThread(p.id, {{"id", "thread-1"}, {"cwd", "/remote-only/workdir"}});
+        s.executionObserved = true;
+        s.executionEnvironment = p.environmentId;
+        QSignalSpy exits(&area, &TerminalArea::clientExited);
+        QString error;
+        QVERIFY2(area.open(p, s, &error), qPrintable(error));
+        QTRY_COMPARE(exits.size(), 1);
+        QCOMPARE(exits.first()[1].toInt(), 0);
+        QFile args(script.fileName() + ".args");
+        QVERIFY(args.open(QIODevice::ReadOnly));
+        QCOMPARE(QJsonDocument::fromJson(args.readAll()).array(),
+                 QJsonArray({"--remote", "unix:///local/explicit-relay.sock", "resume", "--",
+                             "thread-1"}));
+        // The test executable was invoked only as a version probe and explicit
+        // remote client; neither SSH nor an app-server launch is in this path.
+        area.closeCurrent();
+    }
     void controlTabCyclesFrozenRecentOrderAndNeverReachesTheTerminal() {
         QTemporaryDir dir;
         QFile script(dir.path() + "/client");

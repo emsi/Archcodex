@@ -980,3 +980,78 @@ acceptance checks. No account credentials or live model turns were used.
    owned local/remote helpers and local socket paths. Repeat after a network
    partition; distinguish desktop 15/3 keepalives from remote SSH-server detection.
    Existing app-servers and accepted work must remain independent.
+
+
+## 0.6.1 startup discovery and local TUI executable fixes
+
+The reported local myCodex hosts stayed at “Discovering…” while remote hosts
+connected. A deterministic QProcess test reproduced the fault: a newer complete
+host configuration written during process startup was followed by the older
+configuration captured by the started callback. That last stale message removed
+hosts from the shared helper. Cached sessions then lacked live status. The user's
+manual Connect / retry restored discovery (16 local containers, eight servers),
+which is the recovery expected from resending the complete host list.
+
+`JsonProcess` now keeps the latest pending configuration until the process has
+started. No obsolete initial request follows it. This applies to full host lists
+and local discovery path snapshots, without adding status polling or changing
+running-process request behavior. Regression cases cover local-first and
+remote-first registration.
+
+The remaining connection error was independent: 0.6.0 used `shutil.which("codex")`
+for myCodex TUIs, while ordinary local server connections already used a
+discovered absolute executable. A GUI/Flatpak launch can lack the terminal's
+PATH even when Codex is installed and local server connections work. Version
+0.6.1 uses the optional local executable setting first, otherwise live local
+server discovery, otherwise PATH. A restricted-PATH test proves that the selected
+absolute executable is used for both Resume and New. Container paths are never
+local candidates. The selected default local server takes precedence; otherwise
+candidate paths are sorted for stable selection. Users with multiple versions
+can choose explicitly. Automatic candidates are not saved as stale cache guesses.
+
+“Local computer” means the machine running Archcodex. The version requirement is
+for its local TUI, not for an executable on an SSH host outside the containers.
+Errors now include the local hostname and distinguish lookup failure from an
+incompatible selected version. No minimum-version change was made in this fix.
+The server/workspace remain in the selected container, and every TUI launch
+still supplies an explicit relay. Missing relays fail closed; no app-server is
+started as a fallback for an inactive/disconnected entry.
+
+### Decisions not agreed in advance
+
+The bug report authorized correcting discovery and local TUI launch failures.
+These details were selected during the repair:
+
+| Choice/action | Reason, affected files, consequences and status |
+| --- | --- |
+| Coalesce pre-start discovery requests to the latest complete configuration. | `src/jsonprocess.*`; fixes the demonstrated ordering race without delays, session queries or another process. The regression failed with remote-only configuration before the fix; both startup orders now pass. |
+| Reuse live local executable discovery, preferring the default server and then sorted paths, with PATH as the final fallback. | `src/types.*`, `src/window.*`, `src/terminal.*`, `src/transport.py`; avoids relying on GUI PATH and never uses container executable paths. Existing local server launches retain their own executable. No new dependency, shell startup or cache migration. Implemented and tested with restricted PATH and a real Konsole PTY. |
+| Add an optional absolute-path field to the Application settings page. | `src/settingsdialog.*`, `src/window.*`; `application/localCodexExecutable` in `window.ini`, empty by default. Explicit selection overrides detection for subsequent myCodex client launches/restarts; current terminals are unchanged. Invalid relative/control-character paths cannot apply settings. Apply/Cancel/persistence tests pass; the enlarged settings dialog was visually reviewed. |
+| Replace ambiguous “desktop host” launch diagnostics with local-computer/hostname wording and executable/version details. | `src/transport.py`, `src/containerdiscovery.cpp`, README and design docs; the existing 0.166.0 local-client minimum and remote requirements are unchanged. No credential inspection, copying or remote installation. |
+| Package 0.6.1 and commit the completed repair under the standing instruction. | CMake, AppStream, build script and docs; local bundle/checksum/BUILD-INFO in `dist/`. Existing SDK/runtime/OSTree trees and project-local Flatpak installation reused. Logs, configuration and screenshots in `.build/fix-0.6.1`, staging in `.build/package-0.6.1`. No normal host installation, public release, tag or push. The intervening `89d1b0f` test-fixture changes are preserved. |
+
+### Validation and remaining host check
+
+All eight suites pass across native, KDE SDK and real X11/Konsole environments:
+discovery, containers, transport, core, runtime, model, window and terminal.
+Coverage includes startup configuration ordering, strict local candidate selection,
+restricted PATH, argument boundaries, settings validation/persistence and a real
+PTY that launches the chosen local executable with the exact relay/thread argv.
+The PTY fixture does not invoke SSH or start an app-server. Existing 18 transport
+cases and shared-history/lifetime tests also pass.
+
+The stripped package reports 0.6.1, passes the real Konsole smoke test, installs
+into the isolated project-local Flatpak installation, and matches staged binary
+bytes and checksum. Permissions are byte-identical to 0.6.0. Formatting,
+whitespace, shell/JSON and desktop-entry checks pass; AppStream retains its
+pre-existing missing-homepage warning. Build namespace restrictions still prevent
+full Flatpak execution; cache triggers warn about that during the isolated
+installation. A temporary D-Bus session was used only for this test install.
+No test relay directories remain. A live, non-fixture container helper visible
+after the user's discovery retry was left untouched.
+
+The startup defect and PATH-independent launch are reproduced and tested here;
+actual local/remote myCodex TUI use, clipboard/image input and the complete Flatpak
+host-command boundary still require testing on the user's desktop. Fully quit
+the old application, install the 0.6.1 bundle, relaunch and confirm the version in
+About. Connect / retry alone cannot replace 0.6.0's executable-resolution code.

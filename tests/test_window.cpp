@@ -401,12 +401,14 @@ class WindowTests : public QObject {
             QVERIFY(dialog);
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
+            dialog->findChild<QLineEdit *>("localCodexExecutable")->setText("/cancelled/codex");
             dialog->reject();
         });
         action->trigger();
         QVERIFY(quickSetting->isChecked());
         QSettings settings(data.path() + "/window.ini", QSettings::IniFormat);
         QVERIFY(!settings.value("backends/myCodex/showAllSessions", false).toBool());
+        QVERIFY(settings.value("application/localCodexExecutable").toString().isEmpty());
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = window.findChild<SettingsDialog *>();
             QVERIFY(dialog);
@@ -416,11 +418,19 @@ class WindowTests : public QObject {
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
             auto *buttons = dialog->findChild<QDialogButtonBox *>();
+            auto *localCodex = dialog->findChild<QLineEdit *>("localCodexExecutable");
+            localCodex->setText("relative/codex");
+            QTest::mouseClick(buttons->button(QDialogButtonBox::Apply), Qt::LeftButton);
+            QVERIFY(quickSetting->isChecked()); // Invalid paths must not apply any settings.
+            localCodex->setText("/local Codex/bin/codex");
             QTest::mouseClick(buttons->button(QDialogButtonBox::Apply), Qt::LeftButton);
             QVERIFY(dialog->isVisible());
             QVERIFY(!quickSetting->isChecked());
             const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
             if (!screenshots.isEmpty()) {
+                dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(0);
+                QApplication::processEvents();
+                QVERIFY(dialog->grab().save(screenshots + "/settings-application.png"));
                 dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(1);
                 QApplication::processEvents();
                 QVERIFY(dialog->grab().save(screenshots + "/settings.png"));
@@ -431,6 +441,8 @@ class WindowTests : public QObject {
         settings.sync();
         QVERIFY(settings.value("backends/myCodex/showAllSessions").toBool());
         QVERIFY(!settings.value("hideUnsavedSessions").toBool());
+        QCOMPARE(settings.value("application/localCodexExecutable").toString(),
+                 "/local Codex/bin/codex");
         window.close();
         Window reopened(data.path(), false);
         QVERIFY(!reopened.findChild<QAction *>("hideUnsavedSessions")->isChecked());
@@ -438,6 +450,8 @@ class WindowTests : public QObject {
             auto *dialog = reopened.findChild<SettingsDialog *>();
             QVERIFY(dialog);
             QVERIFY(dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
+            QCOMPARE(dialog->findChild<QLineEdit *>("localCodexExecutable")->text(),
+                     "/local Codex/bin/codex");
             dialog->reject();
         });
         reopened.findChild<QAction *>("configureArchcodex")->trigger();

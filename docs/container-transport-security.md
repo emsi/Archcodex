@@ -304,8 +304,11 @@ remaining host checks are recorded in section 9 and the implementation log.
   transport replacement requires fresh discovery. A dead terminal retains its
   output; the existing Restart action obtains the current validated endpoint.
   No automatic prompt replay or fallback to a desktop server occurs.
-- The desktop CLI comes from the host PATH, independently of the container's
-  executable. Launch requires `codex-cli` version 0.166.0 or newer; an older or
+- Since 0.6.1 the local CLI comes from an explicit Application setting, otherwise
+  a live local server's discovered absolute executable, otherwise local PATH.
+  Default-server discovery takes precedence; multiple other candidates have
+  stable path order. Container executable paths are never local candidates.
+  Launch requires `codex-cli` version 0.166.0 or newer; an older or
   missing client produces a retained terminal error. Commands are explicitly
   `codex --remote unix://LOCAL_RELAY resume -- THREAD_ID` or
   `codex --remote unix://LOCAL_RELAY --cd REMOTE_WORKDIR`. The remote cwd is never

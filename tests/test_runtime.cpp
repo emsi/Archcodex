@@ -3,6 +3,7 @@
 #include "asyncstore.h"
 #include "containerdiscovery.h"
 #include "fixture.h"
+#include "jsonprocess.h"
 #include "launch.h"
 #include <QElapsedTimer>
 #include <QSqlQuery>
@@ -53,6 +54,34 @@ class ProtocolFixtureBackend : public CodexBackend {
 class RuntimeTests : public QObject {
     Q_OBJECT
   private slots:
+    void discoveryStartupKeepsNewestHostConfiguration_data() {
+        QTest::addColumn<QString>("firstHost");
+        QTest::newRow("remote-first") << QString("remote");
+        QTest::newRow("local-first") << QString("local-mycodex");
+    }
+    void discoveryStartupKeepsNewestHostConfiguration() {
+        QFETCH(QString, firstHost);
+        JsonProcess process(this);
+        QSignalSpy messages(&process, &JsonProcess::message);
+        QSignalSpy failures(&process, &JsonProcess::failed);
+        connect(
+            &process, &JsonProcess::message, &process, [&process] { process.acknowledge(); },
+            Qt::QueuedConnection);
+        const QJsonObject initial{{"hosts", QJsonArray{firstHost}}};
+        const QJsonObject both{{"hosts", QJsonArray{"remote", "local-mycodex"}}};
+        process.start({"/usr/bin/python3", "-u", "-c",
+                       "import sys\nfor line in sys.stdin: print(line, end='', flush=True)"},
+                      initial);
+        // Another discovery facade registers before QProcess emits started.
+        process.request(both);
+        QTRY_VERIFY(!messages.isEmpty() || !failures.isEmpty());
+        QTest::qWait(100);
+        QVERIFY(failures.isEmpty());
+        const auto received = qvariant_cast<QJsonObject>(messages.last()[0]);
+        process.stop();
+        QTRY_VERIFY(findChildren<QProcess *>().isEmpty());
+        QCOMPARE(received, both);
+    }
     void statusEventsAdvanceRecencyWithoutPollingOrStaleReadRollback() {
         Fixture f;
         LocalBackend b(f.profile(), BRIDGE_PATH);
@@ -196,30 +225,55 @@ class RuntimeTests : public QObject {
                          "json.dumps(sys.argv[1:]))\n");
         executable.close();
         QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
-        for (const auto &id : {QString("thread ; $(false)"), QString()}) {
-            const QString cwd = "/remote directory that does not exist locally";
-            const auto command = clientArguments(p, id, cwd);
-            QProcess process;
-            auto environment = QProcessEnvironment::systemEnvironment();
-            environment.insert("PATH", directory.path() + ":" + environment.value("PATH"));
-            process.setProcessEnvironment(environment);
-            process.start(command.first(), command.mid(1));
-            QVERIFY(process.waitForFinished(10000));
-            QCOMPARE(process.exitCode(), 0);
-            const auto actual = QJsonDocument::fromJson(process.readAllStandardOutput()).array();
-            QJsonArray expected{"--remote", "unix://" + p.relaySocket};
-            if (id.isEmpty()) {
-                expected.append("--cd");
-                expected.append(cwd);
-            } else {
-                expected.append("resume");
-                expected.append("--");
-                expected.append(id);
+        for (const bool restrictedPath : {false, true}) {
+            for (const auto &id : {QString("thread ; $(false)"), QString()}) {
+                const QString cwd = "/remote directory that does not exist locally";
+                const auto command =
+                    clientArguments(p, id, cwd, restrictedPath ? executable.fileName() : QString());
+                QProcess process;
+                auto environment = QProcessEnvironment::systemEnvironment();
+                environment.insert("PATH", restrictedPath ? "/usr/bin:/bin"
+                                                          : directory.path() + ":" +
+                                                                environment.value("PATH"));
+                process.setProcessEnvironment(environment);
+                process.start(command.first(), command.mid(1));
+                QVERIFY(process.waitForFinished(10000));
+                QCOMPARE(process.exitCode(), 0);
+                const auto actual =
+                    QJsonDocument::fromJson(process.readAllStandardOutput()).array();
+                QJsonArray expected{"--remote", "unix://" + p.relaySocket};
+                if (id.isEmpty()) {
+                    expected.append("--cd");
+                    expected.append(cwd);
+                } else {
+                    expected.append("resume");
+                    expected.append("--");
+                    expected.append(id);
+                }
+                QCOMPARE(actual, expected);
             }
-            QCOMPARE(actual, expected);
         }
         p.relaySocket.clear();
         QVERIFY(clientArguments(p, "thread").isEmpty());
+    }
+    void localExecutableSelectionNeverUsesContainerPaths() {
+        const auto endpoint = [](const QString &path, bool local, bool primary = false) {
+            return QJsonObject{
+                {"executable", path}, {"hostEnvironment", local}, {"default", primary}};
+        };
+        const auto container = endpoint("/container-only/codex", false, true);
+        const auto relative = endpoint("codex", true);
+        QVERIFY(detectedLocalCodex({container, relative}).isEmpty());
+        const auto first = endpoint("/local/a/codex", true);
+        const auto second = endpoint("/local/b/codex", true);
+        QCOMPARE(detectedLocalCodex({second, container, first, relative}), "/local/a/codex");
+        QCOMPARE(detectedLocalCodex({first, second}), detectedLocalCodex({second, first}));
+        QCOMPARE(detectedLocalCodex({first, endpoint("/local/main/codex", true, true)}),
+                 "/local/main/codex");
+        Fixture f;
+        const auto args = clientArguments(f.profile(), "thread", "/work", "/different/codex");
+        QVERIFY(args.contains(f.profile().executable));
+        QVERIFY(!args.contains("/different/codex"));
     }
     void supervisorUsesBoundedArgumentsAndValidCleanupUnitSyntax() {
         const auto command = supervisedTransportCommand(QString(32, 'a'));

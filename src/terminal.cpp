@@ -58,6 +58,9 @@ TerminalArea::~TerminalArea() {
     for (auto *p : findChildren<KParts::ReadOnlyPart *>())
         p->disconnect(this);
 }
+void TerminalArea::setLocalCodexExecutable(const QString &path) {
+    localCodexExecutable = path;
+}
 KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     const auto result = KPluginFactory::instantiatePlugin<KParts::ReadOnlyPart>(
         KPluginMetaData("kf6/parts/konsolepart"), this);
@@ -143,7 +146,8 @@ bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QStri
     const auto key = sessionKey(p.id, s.id);
     const auto title =
         (fresh ? QString("New session") : s.title) + "  ·  " + p.name + "  ·  " + s.cwd;
-    return launch(key, clientArguments(p, fresh ? QString() : s.id, s.cwd), title, s, error);
+    return launch(key, clientArguments(p, fresh ? QString() : s.id, s.cwd, localCodexExecutable),
+                  title, s, error);
 }
 bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QString *error) {
     if (!p.validate().isEmpty() || !validText(path) || !QDir::isAbsolutePath(path)) {

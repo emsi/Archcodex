@@ -24,6 +24,7 @@ class JsonProcess : public QObject {
     QTimer deadline;
     QByteArray buffer, tail;
     QJsonObject latest;
+    QJsonObject initialRequest;
     bool inFlight = false;
     quint64 generation = 0;
     void fail(const QString &reason);

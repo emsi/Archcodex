@@ -310,6 +310,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     hideUnsaved->setObjectName("hideUnsavedSessions");
     hideUnsaved->setCheckable(true);
     QSettings settings(directory + "/window.ini", QSettings::IniFormat);
+    configuredLocalCodex = settings.value("application/localCodexExecutable").toString();
+    terminal->setLocalCodexExecutable(configuredLocalCodex);
     hideUnsaved->setChecked(settings.value("hideUnsavedSessions", true).toBool());
     model->setHideUnsaved(hideUnsaved->isChecked());
     results->setHideUnsaved(hideUnsaved->isChecked());
@@ -1208,13 +1210,18 @@ void Window::showSettings() {
     auto *hideUnsaved = findChild<QAction *>("hideUnsavedSessions");
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
     SettingsDialog dialog(hideUnsaved->isChecked(),
-                          settings.value("backends/myCodex/showAllSessions", false).toBool(), this);
+                          settings.value("backends/myCodex/showAllSessions", false).toBool(),
+                          configuredLocalCodex, this);
     connect(&dialog, &SettingsDialog::settingsApplied, this,
-            [this, hideUnsaved](bool hide, bool showAll) {
+            [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable) {
                 hideUnsaved->setChecked(hide);
                 QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
                 settings.setValue("backends/myCodex/showAllSessions", showAll);
+                settings.setValue("application/localCodexExecutable", localExecutable);
                 settings.sync();
+                configuredLocalCodex = localExecutable;
+                terminal->setLocalCodexExecutable(
+                    configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
                 model->setMyCodexWorkdirOnly(!showAll);
                 results->setMyCodexWorkdirOnly(!showAll);
                 if (searchingView)
@@ -1411,6 +1418,9 @@ void Window::discover() {
     updateContainerSummary();
 }
 void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues) {
+    discoveredLocalCodex = detectedLocalCodex(endpoints);
+    terminal->setLocalCodexExecutable(configuredLocalCodex.isEmpty() ? discoveredLocalCodex
+                                                                     : configuredLocalCodex);
     QSet<QString> present;
     for (const auto &value : endpoints) {
         const auto item = value.toObject();

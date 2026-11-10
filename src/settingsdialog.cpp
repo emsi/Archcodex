@@ -1,15 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "settingsdialog.h"
+#include "types.h"
 #include <QCheckBox>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QLabel>
+#include <QLineEdit>
 #include <QListWidget>
 #include <QPushButton>
 #include <QStackedWidget>
 #include <QVBoxLayout>
 
 namespace Archcodex {
-SettingsDialog::SettingsDialog(bool hide, bool showAll, QWidget *parent) : QDialog(parent) {
+SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExecutable,
+                               QWidget *parent)
+    : QDialog(parent) {
     setWindowTitle("Configure Archcodex");
     setObjectName("settingsDialog");
     auto *layout = new QVBoxLayout(this);
@@ -43,14 +48,31 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, QWidget *parent) : QDial
         content->addWidget(label);
         content->addStretch();
     };
-    auto *application = page("Application", "Session visibility");
+    auto *application = page("Application", "Application preferences");
     hideUnsaved = new QCheckBox("Hide unsaved sessions");
     hideUnsaved->setObjectName("hideUnsavedSetting");
     hideUnsaved->setChecked(hide);
     application->addWidget(hideUnsaved);
+    auto *clientLabel = new QLabel("Local Codex executable (this computer)");
+    localCodex = new QLineEdit(localExecutable);
+    localCodex->setObjectName("localCodexExecutable");
+    localCodex->setPlaceholderText("Automatic: detected local Codex, then local PATH");
+    localCodex->setClearButtonEnabled(true);
+    clientLabel->setBuddy(localCodex);
+    application->addWidget(clientLabel);
+    application->addWidget(localCodex);
+    validation = new QLabel;
+    validation->setWordWrap(true);
+    validation->setTextFormat(Qt::PlainText);
+    validation->hide();
+    application->addWidget(validation);
     help(application,
          "Hide entries without saved history. Open terminals bypass this unsaved-session filter. "
-         "This setting also appears in the View menu.");
+         "This setting also appears in the View menu.\n\n"
+         "myCodex terminals use Codex on this computer, including for remote containers. "
+         "Automatic selection reuses the executable found by local server discovery. "
+         "If needed, enter the absolute path reported by command -v codex in your local terminal. "
+         "This does not change the executable of a local host server or start an app-server.");
 
     auto *backends = page("Backends", "myCodex");
     showAllMyCodexSessions =
@@ -74,13 +96,23 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, QWidget *parent) : QDial
     connect(buttons->button(QDialogButtonBox::Apply), &QPushButton::clicked, this,
             &SettingsDialog::apply);
     connect(buttons, &QDialogButtonBox::accepted, this, [this] {
-        apply();
-        accept();
+        if (apply())
+            accept();
     });
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
-    resize(720, 360);
+    resize(760, 430);
 }
-void SettingsDialog::apply() {
-    emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked());
+bool SettingsDialog::apply() {
+    const auto executable = localCodex->text().trimmed();
+    if (!executable.isEmpty() && (!QDir::isAbsolutePath(executable) || !validText(executable))) {
+        validation->setText(
+            "Enter an absolute path on this computer, or leave it empty for automatic selection.");
+        validation->show();
+        localCodex->setFocus();
+        return false;
+    }
+    validation->hide();
+    emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked(), executable);
+    return true;
 }
 } // namespace Archcodex

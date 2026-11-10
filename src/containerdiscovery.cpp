@@ -32,7 +32,7 @@ class ContainerTransport : public QObject {
         connect(runner, &JsonProcess::failed, this, [this](const QString &message) {
             started = false;
             emit failed("Shared container transport: " + message +
-                        "\nThe desktop host needs Python 3 and a running systemd user manager.");
+                        "\nThis local computer needs Python 3 and a running systemd user manager.");
             if (!hosts.isEmpty()) {
                 retry.start(delay);
                 delay = qMin(30000, delay * 2);

@@ -672,13 +672,24 @@ def main():
             if not path.startswith('/') or not containers.text(path) or \
                     not containers.text(thread, 128) or not containers.text(cwd) or (cwd and not cwd.startswith('/')):
                 raise ValueError('Invalid desktop client endpoint or remote working directory')
-            executable = shutil.which('codex')
+            local = 'local computer (' + socket.gethostname() + ')'
+            executable = request.get('executable', '')
+            if executable and (not containers.text(executable) or not os.path.isabs(executable)):
+                raise ValueError('The local Codex executable must be an absolute path')
+            executable = executable or shutil.which('codex')
             if not executable:
-                raise ValueError('Install Codex 0.166.0 or newer on the desktop host; no local codex executable was found')
+                raise ValueError('Could not locate Codex on this ' + local + '. '
+                    'Choose its absolute path in Settings > Application > Local Codex executable. '
+                    'The selected remote host is not searched for the TUI.')
+            if not os.path.isfile(executable) or not os.access(executable, os.X_OK):
+                raise ValueError('Cannot execute ' + executable + ' on this ' + local +
+                                 '. Check Settings > Application > Local Codex executable.')
             version = asyncio.run(containers.run([executable, '--version'])).decode().strip()
             match = re.search(r'codex-cli (\d+)\.(\d+)\.(\d+)', version)
             if not match or tuple(map(int, match.groups())) < (0, 166, 0):
-                raise ValueError('Desktop Codex 0.166.0 or newer is required for remote workspace/image support')
+                raise ValueError('Codex 0.166.0 or newer is required on this ' + local +
+                    ' for the local TUI and image input. Found ' + version[:256] + ' at ' + executable +
+                    '. This is not a version check on the remote SSH host.')
             args = [executable, '--remote', 'unix://' + path]
             args += ['resume', '--', thread] if thread else ['--cd', cwd]
             os.execv(executable, args)

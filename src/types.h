@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #pragma once
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QString>
 #include <QStringList>
@@ -66,7 +67,8 @@ QString projectKey(const QString &backend, const QString &path);
 bool validText(const QString &text, int maxLength = 4096);
 QStringList terminalArguments(const BackendProfile &profile, const QString &threadId);
 QStringList clientArguments(const BackendProfile &profile, const QString &threadId,
-                            const QString &cwd = {});
+                            const QString &cwd = {}, const QString &localExecutable = {});
+QString detectedLocalCodex(const QJsonArray &endpoints);
 QString serverLabel(const BackendProfile &profile);
 QString serverTreeLabel(const BackendProfile &profile);
 QString serverDetails(const BackendProfile &profile);
