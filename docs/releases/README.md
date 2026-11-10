@@ -18,6 +18,7 @@ listing.
 
 | Version | Changes |
 | --- | --- |
+| [0.8.1](v0.8.1.md) | Fix New-session rename, status and restoration with real conversation IDs |
 | [0.8.0](v0.8.0.md) | Restore opened terminals, selection and recency, with documented TUI limits |
 | [0.7.1](v0.7.1.md) | Restore terminal scrollback shortcuts with Konsole 26.04.3 |
 | [0.7.0](v0.7.0.md) | Configurable keyboard navigation and deferred recent-terminal/project switching |
