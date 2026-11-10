@@ -182,6 +182,20 @@
       "sha256": "53513659acb2a596b79309908287a8112e032fbceaa0eab6eecccc1bf9701355",
       "bytes": 2480664,
       "notes": "v0.7.0.md"
+    },
+    {
+      "version": "0.7.1",
+      "tag": "v0.7.1",
+      "previous_tag": "v0.7.0",
+      "title": "Archcodex 0.7.1 — Restore terminal scrollback shortcuts",
+      "source_commit": "530a2039d8aa77f5a15058694df50f9a6d013247",
+      "source_commit_date": "2026-11-10T15:27:45Z",
+      "flatpak_commit": "8634dbf171180f76048ddacc46e980b5b424cd6d9be707abcc636300f8bc48fc",
+      "asset": "Archcodex-0.7.1-x86_64.flatpak",
+      "sha256": "afbf5c74a7d78a6ec9dcfe68ca7fea08e05536e016a4efbdb57f4a177e27e1bd",
+      "bytes": 2300440,
+      "notes": "v0.7.1.md",
+      "included_fix": "fa62908a109fc6d5e5963c0d61fd84641df031a3"
     }
   ]
 }
