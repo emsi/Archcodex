@@ -54,9 +54,23 @@ is required. This first package uses X11, including XWayland where available.
 
 ## Install and test
 
-The local build produces `dist/Archcodex-0.7.0-x86_64.flatpak` and
-`dist/SHA256SUMS`. Run these commands in your **host KDE terminal**, outside
-myCodex or any other container:
+Download the Flatpak and `SHA256SUMS` from the
+[latest GitHub release](https://github.com/emsi/Archcodex/releases/latest) into
+the same directory. Quit any older Archcodex instance, then run these commands
+there in your **host KDE terminal**, outside myCodex or any other container:
+
+```sh
+sha256sum -c SHA256SUMS
+flatpak install --user --or-update ./Archcodex-0.7.0-x86_64.flatpak
+flatpak run io.github.emsi.Archcodex
+```
+
+Each version has its own release notes, matching source tag and bundle checksum;
+see the [release history and publishing procedure](docs/releases/README.md).
+These are development builds for host testing. GitHub distributes standalone
+bundles; this does not configure an automatic Flatpak update repository.
+
+For a local build, the equivalent files are in `dist/`:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
