@@ -76,13 +76,34 @@ history and preserve known limitations.
    missing assets, without overwriting an existing different asset or body.
 6. Publish the verified draft. Set Latest explicitly for the newest recommended
    normal release, and false for historical releases. A prerelease cannot be
-   Latest. Recheck public downloads and the Latest endpoint afterward.
+   Latest. Recheck published downloads and the Latest endpoint afterward.
 
 The historical 0.x releases are normal GitHub releases explicitly described as
 development builds, allowing v0.7.0 to carry Latest. Future prereleases should
 use GitHub's prerelease flag when they should not replace the recommended build.
 Publication always needs task authorization; this procedure is not an unattended
 release workflow.
+
+## Publication verification — 2026-11-10
+
+All 14 versions, v0.1.0 through v0.7.0, were published after draft verification.
+Each has exactly two uploaded assets: its original Flatpak and `SHA256SUMS`.
+All 28 uploaded files were downloaded and hashed before publication. Published
+release bodies, asset IDs/digests and peeled tag commits were checked against
+the catalog afterward. The v0.7.0 published assets were downloaded and checked
+again, and GitHub's Latest endpoint resolves to v0.7.0.
+
+The repository was private at publication, and remains private. Releases and
+downloads inherit repository access; publication did not make them anonymous
+public downloads or change repository visibility. No application tests were
+rerun because this task changed only release documentation and distribution;
+the artifact checks above supplement the version-specific recorded test history.
+
+Commit `563e6e0` adds the notes, catalog and installation links. The source
+branch and annotated historical tags were pushed atomically without force.
+Publication receipts and verification downloads remain in ignored
+`.build/release-audit/`; the application, existing bundles and desktop installation
+were not modified.
 
 ## Decisions not agreed in advance
 
@@ -96,6 +117,7 @@ one Latest release was authorized. Supporting choices for this task are:
   documentation with a normal fast-forward; do not rewrite existing history.
 - Keep the original bundles and source dates. Publish as development-labelled
   normal GitHub releases, with only v0.7.0 Latest. Do not backdate GitHub publication.
+  Preserve the repository's existing private visibility and inherited release access.
 - Upload exactly the Flatpak and per-release `SHA256SUMS`; GitHub's source archives
   come from the matching tag. No separate duplicate source assets or build-info
   assets are added. Existing local `dist/SHA256SUMS` remains unchanged.
