@@ -124,6 +124,10 @@ bool TerminalArea::restart(const BackendProfile &p, const Session &s, QString *e
     return startSession(p, s, error);
 }
 bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QString *error) {
+    if (p.isContainer() && p.relaySocket.isEmpty()) {
+        *error = "This container has no live desktop transport. Reconnect its host first.";
+        return false;
+    }
     const bool fresh = s.id.startsWith("new-");
     if (p.isContainer() && !fresh &&
         (!s.executionObserved || s.executionEnvironment != p.environmentId)) {

@@ -6,6 +6,7 @@
 #include "launch.h"
 #include <QElapsedTimer>
 #include <QSqlQuery>
+#include <QStandardPaths>
 #include <QtTest>
 
 static BackendProfile containerProfile(const Fixture &fixture) {
@@ -18,6 +19,7 @@ static BackendProfile containerProfile(const Fixture &fixture) {
     p.runtimeUser = "alice";
     p.runtimeHome = "/home/alice";
     p.discoveryHost = "local-mycodex";
+    p.relaySocket = p.socketPath;
     return p;
 }
 class ProtocolFixtureBackend : public CodexBackend {
@@ -145,6 +147,7 @@ class RuntimeTests : public QObject {
         p.sshHost = "alice@build-host";
         QVERIFY(p.validate().isEmpty());
         QCOMPARE(BackendProfile::fromJson(p.json()).json(), p.json());
+        QVERIFY(BackendProfile::fromJson(p.json()).relaySocket.isEmpty());
         p.sshHost = "-oProxyCommand=bad";
         QVERIFY(!p.validate().isEmpty());
         QVERIFY(!validSshHost("host; touch bad"));
@@ -163,6 +166,84 @@ class RuntimeTests : public QObject {
                  QJsonArray{argument});
         QVERIFY(!QFile::exists(marker));
         QVERIFY(sshCommand("build-host", {"echo"}, true).contains("-tt"));
+    }
+    void containerObserverUsesDesktopRelayAndReceivesRealWebSocketEvents() {
+        Fixture f;
+        f.loaded = {"thread-1"};
+        auto p = containerProfile(f);
+        p.sshHost = "must-not-be-contacted";
+        p.executable = "/container-only/codex";
+        LocalBackend b(p, BRIDGE_PATH);
+        QSignalSpy changed(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        QTRY_VERIFY(!changed.isEmpty());
+        f.notify("thread/status/changed",
+                 {{"threadId", "thread-1"}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_VERIFY(qvariant_cast<Session>(changed.last()[0]).isWaiting());
+        b.disconnectServer();
+    }
+    void containerClientExecutesDesktopCodexWithExplicitRemoteArguments() {
+        Fixture f;
+        auto p = containerProfile(f);
+        p.executable = "/container-only/codex";
+        p.sshHost = "must-not-be-contacted";
+        QTemporaryDir directory;
+        QFile executable(directory.path() + "/codex");
+        QVERIFY(executable.open(QIODevice::WriteOnly));
+        executable.write("#!/usr/bin/python3\nimport json,sys\n"
+                         "print('codex-cli 0.166.0' if '--version' in sys.argv else "
+                         "json.dumps(sys.argv[1:]))\n");
+        executable.close();
+        QVERIFY(executable.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        for (const auto &id : {QString("thread ; $(false)"), QString()}) {
+            const QString cwd = "/remote directory that does not exist locally";
+            const auto command = clientArguments(p, id, cwd);
+            QProcess process;
+            auto environment = QProcessEnvironment::systemEnvironment();
+            environment.insert("PATH", directory.path() + ":" + environment.value("PATH"));
+            process.setProcessEnvironment(environment);
+            process.start(command.first(), command.mid(1));
+            QVERIFY(process.waitForFinished(10000));
+            QCOMPARE(process.exitCode(), 0);
+            const auto actual = QJsonDocument::fromJson(process.readAllStandardOutput()).array();
+            QJsonArray expected{"--remote", "unix://" + p.relaySocket};
+            if (id.isEmpty()) {
+                expected.append("--cd");
+                expected.append(cwd);
+            } else {
+                expected.append("resume");
+                expected.append("--");
+                expected.append(id);
+            }
+            QCOMPARE(actual, expected);
+        }
+        p.relaySocket.clear();
+        QVERIFY(clientArguments(p, "thread").isEmpty());
+    }
+    void supervisorUsesBoundedArgumentsAndValidCleanupUnitSyntax() {
+        const auto command = supervisedTransportCommand(QString(32, 'a'));
+        QVERIFY(command.contains("--property=KillMode=control-group"));
+        QVERIFY(command.contains("--property=TimeoutStopSec=5s"));
+        QString cleanup;
+        for (const auto &arg : command) {
+            QVERIFY(arg.toUtf8().size() < 128 * 1024);
+            if (arg.startsWith("--property=ExecStopPost="))
+                cleanup = arg.mid(QString("--property=").size());
+        }
+        QVERIFY(!cleanup.isEmpty());
+        const auto analyze = QStandardPaths::findExecutable("systemd-analyze");
+        if (analyze.isEmpty())
+            QSKIP("systemd-analyze is unavailable in this build root");
+        QTemporaryDir directory;
+        QFile unit(directory.path() + "/archcodex-fixture.service");
+        QVERIFY(unit.open(QIODevice::WriteOnly));
+        unit.write(("[Service]\nType=exec\nExecStart=/usr/bin/true\n" + cleanup + '\n').toUtf8());
+        unit.close();
+        QProcess process;
+        process.start(analyze, {"verify", "--man=no", unit.fileName()});
+        QVERIFY(process.waitForFinished(10000));
+        QVERIFY2(process.exitCode() == 0, process.readAllStandardError().constData());
     }
     void sharedHistoryDoesNotGrantResumeAuthority() {
         Fixture first, second;

@@ -7,6 +7,7 @@ event watchers are children of this helper. All protocol execs have no PTY.
 import asyncio
 import base64
 import contextlib
+import ctypes
 import hashlib
 import json
 import os
@@ -22,6 +23,20 @@ LIMIT = 8 * 1024 * 1024
 MAX_CONTAINERS = 512
 LABEL = "io.infrasecture.mycodex.gui"
 CID = re.compile(r"^[0-9a-f]{64}$")
+_LIBC = ctypes.CDLL(None, use_errno=True)
+
+
+def child_lifetime(parent):
+    # Linux child-side only, before exec. A killed helper must not leave SSH or
+    # Docker clients behind. Container exec programs still own their EOF cleanup.
+    if _LIBC.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != parent:
+        os._exit(125)
+
+
+async def spawn(*args, **kwargs):
+    parent = os.getpid()
+    return await asyncio.create_subprocess_exec(*args, start_new_session=True,
+                preexec_fn=lambda: child_lifetime(parent), **kwargs)
 
 
 def text(value, maximum=4096):
@@ -134,18 +149,37 @@ def launch(mode, data):
 
 
 async def stop(process):
-    if process is None or process.returncode is not None:
+    if process is None:
         return
-    if process.stdin:
-        process.stdin.close()
-    with contextlib.suppress(ProcessLookupError):
-        process.terminate()
     try:
-        await asyncio.wait_for(process.wait(), 1)
-    except asyncio.TimeoutError:
+        if process.returncode is not None:
+            return
+        if process.stdin:
+            process.stdin.close()
+            try:
+                await asyncio.wait_for(process.wait(), 0.5)
+                return
+            except asyncio.TimeoutError:
+                pass
         with contextlib.suppress(ProcessLookupError):
-            process.kill()
+            os.killpg(process.pid, signal.SIGTERM)
+        try:
+            await asyncio.wait_for(process.wait(), 1)
+        except asyncio.TimeoutError:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
+    finally:
+        # asyncio Process has no public close API. Closing its transport releases
+        # paused/full stdout pipes too; otherwise wait() can hang even after KILL.
+        for descriptor in (0, 1, 2):
+            pipe = process._transport.get_pipe_transport(descriptor)
+            if pipe:
+                pipe.close()
+        if process.returncode is None:
+            with contextlib.suppress(ProcessLookupError):
+                os.killpg(process.pid, signal.SIGKILL)
         await process.wait()
+        process._transport.close()
 
 
 async def bounded_read(stream):
@@ -158,7 +192,7 @@ async def bounded_read(stream):
 
 
 async def run(args):
-    proc = await asyncio.create_subprocess_exec(*args, stdin=asyncio.subprocess.DEVNULL,
+    proc = await spawn(*args, stdin=asyncio.subprocess.DEVNULL,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
     try:
         out, err = await asyncio.wait_for(asyncio.gather(bounded_read(proc.stdout), bounded_read(proc.stderr)), 15)
@@ -178,6 +212,7 @@ class Inventory:
     def __init__(self, script):
         self.script, self.records, self.errors, self.ready = script, {}, {}, set()
         self.engines = set()
+        self.engine_dirty = {}
         self.pending = set()
         self.changed = asyncio.Event()
         self.semaphore = asyncio.Semaphore(8)
@@ -218,7 +253,7 @@ class Inventory:
             # Resolve the entrypoint's actual account by UID; it need not equal the requested name.
             preamble = "import json,os,pwd; print(json.dumps({'runtimeUser':pwd.getpwuid(os.getuid()).pw_name}),flush=True)\n"
             async with self.semaphore:
-                proc = await asyncio.create_subprocess_exec(*exec_args(context, desc,
+                proc = await spawn(*exec_args(context, desc,
                     ["/usr/bin/python3", "-I", "-u", "-c", preamble + self.script]),
                     stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE, limit=LIMIT)
@@ -256,6 +291,7 @@ class Inventory:
         tail = bytearray()
         dirty = asyncio.Event()
         dirty.set()
+        self.engine_dirty[engine] = dirty
         async def events():
             while line := await proc.stdout.readline():
                 event = json.loads(line)
@@ -265,7 +301,7 @@ class Inventory:
         try:
             prefix = docker_prefix(context)
             # Replay events overlapping subscription startup; the inventory is authoritative on recovery.
-            proc = await asyncio.create_subprocess_exec(*prefix, "events", "--since", str(int(time.time())),
+            proc = await spawn(*prefix, "events", "--since", str(int(time.time())),
                         "--filter", "type=container", "--filter", "label=" + LABEL,
                         "--format", "{{json .}}", stdin=asyncio.subprocess.DEVNULL,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, limit=LIMIT)
@@ -312,6 +348,7 @@ class Inventory:
                 self.errors.pop(engine, None)
                 self.publish()
         finally:
+            self.engine_dirty.pop(engine, None)
             self.ready.discard(engine)
             for task in [events_task, stderr_task, *children.values()]:
                 if task:

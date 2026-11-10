@@ -100,6 +100,7 @@ class TerminalTests : public QObject {
         TerminalArea area;
         BackendProfile p{"container", "Container"};
         p.kind = "mycodex";
+        p.relaySocket = "/unused/fixture-relay";
         p.environmentId = "current-environment";
         Session s;
         s.backendId = p.id;
@@ -111,6 +112,10 @@ class TerminalTests : public QObject {
         s.executionObserved = true;
         s.executionEnvironment = "old-environment";
         QVERIFY(!area.open(p, s, &error));
+        p.relaySocket.clear();
+        s.executionEnvironment = p.environmentId;
+        QVERIFY(!area.open(p, s, &error));
+        QVERIFY(error.contains("no live desktop transport"));
     }
     void failedClientDoesNotSwitchBack_data() {
         QTest::addColumn<QByteArray>("command");

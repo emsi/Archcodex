@@ -6,7 +6,7 @@
 namespace Archcodex {
 QStringList LocalBackend::bridgeArguments() const {
     if (profile.isContainer())
-        return QStringList{"--exec"} + hostCommand(containerCommand(profile, "proxy"));
+        return QStringList{"--exec"} + hostCommand(transportCommand("proxy", profile.relaySocket));
     QStringList args = {"--codex", profile.executable};
     if (!profile.socketPath.isEmpty())
         args << "--socket" << profile.socketPath;

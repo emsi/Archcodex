@@ -1,8 +1,9 @@
 # Local TUI connections: current plan
 
-Recorded: 2026-11-10. Status: agreed direction for future implementation, not
-behavior delivered by 0.5.1. The current container TUI still runs inside its
-container, over SSH for remote containers. See [current integration](mycodex.md).
+Updated: 2026-11-10. Status: adopted; the shared myCodex transport and desktop
+TUI launch are implemented in 0.6.0. Generic SSH socket profiles and direct TCP
+remain future adapters. See [current integration](mycodex.md) and the
+[security design](container-transport-security.md).
 
 ## Agreed connection model
 
@@ -43,9 +44,9 @@ when their conversation files or IDs overlap.
 
 - Existing local host socket: direct access for the host TUI.
 - Remote host-visible socket: native OpenSSH Unix-socket forwarding, shared by
-  clients and owned by Archcodex.
-- Container-private socket: selection remains open pending the security and
-  lifecycle analysis. Do not automatically publish it or recreate a container.
+  clients and owned by Archcodex; planned adapter, not yet implemented.
+- Container-private socket: one shared, pipe-only helper attachment per container
+  and runtime user. No remote listener, published socket or recreated container.
 
 A per-client `ssh -> docker exec -> codex app-server proxy` chain is compatible
 with existing private sockets but is an expensive fallback, not the desired
@@ -54,12 +55,14 @@ chains could add about 120 connector roles (SSH client, Docker client and proxy
 per TUI), excluding launch wrappers and SSH server processes. This is not a cost
 imposed by 40 running conversations or by the app-server protocol.
 
-Prefer a bounded number of shared transport helpers over per-terminal wrapper
-stacks. The [container security analysis](container-transport-security.md)
-compares deliberate socket exposure with shared helpers, including the option
-of a container-lifetime service. It recommends evaluating a pipe-only helper
-route; that recommendation is separate from this agreed plan. No helper protocol,
-mount, remote listener or myCodex command has been selected for implementation.
+The adopted route extends the existing event-driven discovery helpers with raw
+stream multiplexing. One desktop transport helper owns the local endpoints; one
+foreground SSH command carries all remote container traffic for a host profile.
+One Docker exec attachment per container carries discovery, observers and TUIs.
+Local containers omit SSH and merge the desktop/host roles. The protocol carries
+independent WebSocket bytes, without merging Codex requests or credentials.
+The [security design](container-transport-security.md) documents the alternatives,
+limits and cleanup contract. No myCodex command, image change or mount is needed.
 
 The agreed access boundary trusts the selected desktop and SSH/host user while
 excluding other users, ordinary containers and network clients. Preserve Codex's
@@ -101,10 +104,14 @@ Actual desktop/client/server compatibility still requires testing.
   never the backend's original socket. Do not use detached tunnels or take
   ownership of the user's unrelated SSH master.
 
-Silent network partitions cannot always be distinguished from healthy idle
-connections without transport liveness traffic. SSH keepalive policy, remote-side
-cleanup deadlines and local systemd supervision were proposed but are not yet
-selected defaults. They must be distinguished from session-status polling.
+The approved SSH default is `ServerAliveInterval=15` and
+`ServerAliveCountMax=3`: roughly 45 seconds to detect a silent connection loss
+from the desktop. These are encrypted SSH transport checks, not Codex queries.
+No SSH-server configuration is changed: a partition can leave the remote side
+alive until its own SSH/TCP failure detection. Immediate remote cleanup cannot
+be guaranteed by client keepalives. EOF on either side closes the owned stream
+and its helpers. A transient desktop systemd user service owns the helper group
+and runs socket cleanup even after the helper is killed.
 
 ## Validation and known limits
 
@@ -133,5 +140,6 @@ private-container transport choice.
 - [Docker 29.1.3 exec handler](https://github.com/moby/moby/blob/docker-v29.1.3/daemon/server/router/container/exec.go): execution lifecycle is not the local client's process hierarchy.
 - [OpenSSH forwarding](https://man.openbsd.org/ssh.1): multiple forwarded streams through one SSH transport.
 
-No implementation, container change or deployment is authorized by this design
-record alone.
+Implementation was explicitly authorized after the initial design review. No
+container changes, SSH-server configuration changes or public deployment are
+part of this implementation.

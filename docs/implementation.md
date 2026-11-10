@@ -884,3 +884,99 @@ bundle checksum match. Permissions match 0.5.0 exactly. The three cache-trigger
 namespace warnings reflect the existing build-container restriction, not a
 successful sandbox launch. AppStream still reports the existing missing-homepage
 warning; formatting, whitespace, shell syntax, JSON and desktop-file checks pass.
+
+
+## 0.6.0 shared myCodex transport and desktop TUIs
+
+Implemented 2026-11-10 after explicit authorization of the pipe-only design and
+approval of SSH keepalives at 15 seconds / three missed replies. The design is
+now adopted in [local TUI connections](local-tui-connections.md) and
+[container security](container-transport-security.md); [myCodex integration](mycodex.md)
+describes the current behavior.
+
+MyCodex terminals now run desktop Codex against private local relay sockets.
+The original app-server, credentials, tools and workspace remain in the selected
+container. Discovery, one observer per app-server and independently opened TUIs
+share a single SSH command per remote host profile and a single Docker exec
+attachment per container/runtime user. Local hosts omit SSH. The remote helpers
+use only inherited pipes and outbound connections to existing sockets; they add
+no remote listeners or mounts. Normal operation still follows Docker/inotify/
+Codex events. Explicit refresh preserves healthy client streams and attachments.
+
+A dead stream never falls back to the desktop server or another container sharing
+history. Fresh discovery provides fresh private relay paths after a lost
+attachment. Existing terminal output and Restart behavior remain available.
+Disabling/removing a host closes its shared streams, retaining terminal output
+and cached history; the host dialog now states this consequence.
+
+### Decisions not agreed in advance
+
+The shared-helper architecture, desktop TUI location, trusted-account boundary,
+no remote exposure, event-driven operation and 15/3 keepalives were expressly
+agreed. The following details were selected during implementation:
+
+| Choice/action | Reason, affected files, consequences and status |
+| --- | --- |
+| Use isolated standard-library Python/asyncio and an application-private versioned byte codec. | `src/mux.py`, `src/transport.py`, `src/containers.py`, `src/discovery.qrc`; reuses the installed Python requirement without a new package or remote installation. Streams remain independent. Bounds are 16 KiB chunks, 64 KiB windows/frames, 1,024 streams per connection, 1 MiB data and 256 KiB control queues, 8 MiB inventories; timeouts are 10 seconds for handshake and 20 for stream setup. Implemented and fixture-tested. |
+| Use one transient desktop systemd user service, parent-death signals, process groups and bounded cleanup. | `src/launch.*`, `src/containers.py`, `src/transport.py`; requires a running desktop user manager and its Docker/SSH-agent login environment. No persistent unit is installed. EOF gets 0.5 seconds, TERM one second, then KILL/reap; service stop timeout is five seconds. A narrowly scoped Python subprocess transport access closes full pipes before reaping, covered by a regression test. Unit syntax verified; actual systemd execution remains a host check. |
+| Put mode-0600 desktop sockets in unique mode-0700 directories under `/tmp/codex-daemon-<uid>`; use peer/socket identity and generation checks. | `src/transport.py`, `src/types.*`, `src/backend.cpp`, `src/window.cpp`; preserves the inspected Codex 0.166.0 sandbox directory contract. Cleanup never removes Codex sockets or follows an instance symlink. Paths are ephemeral and never saved. New upstream masking behavior must be qualified. Ownership, no remote listening sockets, cleanup and stale-generation behavior tested with fixtures. |
+| Select desktop Codex from host PATH and require version 0.166.0 or newer. | `src/types.cpp`, `src/transport.py`, `src/terminal.cpp`; explicit local relay, exact thread and remote cwd arguments; no remote CODEX_HOME or credentials copied. Missing/old clients retain a clear error. Existing server-side Fork/provenance rules remain. Launch selection/arguments are tested with a fake executable; real clipboard, image paste and server-default behavior require host acceptance. |
+| Share one desktop discovery process and route observers through a small local stdio adapter; refresh without replacing healthy attachments. | `src/containerdiscovery.*`, `src/localbackend.cpp`, `src/transport.py`, `src/containers.py`, `src/window.cpp`; removes per-backend SSH/Docker chains while keeping the existing WebSocket bridge. Connection failures retry with 1–30 second backoff; host removal/disable disconnects affected terminals and retains output. No new UI preference or database migration. Forty-client, refresh, two-container and stalled-host tests pass. |
+| Explicitly disable inherited SSH agent/X11/port forwarding, backgrounding and unrelated control masters. | `src/transport.py`; prevents host SSH configuration from adding exposures or changing ownership. Existing authentication/host-key checks and aliases remain; SSH server configuration is unchanged. Client keepalives do not guarantee an immediate remote-side partition cleanup deadline. Command flags tested; real SSH/jump-host behavior still requires host testing. |
+| Package as 0.6.0, preserve existing dependencies/permissions, and commit the completed task locally under the standing instruction. | CMake, AppStream, build script, README and design docs; local bundle/checksum/BUILD-INFO under `dist/`. Native/KDE/PTY and process tests added under `tests/`. Existing SDK/runtime roots, local OSTree repository and isolated Flatpak installation reused; no regular host installation, push, tag or public release. All artifacts are local. |
+
+### Validation and artifacts
+
+All eight suites pass across the available environments: native discovery,
+container, transport, core and runtime tests; KDE SDK model/window tests; and the
+real Konsole PTY tests under X11 with packaged KDE Platform libraries. The 18
+new Python transport cases include 40 independent streams, two container helpers
+through one SSH invocation, full buffers, malformed/reused IDs, abrupt EOF,
+failed endpoints, idle inventory unsubscribe, preserved refresh, container restart,
+a stalled second host and frontend SIGKILL. The process fixture substitutes only
+SSH/Docker entry and socket discovery; the actual packaged helper code runs over
+real pipes and Unix sockets. It inspects remote-role descriptors for listeners.
+Additional C++ tests exercise real WebSocket notifications through the new stdio
+adapter, desktop executable/argument selection and offline systemd unit parsing.
+The latter verifies syntax, not execution by a real user manager.
+
+The stripped staged application reports 0.6.0 and passes the real-PTY smoke test;
+its screenshot was inspected. The bundle imports/deploys into the project-local
+Flatpak installation. Installed/staged executables, installed ref and checksum
+are checked, and effective permissions match 0.5.1 exactly. Formatting, whitespace,
+shell, JSON and desktop-entry validation pass. The existing AppStream homepage
+warning remains.
+
+Build/test logs, screenshots and isolated runtime configuration live in
+`.build/shared-transport`, with staging under `.build/package-0.6.0`. The existing
+`.build/sdk-root`, `.build/runtime-root`, `.build/repository` and `.build/flatpak`
+were reused. A temporary D-Bus session supplied the missing system-bus address
+only for the isolated install. Flatpak cache triggers still warn that namespaces
+are unavailable; this is not a successful full Flatpak sandbox launch. The final
+process/path audit found no running transport helpers or leftover Archcodex
+instance socket directories.
+
+This environment has no accessible Docker daemon, running systemd user manager
+or permitted Flatpak namespaces. Real private/shared containers, rootless UID
+mappings, SSH/jump hosts, remote partitions, systemd crash cleanup, native Codex
+image paste/approvals and active model work surviving disconnect remain host
+acceptance checks. No account credentials or live model turns were used.
+
+### Host acceptance for 0.6.0
+
+1. Install the bundle from the desktop KDE terminal, outside myCodex. Confirm
+   `codex --version` is at least 0.166.0 and `systemctl --user is-system-running`
+   reaches the desktop user manager. Start Archcodex normally.
+2. Open local and remote myCodex conversations. Confirm desktop `codex --remote`
+   clients and a single SSH transport per host; opening more terminals must not
+   create more Docker exec helpers for an already attached container.
+3. Test clipboard text/image paste, New in a remote-only directory, Resume and
+   Fork, approvals and the expected remote settings. Check both private and
+   shared environments and confirm WORKDIR/provenance restrictions remain.
+4. Refresh discovery while terminals are open. Then close one terminal, restart
+   a container, disconnect a remote host and reconnect. Only the affected streams
+   should close; retained output and Restart must select the fresh endpoint.
+5. While remote work is running, close/kill the GUI and helper service and inspect
+   owned local/remote helpers and local socket paths. Repeat after a network
+   partition; distinguish desktop 15/3 keepalives from remote SSH-server detection.
+   Existing app-servers and accepted work must remain independent.

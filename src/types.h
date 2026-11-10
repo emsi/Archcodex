@@ -17,6 +17,7 @@ struct BackendProfile {
     QJsonObject identity; // Non-secret server/discovery metadata; never configuration contents.
     QString sshHost, dockerContext, containerId, containerEpoch, runtimeUser, runtimeHome;
     QString discoveryHost;
+    QString relaySocket; // Live host endpoint; never persisted or restored from saved metadata.
     bool isContainer() const {
         return kind == QStringLiteral("mycodex");
     }

@@ -782,11 +782,12 @@ void Window::containerHostsDialog() {
     QDialog dialog(this);
     dialog.setWindowTitle("myCodex hosts");
     auto *layout = new QVBoxLayout(&dialog);
-    auto *description =
-        new QLabel("Local containers are discovered automatically. Remote discovery uses "
-                   "host OpenSSH and requires a known host key and non-interactive authentication "
-                   "(for example, "
-                   "your SSH agent). Docker and Python 3 must be available on each host.");
+    auto *description = new QLabel(
+        "Local containers are discovered automatically. Remote discovery uses "
+        "host OpenSSH and requires a known host key and non-interactive authentication "
+        "(for example, "
+        "your SSH agent). Docker and Python 3 must be available on each host. "
+        "Disabling or removing a host disconnects its terminals; their output is retained.");
     description->setWordWrap(true);
     layout->addWidget(description);
     auto *list = new QListWidget;
@@ -942,6 +943,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             p.runtimeUser = c["runtimeUser"].toString();
             p.runtimeHome = c["runtimeHome"].toString();
             p.socketPath = ep["path"].toString();
+            p.relaySocket = ep["localSocket"].toString();
             p.executable = ep["executable"].toString("codex");
             p.environmentId = digest(key + c["environment"].toString());
             p.discovered = true;
@@ -966,7 +968,8 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             const bool changed =
                 !backends.contains(p.id) || old.containerEpoch != p.containerEpoch ||
                 old.environmentId != p.environmentId || old.executable != p.executable ||
-                old.dockerContext != p.dockerContext || old.runtimeUser != p.runtimeUser;
+                old.dockerContext != p.dockerContext || old.runtimeUser != p.runtimeUser ||
+                old.relaySocket != p.relaySocket;
             if (!changed && old.identity.contains("serverCodexHome")) {
                 p.identity["serverCodexHome"] = old.identity["serverCodexHome"];
                 p.identity["codexHome"] = old.identity["serverCodexHome"];

@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QJsonArray>
+#include <QJsonDocument>
 #include <QRegularExpression>
 
 namespace Archcodex {
@@ -78,7 +79,8 @@ BackendProfile BackendProfile::fromJson(const QJsonObject &o) {
             o["containerEpoch"].toString(),
             o["runtimeUser"].toString(),
             o["runtimeHome"].toString(),
-            o["discoveryHost"].toString()};
+            o["discoveryHost"].toString(),
+            {}};
 }
 bool Session::isSaved() const {
     // Paginated history lives in the server's store and need not have a rollout file.
@@ -195,9 +197,15 @@ QStringList terminalArguments(const BackendProfile &p, const QString &id) {
     return clientArguments(p, id);
 }
 QStringList clientArguments(const BackendProfile &p, const QString &id, const QString &cwd) {
-    if (p.isContainer())
+    if (p.isContainer() && p.relaySocket.isEmpty())
+        return {}; // Never fall back to a default or a stale container command.
+    if (p.isContainer()) {
+        const QJsonObject request{{"socket", p.relaySocket}, {"thread", id}, {"cwd", cwd}};
         return QStringList{"/bin/sh", "-c", "exec \"$@\"", "archcodex"} +
-               containerCommand(p, "tui", id, cwd);
+               transportCommand(
+                   "client", QString::fromLatin1(
+                                 QJsonDocument(request).toJson(QJsonDocument::Compact).toBase64()));
+    }
     // Constant script; every variable is a separate argv entry. Konsole includes argv[0].
     auto args = QStringList{QStringLiteral("/bin/sh"),
                             QStringLiteral("-c"),

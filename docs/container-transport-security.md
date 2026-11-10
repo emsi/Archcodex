@@ -2,9 +2,10 @@
 
 Analyzed: 2026-11-10 against Archcodex `b52aaff`, Codex `rust-v0.166.0`,
 Docker `docker-v29.1.3` source and current myCodex Compose configuration.
-Status: recommendation for discussion, not an adopted implementation. The
-[connection plan](local-tui-connections.md) records the agreed direction.
-No containers, mounts, listeners, credentials or SSH settings were changed.
+Status: pipe-only recommendation adopted and implemented in 0.6.0 after explicit
+user authorization. Original source analysis is retained below; implementation
+choices and qualification limits are recorded in section 9. No container images,
+mounts, remote listeners, credentials or persistent SSH settings are changed.
 
 ## 1. Agreed trust boundary
 
@@ -31,9 +32,9 @@ uses Docker events, and launches one `docker exec -i` endpoint-discovery helper
 inside each observed container. `src/discover.py` waits on inotify and stdin;
 input closure ends it. These are connection-scoped foreground processes.
 
-A shared transport can evolve those host/container discovery helpers rather
-than add a second set of persistent processes. This is a proposal, not a claim
-that today's discovery protocol already carries TUI connections.
+The 0.6.0 transport evolves these host/container discovery helpers rather than
+adding a second set of persistent processes. It carries inventory and independent
+TUI/observer streams through the same attachment.
 
 In Codex 0.166.0, the advertised socket is a symlink to a listener under
 `/tmp/codex-daemon-<uid>`. Sharing the home does not expose that listener.
@@ -47,7 +48,7 @@ Shared history does not establish shared execution identity.
 | --- | --- | --- | --- |
 | Publish the physical socket directory; native SSH forwarding | No per-client exec relay | Deliberate mount of privileged socket state; UID mapping, other sockets, lifetime and sandbox aliases need qualification | Efficient when explicitly provisioned, not the default for existing private containers |
 | Docker exec proxy per client | Grows with opened clients and observers | No new remote listener, but many processes and difficult EOF ownership | Compatibility route |
-| Shared helpers over SSH and Docker stdio | Grows with attached containers | No new remote listener or mount; needs bounded stream multiplexing | Recommended candidate |
+| Shared helpers over SSH and Docker stdio | Grows with attached containers | No new remote listener or mount; needs bounded stream multiplexing | Adopted |
 | Host-private gateway sockets plus native SSH forwarding | Shared host/container helpers | Avoids custom multiplexing over SSH but still needs it through Docker; introduces remote socket paths and cleanup | Viable alternative |
 | SSH daemon inside each container | Extra daemon/client/authentication machinery | Host keys, another server and image integration | Unnecessary for an existing private socket |
 | Merge native clients into one JSON-RPC connection | Fewer app-server connections | Must virtualize initialization, IDs, subscriptions, approvals and recovery | Avoid; solves the wrong problem |
@@ -56,7 +57,7 @@ Do not use `/proc/<container-pid>/root`, relaxed `/var/lib/docker` permissions,
 privileged namespace entry, unauthenticated TCP or a Docker socket mounted into
 the container to avoid a small helper.
 
-## 4. Recommended candidate: pipe-only remote transport
+## 4. Adopted design: pipe-only remote transport
 
 ```text
 Desktop
@@ -79,7 +80,7 @@ Both use inherited pipes. Neither needs a new TCP or Unix listening socket.
 Only the desktop needs new listening endpoints for unmodified local TUIs.
 No SSH/Docker PTYs are allocated for transport.
 
-Ordinary remote host sockets keep native SSH Unix forwarding. Container backends
+The planned ordinary remote host socket adapter keeps native SSH Unix forwarding. Container backends
 use the shared helper command instead of an SSH command per client. SSH supplies
 encryption and host authentication; no new remote network service is introduced.
 One helper command consumes one SSH command-session channel, avoiding a channel
@@ -104,8 +105,7 @@ an app-server broker: each client's WebSocket handshake, messages and request ID
 remain unchanged. No parsing or rebuilding of Codex JSON-RPC is required.
 
 The contract needs negotiation, endpoint/inventory events, open/open-result,
-data, flow-control credit, close/reset and bounded diagnostics. Exact encoding,
-limits and library selection remain implementation choices requiring review.
+data, flow-control credit, close/reset and bounded diagnostics. The implemented encoding and limits are listed in section 9.
 Do not create a general remote shell service or stable third-party protocol.
 
 Required properties:
@@ -124,10 +124,9 @@ Required properties:
   GUI or serialize all hosts behind one blocked worker.
 
 This protocol needs malformed-input and failure tests; it is not cost-free.
-Prefer an existing framing implementation if it fits the helper/dependency
-constraints. The current isolated Python 3 helper path is a reasonable starting
-candidate, subject to throughput tests; no additional language or network stack
-is selected. An exact codec/library decision remains open.
+The implementation uses the existing isolated Python 3 standard-library helper
+path and asyncio, with a small application-private framing codec. It adds no
+external Python package, remote installation or general RPC service.
 
 ### Process budget
 
@@ -159,7 +158,7 @@ different helpers; do not elevate privileges to combine them.
 No new remote listener, port mapping, socket-directory mount, credential copy,
 SSH-agent forwarding or X11 forwarding is needed. The selected SSH user uses its
 existing Docker authority. The container helper runs as the validated runtime
-user, not root, and receives no Docker socket.
+user, without an automatic elevated fallback, and receives no Docker socket.
 
 Retain SSH host-key verification and existing account authentication. Own the
 foreground SSH process; do not detach it or reuse an unrelated user-owned master
@@ -191,9 +190,10 @@ Same-user desktop clients are trusted by agreement.
 Codex masks its privileged daemon directory from filesystem-restricted tools.
 A newly invented socket pathname is not automatically covered. Preserve that
 restriction for desktop relay endpoints: mode 0700 alone does not exclude a
-same-UID sandboxed command. One candidate is an Archcodex-owned subdirectory
-beneath the installed version's protected daemon root, after verifying ownership,
-layout and sandbox masking. This is not a permanent public upstream API.
+same-UID sandboxed command. The implementation uses an Archcodex-owned subdirectory
+beneath `/tmp/codex-daemon-<uid>`, whose masking is established by the inspected
+Codex 0.166.0 source, and rejects an unowned, symlinked or non-0700 root.
+This is not a permanent public upstream API.
 Qualification of this location is a security gate; unsupported protection must
 be reported rather than silently bypassed. Do not assume arbitrary aliases are
 masked or rewrite Codex's own sockets.
@@ -236,8 +236,8 @@ initial implementation; existing containers need no recreation or new mounts.
 Use exclusive, non-inherited ownership descriptors, EOF handlers, bounded drain
 and termination deadlines, and child reaping. Do not rely on SIGTERM crossing SSH
 or Docker. Cancellation must not leave blocking reader threads or full writers
-preventing exit. Local user-service supervision can provide a crash backstop;
-its exact integration remains proposed.
+preventing exit. A transient desktop systemd user service provides a crash backstop;
+its concrete settings are recorded below.
 
 There are no new remote filesystem socket entries in the pipe-only route.
 Desktop endpoints still need owned-path cleanup and a crash backstop. Never
@@ -247,14 +247,15 @@ Coordinate recovery per host/container with backoff, bounded starts and fresh
 generations; do not spawn a new helper on every TUI retry or replay uncertain
 submissions. During a silent partition the old remote attachment may survive
 until remote-side detection expires. Do not promise immediate/zero-overlap
-cleanup. SSH keepalive policy remains an explicit decision; no session polling
-or terminal-idleness timeout is introduced.
+cleanup. The approved desktop SSH policy is 15 seconds / three missed replies; no session
+polling or terminal-idleness timeout is introduced. Remote SSH server liveness
+policy is not modified or assumed.
 
 A shared helper crash affects more clients, and one TCP connection has
 head-of-line delays during packet loss. Fair scheduling prevents avoidable queue
 starvation, not physical network delays. Measure before adding transports.
 
-## 8. Qualification before adoption
+## 8. Acceptance coverage
 
 1. Connect multiple native TUIs and the observer through one helper path, including
    full WebSocket behavior and approvals.
@@ -271,9 +272,85 @@ starvation, not physical network delays. Measure before adding transports.
 7. Confirm remote work survives client loss, uncertain requests are not replayed,
    and clipboard/image paste work on the desktop with Flatpak/X11.
 
-These are proposed acceptance checks, not tests performed during this analysis.
-Full implementation awaits acceptance of the security/lifetime constraints and
-stream-framing tradeoff.
+These are the complete acceptance goals, not a claim that every real desktop,
+SSH server or Docker deployment has been exercised. Automated coverage and the
+remaining host checks are recorded in section 9 and the implementation log.
+
+## 9. Concrete implementation and operational limits
+
+- `src/transport.py` combines desktop, host and container roles. The packaged
+  source is compressed into argv for isolated `/usr/bin/python3 -I`; no remote
+  files are installed. `src/containers.py` retains metadata validation and Docker
+  event discovery; `src/discover.py` supplies inotify discovery. The remote roles
+  only connect to existing sockets and use inherited stdio. Local host and desktop
+  roles communicate through an unnamed socketpair inside the same process.
+- `src/mux.py` uses a versioned eight-byte handshake and a nine-byte frame header
+  (stream ID, type, length), with open/ready/data/credit/close/error frames. Stream
+  IDs are monotonic, separate in each direction and never reused. Maximum frame
+  size is 64 KiB, data chunks 16 KiB, receive credit 64 KiB per stream, 1,024
+  streams per connection, queued output data 1 MiB and control 256 KiB. Each
+  inventory is bounded to 8 MiB. Shared memory use follows actual open streams,
+  not all saved conversations. Inventory uses an independently credited stream.
+- Flow control is end to end across each relay hop. A stalled reader cannot
+  consume another stream's credit. Control frames have priority; data producers
+  yield between chunks. EOF ends both copy directions; socket output has a
+  bounded half-second close grace. No heartbeat reads Codex session state.
+- Desktop sockets are mode 0600 inside a unique mode-0700 instance directory
+  below the protected root. `SO_PEERCRED` checks the desktop UID. The container
+  checks the socket's UID, device/inode and discovered server PID. Registered
+  endpoint tokens, attachment generations and container/engine/lifetime checks
+  prevent a stale local socket from being redirected to another execution context.
+- Relay addresses are ephemeral and excluded from SQLite profiles. Restart or
+  transport replacement requires fresh discovery. A dead terminal retains its
+  output; the existing Restart action obtains the current validated endpoint.
+  No automatic prompt replay or fallback to a desktop server occurs.
+- The desktop CLI comes from the host PATH, independently of the container's
+  executable. Launch requires `codex-cli` version 0.166.0 or newer; an older or
+  missing client produces a retained terminal error. Commands are explicitly
+  `codex --remote unix://LOCAL_RELAY resume -- THREAD_ID` or
+  `codex --remote unix://LOCAL_RELAY --cd REMOTE_WORKDIR`. The remote cwd is never
+  used as a local chdir, and remote CODEX_HOME/credentials are never imported.
+  Version gating checks known functionality; future upstream changes to sandbox
+  masking or remote-client behavior still require qualification.
+- One transient `systemd-run --user --pipe --collect` service owns the desktop
+  helper and its SSH/Docker clients, with `KillMode=control-group`, a five-second
+  stop timeout, no systemd restart, and umask 0077. `ExecStopPost` removes only
+  that instance's socket entries after normal exit or SIGKILL. No unit is
+  installed, enabled or left as a permanent service. A running desktop systemd
+  user manager is now required for myCodex integration. Its login environment
+  must provide Docker/OpenSSH access and any SSH agent. Other backends are
+  unaffected if this requirement is missing.
+- Spawned SSH/Docker children have Linux parent-death SIGTERM and process groups.
+  Normal cleanup closes stdin, then allows 0.5 seconds before TERM, one second
+  before KILL, and reaps the process. Remote/container helpers independently exit
+  on pipe EOF; signal propagation through Docker is not assumed. Fatal helper
+  failures retry with a 1–30 second backoff; healthy operation has no periodic
+  inventory loop. GUI configuration and snapshots use bounded, coalesced queues.
+- SSH retains host-key verification, uses batch authentication and a ten-second
+  connection timeout, disables inherited agent/X11/port forwarding, and uses no
+  detached or user-owned control master. Approved keepalives are 15 seconds / 3
+  missed responses. A separate configured host profile remains a separate trust
+  and transport boundary even if two profiles reach the same machine.
+
+The five principal roles for one remote container remain desktop helper, SSH
+client, remote host helper, Docker exec client and container helper. Additional
+steady processes are the systemd-run launch client (and Flatpak launch wrapper),
+Docker event client per engine, existing observer bridge plus its lightweight
+host-side stdio adapter per server, and SSH-server processes. The adapter creates
+no SSH/Docker connection. Each terminal adds its desktop Codex TUI and, under
+Flatpak, the existing host-launch wrapper; its Python launch wrapper replaces
+itself with Codex. Forty containers still require forty container attachments.
+There is no claim that the total OS process count is five.
+
+Automated tests exercise 40 independent clients over the complete subprocess
+route, two container attachments sharing one SSH invocation, stalled readers and
+hosts, real observer WebSocket events, explicit local CLI arguments, generation
+changes, malformed frames, cleanup and helper death. Fake Docker/SSH launchers
+substitute namespace/network entry; actual helper bytes and process pipes are
+used. They do not qualify a real Docker daemon, SSH partition, systemd manager,
+Codex approval turn, clipboard or image paste. The build container cannot run
+systemd or the normal Flatpak sandbox; those boundaries remain explicit host
+acceptance checks. See [implementation results](implementation.md).
 
 ## Sources
 

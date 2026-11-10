@@ -5,6 +5,7 @@
 #include <QTimer>
 namespace Archcodex {
 class JsonProcess;
+class ContainerTransport;
 class ContainerDiscovery : public QObject {
     Q_OBJECT
   public:
@@ -18,10 +19,7 @@ class ContainerDiscovery : public QObject {
     void failed(const QString &error);
 
   private:
-    std::shared_ptr<Worker> worker;
-    JsonProcess *runner;
-    QTimer retry;
+    std::shared_ptr<ContainerTransport> transport;
     bool wanted = false;
-    int retryDelay = 1000;
 };
 } // namespace Archcodex

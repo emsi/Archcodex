@@ -52,4 +52,54 @@ QStringList containerCommand(const BackendProfile &p, const QString &mode, const
                        QString::fromLatin1(encoded)},
                       mode == "tui");
 }
+QString transportBootstrap() {
+    QJsonObject sources;
+    for (const auto &name : {"mux", "containers", "discover", "transport"})
+        sources[name] = resourceScript(QString::fromLatin1(name) + ".py");
+    // qCompress prepends a four-byte size; Python expects the zlib stream itself.
+    const auto bundle = QString::fromLatin1(
+        qCompress(QJsonDocument(sources).toJson(QJsonDocument::Compact), 9).mid(4).toBase64());
+    return "import base64,json,sys,types,zlib\n"
+           "S=json.loads(zlib.decompress(base64.b64decode('" +
+           bundle +
+           "')))\n"
+           "for n in ('mux','containers','discover','transport'):\n"
+           " m=types.ModuleType(n);m.__file__='<packaged-'+n+'>';sys.modules[n]=m;exec(S[n],m.__"
+           "dict__)\n"
+           "sys.modules['transport'].BUNDLE='" +
+           bundle +
+           "'\n"
+           "sys.modules['transport'].main()\n";
+}
+QStringList transportCommand(const QString &role, const QString &argument) {
+    QStringList args{"/usr/bin/python3", "-I", "-u", "-c", transportBootstrap(), role};
+    if (!argument.isEmpty())
+        args << argument;
+    return args;
+}
+QStringList supervisedTransportCommand(const QString &instance) {
+    // ExecStopPost also runs after SIGKILL, removing only this instance's sockets.
+    auto quote = [](QString arg) {
+        arg.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$");
+        arg.replace('\n', "\\n");
+        return '"' + arg + '"';
+    };
+    QStringList cleanup;
+    for (const auto &arg : transportCommand("cleanup", instance))
+        cleanup << quote(arg);
+    QStringList args{"/usr/bin/systemd-run",
+                     "--user",
+                     "--quiet",
+                     "--pipe",
+                     "--collect",
+                     "--service-type=exec",
+                     "--unit=archcodex-transport-" + instance,
+                     "--property=KillMode=control-group",
+                     "--property=TimeoutStopSec=5s",
+                     "--property=Restart=no",
+                     "--property=UMask=0077",
+                     "--property=ExecStopPost=" + cleanup.join(' '),
+                     "--"};
+    return hostCommand(args + transportCommand("desktop", instance));
+}
 } // namespace Archcodex

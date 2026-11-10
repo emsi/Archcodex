@@ -115,7 +115,9 @@ void CodexBackend::connectServer() {
         s.known = false;
         emit sessionChanged(s);
     }
-    const auto error = profile.validate();
+    const auto error = profile.isContainer() && profile.relaySocket.isEmpty()
+                           ? QStringLiteral("Waiting for live container transport discovery.")
+                           : profile.validate();
     if (!error.isEmpty()) {
         wanted = false;
         emit connectionChanged(error, false);

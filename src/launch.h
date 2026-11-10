@@ -9,4 +9,7 @@ QStringList hostCommand(QStringList command, bool sandbox = true);
 QStringList sshCommand(const QString &host, const QStringList &command, bool terminal = false);
 QStringList containerCommand(const BackendProfile &profile, const QString &mode,
                              const QString &thread = {}, const QString &cwd = {});
+QString transportBootstrap();
+QStringList transportCommand(const QString &role, const QString &argument = {});
+QStringList supervisedTransportCommand(const QString &instance);
 } // namespace Archcodex
