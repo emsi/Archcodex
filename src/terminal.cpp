@@ -200,9 +200,12 @@ bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QStri
         *error = "This container has no live desktop transport. Reconnect its host first.";
         return false;
     }
-    const bool fresh = s.id.startsWith("new-");
-    if (p.isContainer() && !fresh &&
-        (!s.executionObserved || s.executionEnvironment != p.environmentId)) {
+    if (s.id.startsWith("new-")) {
+        *error = "This older new-session view has no confirmed conversation ID. Open its saved "
+                 "conversation from Projects.";
+        return false;
+    }
+    if (p.isContainer() && (!s.executionObserved || s.executionEnvironment != p.environmentId)) {
         *error = "This conversation is visible in shared history, but Archcodex has not observed "
                  "it loaded in this container. Open it in its original environment first.";
         return false;
@@ -213,27 +216,13 @@ bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QStri
         return false;
     }
     const auto key = sessionKey(p.id, s.id);
-    const auto title =
-        (fresh ? QString("New session") : s.title) + "  ·  " + p.name + "  ·  " + s.cwd;
+    const auto title = s.title + "  ·  " + p.name + "  ·  " + s.cwd;
     if (!views.contains(key) && prepare(p, s, false).id.isEmpty()) {
         *error = "Close a terminal before opening more than 512 views.";
         return false;
     }
-    return launch(key, clientArguments(p, fresh ? QString() : s.id, s.cwd, localCodexExecutable),
-                  title, s, error, activate);
-}
-bool TerminalArea::newSession(const BackendProfile &p, const QString &path, QString *error) {
-    if (!p.validate().isEmpty() || !validText(path) || !QDir::isAbsolutePath(path)) {
-        *error = "Select a project with an absolute working directory.";
-        return false;
-    }
-    Session s;
-    s.backendId = p.id;
-    s.id = "new-" + QUuid::createUuid().toString(QUuid::WithoutBraces);
-    s.title = "New session terminal";
-    s.cwd = path;
-    s.persistenceKnown = true;
-    return startSession(p, s, error);
+    return launch(key, clientArguments(p, s.id, s.cwd, localCodexExecutable), title, s, error,
+                  activate);
 }
 bool TerminalArea::launch(const QString &key, const QStringList &arguments, const QString &title,
                           const Session &session, QString *error, bool activate) {

@@ -57,7 +57,7 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
     application->addWidget(restoreOpened);
     auto *restoreHelp = new QLabel(
         "Takes effect at next startup. Saves the conversation opened by Archcodex; in-TUI "
-        "/resume, /fork, /new and agent switches are not tracked. New-session launchers with "
+        "/resume, /fork, /new and agent switches are not tracked. Older new-session views with "
         "no confirmed ID are remembered as disconnected views. Terminal output is not saved.");
     restoreHelp->setWordWrap(true);
     application->addWidget(restoreHelp);

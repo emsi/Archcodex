@@ -663,28 +663,23 @@ class TerminalTests : public QObject {
         QVERIFY2(area.open(p, session, &error), qPrintable(error));
         QCOMPARE(stack->currentWidget(), first);
     }
-    void restartingNewSessionRepeatsTheLauncherWithoutResumingItsSyntheticId() {
-        QTemporaryDir dir;
-        QFile script(dir.path() + "/client");
-        QVERIFY(script.open(QIODevice::WriteOnly));
-        script.write(
-            "#!/bin/sh\nfor arg; do\ncase \"$arg\" in resume|new-*) exit 8;; esac\ndone\nexit 0\n");
-        script.close();
-        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+    void legacyUnresolvedNewSessionCannotReplayCreation() {
         TerminalArea area;
-        QSignalSpy exits(&area, &TerminalArea::clientExited);
-        QSignalSpy states(&area, &TerminalArea::clientStateChanged);
-        BackendProfile p{"b", "Local", "local-unix", "/unused", script.fileName(), false};
+        BackendProfile p{"b", "Local", "local-unix", "/unused", "/bin/echo", false};
+        Session s;
+        s.backendId = p.id;
+        s.id = "new-legacy-view";
+        s.cwd = "/work/project";
+        s.title = "New session terminal";
+        const auto view = area.prepare(p, s, true);
+        QVERIFY(view.threadId.isEmpty());
+        QCOMPARE(view.disposition, ViewDisposition::Unresolved);
         QString error;
-        QVERIFY2(area.newSession(p, dir.path(), &error), qPrintable(error));
-        QTRY_COMPARE(exits.size(), 1);
-        QCOMPARE(exits[0][1].toInt(), 0);
-        const auto client = qvariant_cast<Session>(states.last()[0]);
-        QVERIFY(client.id.startsWith("new-"));
-        QVERIFY2(area.restart(p, client, &error), qPrintable(error));
-        QTRY_COMPARE(exits.size(), 2);
-        QCOMPARE(exits[1][1].toInt(), 0);
-        QCOMPARE(exits[0][0], exits[1][0]);
+        QVERIFY(!area.startPrepared(view.id, p, s, &error));
+        QVERIFY(error.contains("no confirmed conversation ID"));
+        QCOMPARE(area.findChildren<KParts::ReadOnlyPart *>().size(), 0);
+        QVERIFY(!area.restart(p, s, &error));
+        QVERIFY(error.contains("no confirmed conversation ID"));
         area.closeCurrent();
     }
 };

@@ -107,6 +107,144 @@ class RuntimeTests : public QObject {
         QVERIFY(qvariant_cast<Session>(changed.last()[0]).recency >= runningRecency);
         b.disconnectServer();
     }
+    void newSessionUsesServerIdentityAndDeliversMetadataBeforeCompletion() {
+        Fixture f;
+        AsyncBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy started(&b, &Backend::sessionStarted);
+        QSet<QString> received;
+        bool ordered = false;
+        connect(&b, &Backend::sessionChanged, this,
+                [&](const Session &s) { received.insert(s.id); });
+        connect(
+            &b, &Backend::sessionStarted, this,
+            [&](quint64, const Session &s, const QString &) { ordered = received.contains(s.id); });
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        b.startSession("/work/project with spaces", 41);
+        QTRY_COMPARE(started.size(), 1);
+        QVERIFY(ordered);
+        QCOMPARE(started[0][0].toULongLong(), 41);
+        const auto s = qvariant_cast<Session>(started[0][1]);
+        QCOMPARE(s.id, "created-1");
+        QCOMPARE(s.cwd, "/work/project with spaces");
+        QCOMPARE(s.title, "New session");
+        QVERIFY(s.isWaiting());
+        QVERIFY(started[0][2].toString().isEmpty());
+        QCOMPARE(f.starts[0]["params"].toObject(),
+                 (QJsonObject{{"cwd", s.cwd}, {"ephemeral", false}, {"threadSource", "user"}}));
+        QCOMPARE(f.renames[0]["params"].toObject(),
+                 (QJsonObject{{"threadId", s.id}, {"name", "New session"}}));
+        b.disconnectServer();
+    }
+    void concurrentNewSessionsDoNotGuessFromGlobalEventsOrWorkingDirectories() {
+        Fixture f;
+        f.delayStart = true;
+        ProtocolFixtureBackend b(containerProfile(f));
+        QSignalSpy started(&b, &Backend::sessionStarted);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        b.startSession("/work/project", 1);
+        b.startSession("/work/project", 2);
+        b.startSession("/work/project",
+                       2); // Re-delivery of an outstanding token is not a new intent.
+        QTRY_COMPARE(f.starts.size(), 2);
+        f.notify("thread/started", {{"thread", f.thread("unrelated-client")}});
+        for (int index : {1, 0}) {
+            const auto id = "actual-" + QString::number(index);
+            f.createdThreads[id] = f.thread(id);
+            f.reply(f.starts[index]["id"], {{"thread", f.createdThreads[id]}});
+            QTRY_COMPARE(started.size(), 2 - index);
+            QCOMPARE(started.last()[0].toULongLong(), quint64(index + 1));
+            const auto s = qvariant_cast<Session>(started.last()[1]);
+            QCOMPARE(s.id, id);
+            QVERIFY(s.executionObserved);
+            QCOMPARE(s.executionEnvironment, b.profile.environmentId);
+        }
+        QCOMPARE(f.methods.count("thread/start"), 2);
+        b.disconnectServer();
+    }
+    void newSessionFailureDoesNotRetryOrLoseKnownIdentity_data() {
+        QTest::addColumn<bool>("afterCreation");
+        QTest::newRow("create-request") << false;
+        QTest::newRow("initial-name-request") << true;
+    }
+    void newSessionFailureDoesNotRetryOrLoseKnownIdentity() {
+        QFETCH(bool, afterCreation);
+        Fixture f;
+        f.delayStart = !afterCreation;
+        f.delayName = afterCreation;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy started(&b, &Backend::sessionStarted);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        b.startSession("/work/project", 11);
+        QTRY_COMPARE(f.starts.size(), 1);
+        if (afterCreation)
+            QTRY_COMPARE(f.renames.size(), 1);
+        const auto oldRequest = afterCreation ? f.renames.first() : f.starts.first();
+        b.disconnectServer();
+        QCOMPARE(started.size(), 1);
+        const auto s = qvariant_cast<Session>(started[0][1]);
+        QCOMPARE(s.id, afterCreation ? "created-1" : "");
+        QVERIFY(
+            started[0][2].toString().contains(afterCreation ? "created-1" : "result is unknown"));
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        f.reply(oldRequest["id"], {{"thread", f.thread("late-reply")}});
+        b.verifySession("thread-1"); // Drain an ordered response after the obsolete result.
+        QSignalSpy verified(&b, &Backend::sessionVerified);
+        QTRY_COMPARE(verified.size(), 1);
+        QCOMPARE(started.size(), 1);
+        QCOMPARE(f.methods.count("thread/start"), 1);
+        b.disconnectServer();
+    }
+    void newSessionValidatesRepliesAndReportsPartialFailure() {
+        Fixture f;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy started(&b, &Backend::sessionStarted);
+        b.startSession("/work/project", 1);
+        QCOMPARE(started.size(), 1);
+        QVERIFY(!started.last()[2].toString().isEmpty());
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        b.startSession("relative", 2);
+        QCOMPARE(started.size(), 2);
+        QVERIFY(f.starts.isEmpty());
+        f.startError = "Creation denied";
+        b.startSession("/work/project", 3);
+        QTRY_COMPARE(started.size(), 3);
+        QCOMPARE(started.last()[2].toString(), f.startError);
+        f.startError.clear();
+        f.startFields = {{"id", ""}};
+        b.startSession("/work/project", 4);
+        QTRY_COMPARE(started.size(), 4);
+        QVERIFY(started.last()[2].toString().contains("invalid"));
+        QVERIFY(f.renames.isEmpty());
+        f.startFields = {};
+        f.nameError = "Name could not be saved";
+        b.startSession("/work/project", 5);
+        QTRY_COMPARE(started.size(), 5);
+        QCOMPARE(qvariant_cast<Session>(started.last()[1]).id, "created-3");
+        QVERIFY(started.last()[2].toString().contains(f.nameError));
+        QVERIFY(started.last()[2].toString().contains("creation was not retried"));
+        QCOMPARE(f.methods.count("thread/start"), 3);
+        b.disconnectServer();
+    }
+    void newSessionTimeoutDoesNotRetryCreation() {
+        Fixture f;
+        f.delayStart = true;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy started(&b, &Backend::sessionStarted);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        b.startSession("/work/project", 77);
+        QTRY_COMPARE_WITH_TIMEOUT(started.size(), 1, 33000);
+        QCOMPARE(started[0][0].toULongLong(), 77);
+        QVERIFY(started[0][2].toString().contains("result is unknown"));
+        QCOMPARE(f.methods.count("thread/start"), 1);
+        b.disconnectServer();
+        QCOMPARE(started.size(), 1);
+    }
     void forkIsNativeAsyncAndMetadataPrecedesCompletion() {
         Fixture f;
         AsyncBackend b(f.profile(), BRIDGE_PATH);

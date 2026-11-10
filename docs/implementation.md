@@ -1341,3 +1341,85 @@ user instructions. The following supporting choices were made during this work:
 | Use 0.8.0 for a local development bundle, preserving published 0.7.1 assets and dependencies. | `CMakeLists.txt`, `data/`, `scripts/build-flatpak.sh`, `README.md`, `docs/workspace.md`, this log; README's published download still points to 0.7.1, while source build instructions use 0.8.0. Existing KDE 6.11/Konsole 26.04.3 and Flatpak permissions retained. | Bundle and checksum built/installed locally; publication and real-host acceptance remain separate. |
 | Add isolated protocol/storage, window and terminal regressions; reuse extracted SDK/runtime with privileged chroot only for builds/install-to-staging. | `tests/test_workspace.cpp`, `tests/test_window.cpp`, `tests/test_terminal.cpp`; controlled fixtures, temporary clients, Xvfb, fresh data and a private install bus. No production conversation or credential access. Local Codex 0.166.0 probes used isolated homes and no model turns to test rename and TUI-switch behavior. | Tests and packaged smoke pass; owned clients/transports/Xvfb/probe processes are gone, temporary runtime bridge link removed. |
 | Retain reproducible test/build evidence locally and commit this task on the existing branch. | Ignored `.build/issue-3/` contains official Codex source/probes, logs, screenshots, isolated data, repository and Flatpak install; `.build/package-0.8.0`, SDK staging and `dist/` contain build artifacts. Existing SDK/native build caches were reused. No normal desktop installation, global settings change, external message, push or publication. | Local artifacts retained; implementation committed under the standing instruction. |
+
+## New-session identity fix (0.8.1, issue #4)
+
+Filed [issue #4](https://github.com/emsi/Archcodex/issues/4) using GitHub CLI as
+requested. The TUI was connected and usable: the bug was its Projects/workspace
+record retaining a synthetic `new-UUID` instead of the server's conversation ID.
+Real rename and status events therefore updated a different record. This also
+prevented reliable restoration of a GUI-created conversation.
+
+New now uses `Backend::startSession` through the existing asynchronous facade.
+The selected app-server creates the conversation in the requested directory;
+its returned ID is correlated with that request. Archcodex saves the initial
+name **New session**, then uses the existing exact-ID opening coordinator and
+local TUI resume path. Naming is deliberate: an isolated Codex 0.166.0 test
+showed that a fresh thread's returned rollout path did not yet imply persistent
+history, and direct TUI resume failed with `no rollout found`. Saving its name
+through the server API made the empty conversation attachable. Forcing a history
+format or fetching full history was not a reliable substitute, so neither is
+part of the implementation. No dummy turn or manual history-file write is used.
+
+Creation is explicitly non-ephemeral and uses the server's model, permission and
+history defaults. An initial explicit name replaces first-prompt-derived titles
+until the user renames it. The UI creates no synthetic New row and existing
+name/status handlers, filter colors and workspace persistence share the real ID.
+Concurrent requests have separate tokens; matching never uses title, cwd, timing
+or a global start event. Same-container creation supplies execution evidence for
+that container only. A disconnect/timeout never retries creation. Known IDs
+survive partial failure in diagnostics, and old-source/duplicate completions
+cannot open a view. Legacy unresolved views remain available but cannot replay
+their launcher. In-TUI `/new`, `/resume`, `/fork` and agent navigation retain the
+previously documented limitations.
+
+### Verification and local artifact
+
+All nine suites passed: discovery, containers, transport, core, workspace,
+runtime, model, window and terminal. The runtime tests cover exact parameters,
+metadata-before-completion delivery, concurrent/out-of-order creations,
+container evidence, malformed replies, partial failure, disconnects and the
+actual 30-second deadline with no replay. The X11 window regression exercises
+right-click New, the exact TUI resume arguments, one real-ID row, rename,
+Running/Waiting/Active/Opened, saved title/ID, restart without another creation,
+and ignored duplicate completion. GUI totals: 23 window, 17 terminal, 28 model
+cases. Legacy unresolved views are also tested against accidental recreation.
+
+The first new window test needed to wait for asynchronous profile loading. Its
+restoration check subsequently waited for the fixture client to start before
+closing it, removing a test-induced `QProcess` teardown warning. Both corrections
+are in the test; the final targeted run is clean.
+
+An independent stock Codex 0.166.0/real-PTY probe with an isolated CODEX_HOME and
+no credentials/model turn confirmed start → initial name → read → TUI resume →
+`/rename`, all on one ID, with no extra TUI `thread/start`. The source inspection
+and captured resume request confirmed that model/provider/permission overrides
+were omitted. This is not acceptance testing against the user's actual remote
+hosts or containers.
+
+The package reports 0.8.1, passes the packaged X11 window/Konsole smoke test, and
+installs into an isolated project-local Flatpak installation. Installed app,
+bridge, AppStream and metadata bytes match staging. Effective permissions match
+0.8.0 byte-for-byte. Full Flatpak sandbox execution remains unverified: install
+cache triggers report this container's existing user-namespace restriction.
+Actual desktop, SSH and container acceptance remains for host testing.
+
+Local bundle: `dist/Archcodex-0.8.1-x86_64.flatpak` (2,356,880 bytes).
+SHA-256: `7547027b654926a846237a3731afc6f839c735a709ec74fdc652c28a4c51961f`.
+Flatpak commit: `3a26a6c83d52f65df601c6699f70ed21a592c56083c619d52e782e21a95357ce`.
+The sibling `.flatpak.sha256` and `.BUILD-INFO.txt` identify this local build.
+The published 0.8.0 bundle is unchanged; no release or tag is made by this fix.
+
+### Decisions not agreed in advance
+
+Filing the issue with GitHub CLI, fixing the New-session binding bug and committing
+completed authorized changes were explicitly requested. Supporting choices:
+
+| Choice/action | Reason, affected files and consequences | Status |
+| --- | --- | --- |
+| Create on the selected backend, save the initial name, then open the returned ID. | `src/backend.*`, `src/asyncbackend.*`, `src/window.*`; reuse the existing worker and opening path. No proxy, polling, new process or dependency. Server defaults apply; `ephemeral:false`, `threadSource:user` and the explicit initial title are intentional defaults. | Implemented; controlled protocol and stock-TUI probes pass. |
+| Correlate creation with tokens and source objects; retain partial-failure IDs and never retry mutations. | Same backend/window files; existing 30-second request deadlines and 512-view bound are reused. Pending creation counts toward that view bound. Invalid replies and stale-source results cannot launch terminals. A failed launch can leave the intentionally created saved conversation available for manual recovery. | Concurrent, error, disconnect, timeout and duplicate-result regressions pass. |
+| Remove the synthetic New launcher and reject replay of legacy unknown IDs. | `src/terminal.*`, `tests/test_terminal.cpp`; old saved placeholders remain readable. No workspace/database migration. In-TUI navigation limitations remain. | Implemented and tested; README, settings text and `docs/workspace.md` updated. |
+| Build an unpublished 0.8.1 Flatpak so the test version is identifiable. | `CMakeLists.txt`, `data/io.github.emsi.Archcodex.metainfo.xml`, `scripts/build-flatpak.sh`, README; KDE 6.11, pinned/patched Konsole 26.04.3, schema 2 and permissions unchanged. Existing published download instructions still reference 0.8.0. | Local build/install/smoke verified; no normal desktop installation, release, tag or push. |
+| Extend the existing fixtures and run isolated native, KDE/X11 and real-Codex tests. | `tests/fixture.h`, runtime/window/terminal/workspace tests; reused extracted SDK/runtime, privileged chroot for build/staging, Xvfb, temporary mock clients, isolated data and a temporary install D-Bus. No production conversation or credential access. | Checks pass. Test clients/probes ended; temporary runtime bridge link removed. Host acceptance still required. |
+| Retain local evidence and commit on the existing branch. | Ignored `.build/new-session/` holds issue body, probe, logs, screenshots, repository and isolated installation; `.build/package-0.8.1`, SDK staging and `dist/` hold the package. Existing native/SDK caches and earlier probe utilities were reused (including their ignored observer log). | Artifacts retained for review/reproduction. Local commit only; GitHub issue remains open pending delivery. |

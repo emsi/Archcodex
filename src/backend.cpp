@@ -67,6 +67,15 @@ void CodexBackend::shutdownProcess() {
         emit sessionForked(id, {},
                            "Connection lost while forking. The result is unknown; check "
                            "the session list after reconnecting before trying again.");
+    const auto interruptedStarts = std::exchange(starting, {});
+    for (auto it = interruptedStarts.cbegin(); it != interruptedStarts.cend(); ++it)
+        emit sessionStarted(
+            it.key(), sessions.value(it.value()),
+            it.value().isEmpty()
+                ? "Connection lost while creating a session. The result is unknown; "
+                  "check the session list after reconnecting before trying again."
+                : "Connection lost after creating session " + it.value() +
+                      ". Check that session after reconnecting; creation was not retried.");
     deadlineTimer.stop();
     buffer.clear();
     reads.clear();
@@ -507,6 +516,65 @@ void CodexBackend::verifySession(const QString &id, quint64 token) {
                     readFailure(id, issue);
                 emit sessionVerified(id, issue, token, sessions.value(id));
             });
+}
+void CodexBackend::startSession(const QString &cwd, quint64 token) {
+    if (starting.contains(token))
+        return;
+    if (!initialized || !validText(cwd) || !cwd.startsWith('/')) {
+        emit sessionStarted(
+            token, {}, "Connect the selected server and choose an absolute working directory.");
+        return;
+    }
+    starting.insert(token, {});
+    const auto finish = [this, token](const Session &session, const QString &error) {
+        if (starting.remove(token))
+            emit sessionStarted(token, session, error);
+    };
+    // Resolve settings on the selected server. Do not copy desktop settings into a container
+    // or force an experimental history format unsupported by that server's storage.
+    request(
+        "thread/start", {{"cwd", cwd}, {"ephemeral", false}, {"threadSource", "user"}},
+        [this, token, finish](const auto &reply, const QString &error) {
+            if (!error.isEmpty()) {
+                finish({}, error == "Server request timed out."
+                               ? error + " The creation result is unknown; check the session list "
+                                         "before trying again."
+                               : error);
+                return;
+            }
+            auto thread = reply["thread"].toObject();
+            const auto id = thread["id"].toString();
+            if (id.isEmpty() || id.startsWith("new-") || !validText(id, 128) ||
+                !validText(thread["cwd"].toString()) || !thread["cwd"].toString().startsWith('/') ||
+                thread["ephemeral"].toBool()) {
+                finish({}, "Server returned invalid new-session metadata. Check the session list "
+                           "before trying again.");
+                return;
+            }
+            starting[token] = id;
+            observed.insert(id);
+            loaded.insert(id);
+            activityRecency[id] = QDateTime::currentSecsSinceEpoch();
+            upsert(thread, true);
+            // Codex can return a rollout path before an empty thread is persisted. Setting
+            // its initial name durably saves it through the public API, without a dummy turn
+            // or filesystem access. The ordinary open preflight then verifies this exact ID.
+            request(
+                "thread/name/set", {{"threadId", id}, {"name", "New session"}},
+                [this, id, thread, finish](const auto &, const QString &issue) mutable {
+                    if (!issue.isEmpty()) {
+                        finish(
+                            sessions.value(id),
+                            "Session " + id +
+                                " was created, but its initial name could not be saved: " + issue +
+                                " Open that session after reconnecting; creation was not retried.");
+                        return;
+                    }
+                    thread["name"] = "New session";
+                    upsert(thread, true); // Later name/status events take precedence.
+                    finish(sessions.value(id), {});
+                });
+        });
 }
 void CodexBackend::forkSession(const QString &id, const QString &priorExecutionEnvironment) {
     if (forking.contains(id))

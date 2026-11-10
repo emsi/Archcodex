@@ -100,6 +100,113 @@ class SettingsShown : public QObject {
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void contextMenuNewTracksRenameStatusAndRestoresTheSameConversation() {
+        QTemporaryDir data;
+        Fixture fixture;
+        auto p = fixture.profile();
+        QFile script(data.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(
+            "#!/usr/bin/python3\nimport json,sys,time\n"
+            "open(__file__+'.args','w').write(json.dumps(sys.argv[1:]))\ntime.sleep(30)\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        p.executable = script.fileName();
+        p.identity["codexHome"] = "/home/test/.codex-work";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        const auto key = sessionKey(p.id, "created-1");
+        QString viewId;
+        {
+            Window window(data.path(), false);
+            window.show();
+            QTRY_VERIFY(window.findChild<Backend *>());
+            auto *backend = window.findChild<Backend *>();
+            QVERIFY(backend);
+            backend->connectServer();
+            auto *tree = window.findChild<QTreeView *>();
+            auto *tabs = window.findChild<QTabBar *>();
+            auto *area = window.findChild<TerminalArea *>();
+            QTRY_VERIFY(nodeWithKey(tree, sessionKey(p.id, "thread-1")).isValid());
+            tree->expandAll();
+            const auto item = nodeWithKey(tree, sessionKey(p.id, "thread-1"));
+            tree->scrollTo(item);
+            tree->customContextMenuRequested(tree->visualRect(item).center());
+            QPointer<QMenu> menu = tree->findChild<QMenu *>("sessionContextMenu");
+            QVERIFY(menu);
+            QCOMPARE(menu->actions()[1]->text(), "New");
+            menu->actions()[1]->trigger();
+            if (menu) {
+                menu->hide();
+                delete menu;
+            }
+            QTRY_VERIFY(area->hasClient(key));
+            QCOMPARE(area->currentKey(), key);
+            QCOMPARE(area->workspace().views.size(), 1);
+            QCOMPARE(area->workspace().views.first().threadId, "created-1");
+            viewId = area->workspace().views.first().id;
+            QCOMPARE(visibleThreads(tree), (QStringList{"created-1", "thread-1"}));
+            QTRY_COMPARE(nodeWithKey(tree, key).data().toString(), "New session");
+            QTRY_VERIFY(QFile::exists(script.fileName() + ".args"));
+            QFile arguments(script.fileName() + ".args");
+            QVERIFY(arguments.open(QIODevice::ReadOnly));
+            const auto args = QJsonDocument::fromJson(arguments.readAll()).array();
+            QCOMPARE(args, (QJsonArray{"--remote", p.endpoint(), "resume", "--", "created-1"}));
+            fixture.createdThreads["created-1"]["name"] = "Renamed in the TUI";
+            fixture.notify("thread/name/updated",
+                           {{"threadId", "created-1"}, {"threadName", "Renamed in the TUI"}});
+            QTRY_COMPARE(nodeWithKey(tree, key).data().toString(), "Renamed in the TUI");
+            QTRY_COMPARE(area->workspace().views.first().title, "Renamed in the TUI");
+            fixture.notify(
+                "thread/status/changed",
+                {{"threadId", "created-1"},
+                 {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+            tabs->setCurrentIndex(int(SessionView::Running));
+            QTRY_COMPARE(visibleThreads(tree), QStringList{"created-1"});
+            QTRY_VERIFY(area->currentSession().isRunning());
+            fixture.notify("thread/status/changed",
+                           {{"threadId", "created-1"}, {"status", QJsonObject{{"type", "idle"}}}});
+            QTRY_VERIFY(visibleThreads(tree).isEmpty());
+            for (auto tab : {SessionView::Waiting, SessionView::Active, SessionView::Opened}) {
+                tabs->setCurrentIndex(int(tab));
+                QTRY_VERIFY(visibleThreads(tree).contains("created-1"));
+            }
+            QTRY_VERIFY(area->currentSession().isWaiting());
+            window.close();
+        }
+        QVERIFY(Worker::finishPending());
+        QVERIFY(QFile::remove(script.fileName() + ".args"));
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            const auto saved = store.workspace();
+            QCOMPARE(saved.views.size(), 1);
+            QCOMPARE(saved.views.first().threadId, "created-1");
+            QCOMPARE(saved.views.first().title, "Renamed in the TUI");
+            QCOMPARE(saved.views.first().disposition, ViewDisposition::Automatic);
+        }
+        {
+            Window window(data.path(), false);
+            window.show();
+            auto *area = window.findChild<TerminalArea *>();
+            QTRY_VERIFY(window.findChild<Backend *>());
+            auto *backend = window.findChild<Backend *>();
+            backend->connectServer();
+            QTRY_VERIFY(area->hasClient(key));
+            QTRY_VERIFY(QFile::exists(script.fileName() + ".args"));
+            QCOMPARE(area->workspace().views.first().id, viewId);
+            QCOMPARE(fixture.starts.size(),
+                     1); // Restore must not create a replacement conversation.
+            auto session = area->currentSession();
+            area->closeCurrent();
+            backend->sessionStarted(1, session,
+                                    {}); // A duplicate completion cannot reopen a closed view.
+            QVERIFY(area->workspace().views.isEmpty());
+            window.close();
+        }
+        QVERIFY(Worker::finishPending());
+    }
     void restoreWorkspaceFromExactIdsAndPreserveOfflineIntent() {
         QTemporaryDir data;
         Fixture fixture;

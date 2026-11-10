@@ -2,7 +2,8 @@
 
 Implemented for issue [#3](https://github.com/emsi/Archcodex/issues/3), with the
 explicitly agreed limitation that stock-TUI conversation switches are not yet
-tracked. Version 0.8.0 is a development release for Linux host testing.
+tracked. Workspace restoration was introduced in 0.8.0; GUI-created New sessions were
+bound to their real IDs in 0.8.1. These are development builds for Linux host testing.
 No Codex patch or new transport proxy is required by this implementation.
 
 ## What the user sees
@@ -44,7 +45,8 @@ not claim that this remains the TUI's currently displayed conversation:
 | Fork using Archcodex's menu/command | Actual ID returned by the server for the fork |
 | `/rename` inside the TUI | Existing `thread/name/updated` handling updates that thread's title, including the workspace |
 | `/resume`, `/fork`, `/new`, agent navigation inside the TUI | May leave the previous launch target saved; restart can reopen that previous conversation |
-| Archcodex **New** | Unknown thread identity; remembered as an unresolved placeholder, never automatically replayed |
+| Archcodex **New** | Actual ID returned by the selected server; initially saved as **New session**, then opened by ID |
+| Unresolved **New session terminal** views saved by older versions | Unknown identity; retained as disconnected placeholders, never replayed |
 
 The global `thread/started` and name/status notifications are not used to guess
 which terminal changed its displayed conversation. Two clients can share an
@@ -87,7 +89,7 @@ in 0.8.0.
 `workspace` row containing JSON record version **1**. It has no foreign keys to
 the transient session cache or discovered backends. The record stores:
 
-- A stable view UUID and backend/launch-thread IDs; unknown New targets have no
+- A stable view UUID and backend/launch-thread IDs; legacy unknown New targets have no
   thread ID.
 - Last known title/cwd, a logical source fingerprint, and same-container execution
   evidence tied to the existing environment identity.
@@ -156,6 +158,37 @@ automatic requests begin with the saved selection and MRU. Dispatched entries
 rotate, and one widget launch is allowed per event-loop turn. Offline views
 consume no slots. Tokens and source generations discard obsolete replies.
 The coordinator creates no threads, helper processes, tunnels or listeners.
+
+### Creating a conversation from Archcodex
+
+**New** is an explicit operation on the selected backend, separate from opening
+and restoring an existing conversation. `thread/start` receives the absolute
+working directory, `ephemeral:false` and `threadSource:user`. Model, provider,
+permissions, instructions and history format come from that server's configuration;
+Archcodex does not impose desktop settings on a container.
+
+The reply supplies the exact conversation ID. Archcodex saves its initial name
+with `thread/name/set` (**New session**) before passing that ID to the existing
+open/preflight path. This name is intentional: with Codex 0.166.0 a successful
+start can report a rollout path before the empty conversation is persisted.
+Attaching the TUI at that point can fail with `no rollout found`. Saving the name
+materializes it through the server API, without a dummy prompt or direct file
+access. It also means the initial title is explicit rather than inferred from
+the first prompt; `/rename` changes it normally.
+
+Request tokens correlate concurrent creations. No title, directory or global
+`thread/started` event is used to infer which terminal owns a thread. Successful
+creation in a container supplies execution evidence for that container only.
+The terminal uses the real backend/thread key from its first appearance, so the
+normal rename/status handlers and workspace snapshot update the same row.
+
+Creation runs on the existing backend worker and adds no process, relay or
+polling. It uses the existing request deadlines and never retries a mutation
+automatically. Disconnection/timeout before the reply reports an unknown outcome;
+failure after the ID arrives reports that ID for recovery. A replaced/removed
+source or obsolete completion cannot open a terminal. Existing workspace schema,
+512-view limit and transport permissions are unchanged. Legacy unknown-ID views
+are preserved, but their old launcher cannot create another conversation.
 
 ## Verification
 

@@ -70,6 +70,9 @@ class FakeBackend : public Backend {
     void forkSession(const QString &, const QString &) override {
         QFAIL("Restoration must not fork");
     }
+    void startSession(const QString &, quint64) override {
+        QFAIL("Restoration must not create a session");
+    }
     void verifySession(const QString &id, quint64 token) override {
         reads.append({id, token});
         ++count;

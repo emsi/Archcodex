@@ -19,7 +19,6 @@ class TerminalArea : public QWidget {
     ~TerminalArea() override;
     bool open(const BackendProfile &profile, const Session &session, QString *error);
     bool restart(const BackendProfile &profile, const Session &session, QString *error);
-    bool newSession(const BackendProfile &profile, const QString &path, QString *error);
     bool focusSession(const QString &key);
     void switchRecent(bool backwards = false, bool projects = false);
     QString currentKey() const;

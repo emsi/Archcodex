@@ -44,6 +44,13 @@ class BackendPump : public QObject {
                     emit forked(id, session, error);
                 });
         connect(this, &BackendPump::forked, target, &Backend::sessionForked);
+        connect(core, &Backend::sessionStarted, this,
+                [this](quint64 token, const Session &session, const QString &error) {
+                    if (pending.contains(session.id))
+                        emit selected(pending.take(session.id));
+                    emit started(token, session, error);
+                });
+        connect(this, &BackendPump::started, target, &Backend::sessionStarted);
         connect(this, &BackendPump::batch, target, [target](const QList<Session> &items) {
             emit target->sessionsChanged(items);
             emit target->batchAccepted();
@@ -84,6 +91,7 @@ class BackendPump : public QObject {
     void verified(const QString &id, const QString &error, quint64 token,
                   const Archcodex::Session &session);
     void forked(const QString &id, const Archcodex::Session &session, const QString &error);
+    void started(quint64 token, const Archcodex::Session &session, const QString &error);
 };
 AsyncBackend::AsyncBackend(BackendProfile p, const QString &bridge, QObject *parent)
     : Backend(std::move(p), parent), state(std::make_shared<State>()),
@@ -121,6 +129,9 @@ void AsyncBackend::forkSession(const QString &id, const QString &priorExecutionE
     worker->post([s = state, id, priorExecutionEnvironment] {
         s->pump->core->forkSession(id, priorExecutionEnvironment);
     });
+}
+void AsyncBackend::startSession(const QString &cwd, quint64 token) {
+    worker->post([s = state, cwd, token] { s->pump->core->startSession(cwd, token); });
 }
 } // namespace Archcodex
 #include "asyncbackend.moc"

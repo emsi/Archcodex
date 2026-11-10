@@ -642,6 +642,13 @@ void Window::attach(const BackendProfile &p, bool start) {
     auto *b =
         new AsyncBackend(p, QCoreApplication::applicationDirPath() + "/archcodex-bridge", this);
     backends[p.id] = b;
+    connect(b, &QObject::destroyed, this, [this] {
+        for (auto it = pendingStarts.begin(); it != pendingStarts.end();)
+            if (it.value().isNull())
+                it = pendingStarts.erase(it);
+            else
+                ++it;
+    });
     connect(b, &Backend::loadedInventory, this, [this, id = p.id](const QSet<QString> &loaded) {
         // Cached rows outside the first history page also need reconciliation.
         QList<Session> updates, matches;
@@ -771,6 +778,17 @@ void Window::attach(const BackendProfile &p, bool start) {
                 applySessions({session});
                 openSession(id, sessions.value(sessionKey(id, session.id)));
             });
+    connect(b, &Backend::sessionStarted, this,
+            [this, b, id = p.id](quint64 token, const Session &session, const QString &issue) {
+                if (pendingStarts.take(token) != b || backends.value(id) != b || closing)
+                    return; // A replaced/removed source cannot open a terminal from a late reply.
+                if (!issue.isEmpty()) {
+                    error("Could not open the new session:\n" + issue);
+                    return;
+                }
+                applySessions({session});
+                openSession(id, sessions.value(sessionKey(id, session.id)));
+            });
     opening->setSource(p, b);
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
@@ -782,9 +800,18 @@ void Window::newSession(const QString &backend, const QString &path) {
         error("Connect the selected project's backend first.");
         return;
     }
-    QString issue;
-    if (!terminal->newSession(profiles[backend], path, &issue))
-        error(issue);
+    if (!validText(path) || !QDir::isAbsolutePath(path)) {
+        error("Select a project with an absolute working directory.");
+        return;
+    }
+    if (terminal->workspace().views.size() + pendingStarts.size() >= 512) {
+        statusBar()->showMessage("Close a terminal before opening more than 512 views.");
+        return;
+    }
+    const auto token = ++nextStartToken;
+    pendingStarts[token] = backends[backend];
+    statusBar()->showMessage("Creating new session…", 5000);
+    backends[backend]->startSession(path, token);
 }
 void Window::forkSession(const QString &backend, const QString &thread) {
     const auto key = sessionKey(backend, thread);

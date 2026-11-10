@@ -52,6 +52,8 @@ class Window : public QMainWindow {
     bool scopedSearch = false;
     QString scopePath;
     QSet<QString> pendingForks;
+    quint64 nextStartToken = 0;
+    QHash<quint64, QPointer<Backend>> pendingStarts;
     QString localUser, localHost;
     QString configuredLocalCodex, discoveredLocalCodex;
     bool localIdentityDiscovered = false;

@@ -55,9 +55,11 @@ Terminal output itself is not saved across application restarts.
 
 **Known limitation:** restoration uses the conversation opened from Archcodex.
 Switching inside the Codex TUI with `/resume`, `/fork`, `/new` or agent navigation
-can leave that saved target unchanged. `/rename` updates still work. A **New**
-terminal without a confirmed conversation ID is remembered as a disconnected
-placeholder; open its saved conversation from Projects to make it restorable.
+can leave that saved target unchanged. `/rename` updates the bound conversation's
+title. Archcodex's **New** command now creates a named, saved conversation on the
+selected server and opens its exact ID, so it also supports rename, status and
+restoration. Older **New session terminal** views with unknown IDs remain
+disconnected placeholders; open their saved conversations from Projects.
 See [workspace restoration](docs/workspace.md) for behavior, migration and the
 planned protocol-observation option that requires no Codex changes.
 
@@ -101,6 +103,12 @@ Right-click a session for **Fork**, **New** in the same directory, or **Close**
 its terminal view. Directories offer **New** and **Expand All**; other parent
 nodes offer **Expand All**. Closing a terminal does not delete its conversation
 history. An exited client retains its output and offers **Restart client**.
+
+**New** uses the selected server's configuration and the clicked working
+directory. It initially names the conversation **New session** to save even an
+empty conversation before the TUI attaches; use `/rename` to change that name.
+If creation loses its connection, check Projects after reconnecting before
+trying again. Archcodex never automatically repeats a creation request.
 
 ### Choose a view and search
 
@@ -172,7 +180,7 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-Version **0.8.0** supports existing local Unix-socket
+The current **0.8.1** source supports existing local Unix-socket
 app-servers and local or SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
 to non-container app-servers remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.
@@ -202,7 +210,7 @@ produces the bundle and checksums in `dist/`. On x86_64:
 
 ```sh
 sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.8.0-x86_64.flatpak
+flatpak install --user --or-update ./dist/Archcodex-0.8.1-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 

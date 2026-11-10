@@ -23,6 +23,11 @@ class Fixture : public QObject {
     QJsonObject threadFields;
     QJsonObject forkParams;
     QString forkError;
+    QList<QJsonObject> starts, renames;
+    QHash<QString, QJsonObject> createdThreads;
+    QJsonObject startFields;
+    QString startError, nameError;
+    bool delayStart = false, delayName = false;
     QStringList readIds;
     bool delaySnapshot = false;
     bool delayRead = false;
@@ -89,6 +94,37 @@ class Fixture : public QObject {
                                 .toJson()));
                     else
                         reply(m["id"], {{"thread", thread(id)}});
+                } else if (method == "thread/start") {
+                    starts << m;
+                    if (delayStart)
+                        return;
+                    if (!startError.isEmpty()) {
+                        reject(m["id"], startError);
+                        return;
+                    }
+                    const auto id = "created-" + QString::number(starts.size());
+                    auto t = thread(id);
+                    t["cwd"] = m["params"].toObject()["cwd"];
+                    t["name"] = QJsonValue::Null;
+                    for (auto it = startFields.begin(); it != startFields.end(); ++it)
+                        t[it.key()] = it.value();
+                    createdThreads[id] = t;
+                    reply(m["id"], {{"thread", t}});
+                    notify("thread/started", {{"thread", t}});
+                } else if (method == "thread/name/set") {
+                    renames << m;
+                    if (delayName)
+                        return;
+                    if (!nameError.isEmpty()) {
+                        reject(m["id"], nameError);
+                        return;
+                    }
+                    const auto params = m["params"].toObject();
+                    const auto id = params["threadId"].toString();
+                    createdThreads[id]["name"] = params["name"];
+                    reply(m["id"], {});
+                    notify("thread/name/updated",
+                           {{"threadId", id}, {"threadName", params["name"]}});
                 } else if (method == "thread/fork") {
                     forkParams = m["params"].toObject();
                     if (forkError.isEmpty())
@@ -127,7 +163,14 @@ class Fixture : public QObject {
                            {"status", QJsonObject{{"type", "idle"}}}};
         for (auto it = threadFields.begin(); it != threadFields.end(); ++it)
             result[it.key()] = it.value();
+        if (createdThreads.contains(id))
+            return createdThreads.value(id);
         return result;
+    }
+    void reject(QJsonValue id, const QString &error) {
+        peer->sendTextMessage(QString::fromUtf8(
+            QJsonDocument(QJsonObject{{"id", id}, {"error", QJsonObject{{"message", error}}}})
+                .toJson()));
     }
     void reply(QJsonValue id, const QJsonObject &result) {
         peer->sendTextMessage(

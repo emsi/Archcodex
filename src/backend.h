@@ -23,6 +23,8 @@ class Backend : public QObject {
     virtual void loadMore() = 0;
     virtual void search(const QString &query, quint64 token) = 0;
     virtual void verifySession(const QString &id, quint64 token = 0) = 0;
+    // Explicit creation only; tokens correlate concurrent requests, never global events.
+    virtual void startSession(const QString &cwd, quint64 token) = 0;
     // Prior evidence comes only from the application's saved execution context,
     // never from shared server history. It lets a previously observed session fork
     // after an ordinary GUI reconnect, under the same rules as Resume.
@@ -39,6 +41,7 @@ class Backend : public QObject {
                          const Archcodex::Session &session = {});
     void sessionForked(const QString &sourceId, const Archcodex::Session &session,
                        const QString &error);
+    void sessionStarted(quint64 token, const Archcodex::Session &session, const QString &error);
     void moreAvailable(bool available);
     void searchResults(quint64 token, const QList<Archcodex::Session> &sessions,
                        const QString &error, bool complete);
@@ -58,6 +61,7 @@ class CodexBackend : public Backend {
     void loadMore() override;
     void search(const QString &query, quint64 token) override;
     void verifySession(const QString &id, quint64 token = 0) override;
+    void startSession(const QString &cwd, quint64 token) override;
     void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) override;
 
   protected:
@@ -78,6 +82,7 @@ class CodexBackend : public Backend {
     QHash<QString, QString> names;
     QHash<QString, qint64> activityRecency;
     QSet<QString> forking;
+    QHash<quint64, QString> starting; // Empty until the server returns the created ID.
     QSet<QString> removed;
     QSet<QString> loaded;
     QSet<QString> observed;
