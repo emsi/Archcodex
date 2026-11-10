@@ -597,6 +597,7 @@ class WindowTests : public QObject {
     }
     void activityViewsExpandWithoutOverridingManualCollapse() {
         QTemporaryDir data;
+        QVERIFY(data.isValid());
         {
             Store store(data.path() + "/metadata.sqlite");
             store.save(BackendProfile{"b", "Main"});
@@ -618,11 +619,11 @@ class WindowTests : public QObject {
             backend->sessionChanged(s);
             return s;
         };
-        put("old-home", "/home", "notLoaded");
-        put("old-user", "/home/emsi", "notLoaded");
-        put("old-documents", "/home/emsi/Documents", "notLoaded");
-        auto waiting = put("waiting", "/home/emsi/Documents/Chats", "idle");
-        put("running", "/srv/work/build", "active");
+        put("old-home", data.filePath("home"), "notLoaded");
+        put("old-user", data.filePath("home/user"), "notLoaded");
+        put("old-documents", data.filePath("home/user/Documents"), "notLoaded");
+        auto waiting = put("waiting", data.filePath("home/user/Documents/Chats"), "idle");
+        put("running", data.filePath("srv/work/build"), "active");
         auto root = [&] { return serverNode(tree); };
         auto folder = [&] { return tree->model()->index(0, 0, root()); };
         for (const auto tab : {2, 3}) {
@@ -648,7 +649,7 @@ class WindowTests : public QObject {
         waiting.title = "Updated title";
         backend->sessionChanged(waiting);
         QVERIFY(!tree->isExpanded(folder()));
-        auto fresh = put("fresh", "/home/emsi/Documents/other/nested", "idle");
+        auto fresh = put("fresh", data.filePath("home/user/Documents/other/nested"), "idle");
         bool sawNewBranch = false;
         for (int i = 0; i < tree->model()->rowCount(root()); ++i) {
             auto branch = tree->model()->index(i, 0, root());

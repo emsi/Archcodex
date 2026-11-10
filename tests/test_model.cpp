@@ -2,6 +2,7 @@
 #include "sessionmodel.h"
 #include <QAbstractItemModelTester>
 #include <QJsonArray>
+#include <QTemporaryDir>
 #include <QtTest>
 using namespace Archcodex;
 class ModelTests : public QObject {
@@ -304,6 +305,8 @@ class ModelTests : public QObject {
         QCOMPARE(model.item(0)->text(), "Work");
     }
     void compressionAndAggregatesFollowEachView() {
+        QTemporaryDir data;
+        QVERIFY(data.isValid());
         SessionModel model;
         SessionFilter filter;
         filter.setSourceModel(&model);
@@ -319,13 +322,16 @@ class ModelTests : public QObject {
             model.upsert(s);
             return s;
         };
-        for (const auto &path : {"/home", "/home/emsi", "/home/emsi/Documents", "/var/history"})
+        for (const auto &path :
+             {data.filePath("home"), data.filePath("home/user"),
+              data.filePath("home/user/Documents"), data.filePath("var/history")})
             put(path, path, "notLoaded");
-        auto waiting = put("waiting", "/home/emsi/Documents/Chats", "idle");
-        auto running = put("running", "/home/emsi/Documents/Chats/work/build", "active");
+        auto waiting = put("waiting", data.filePath("home/user/Documents/Chats"), "idle");
+        auto running =
+            put("running", data.filePath("home/user/Documents/Chats/work/build"), "active");
         auto root = [&] { return filter.index(0, 0); };
         auto folder = [&] { return filter.index(0, 0, root()); };
-        QCOMPARE(root().data(PathRole).toString(), "/");
+        QCOMPARE(root().data(PathRole).toString(), data.path());
         QCOMPARE(root().data(CountRole).toInt(), 6);
         filter.setView(SessionFilter::View::Active);
         QCOMPARE(root().data(PathRole).toString(), waiting.cwd);
@@ -341,14 +347,14 @@ class ModelTests : public QObject {
         QVERIFY(foundCompact);
         filter.setView(SessionFilter::View::Running);
         QCOMPARE(folder().data(Qt::DisplayRole).toString(), "build");
-        QCOMPARE(root().data(PathRole).toString(), "/home/emsi/Documents/Chats/work");
+        QCOMPARE(root().data(PathRole).toString(), data.filePath("home/user/Documents/Chats/work"));
         QCOMPARE(root().data(CountRole).toInt(), 1);
         QCOMPARE(root().data(WaitingCountRole).toInt(), 0);
         QCOMPARE(root().data(AttentionRole), running.attention());
         QCOMPARE(filter.index(0, 0, folder()).data(ThreadRole).toString(), "running");
         filter.setView(SessionFilter::View::Waiting);
         QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
-        QCOMPARE(root().data(PathRole).toString(), "/home/emsi/Documents");
+        QCOMPARE(root().data(PathRole).toString(), data.filePath("home/user/Documents"));
         QCOMPARE(root().data(CountRole).toInt(), 1);
         QCOMPARE(root().data(RunningCountRole).toInt(), 0);
         QCOMPARE(root().data(AttentionRole), waiting.attention());
@@ -360,21 +366,21 @@ class ModelTests : public QObject {
         QVERIFY(leaf.isValid());
         // A pushed status change adds/removes a branch and recomputes the common root.
         running.status = {{"type", "idle"}};
-        running.cwd = "/srv/work";
+        running.cwd = data.filePath("srv/work");
         model.upsert(running);
-        QCOMPARE(root().data(PathRole).toString(), "/");
+        QCOMPARE(root().data(PathRole).toString(), data.path());
         QCOMPARE(root().data(CountRole).toInt(), 2);
         QSet<QString> labels;
         for (int i = 0; i < filter.rowCount(root()); ++i)
             labels.insert(filter.index(i, 0, root()).data(Qt::DisplayRole).toString());
-        QCOMPARE(labels, (QSet<QString>{"home/emsi/Documents/Chats", "srv/work"}));
+        QCOMPARE(labels, (QSet<QString>{"home/user/Documents/Chats", "srv/work"}));
         running.status = {{"type", "active"}};
         model.upsert(running);
         QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
         QCOMPARE(root().data(CountRole).toInt(), 1);
         filter.setView(SessionFilter::View::All);
         QCOMPARE(root().data(CountRole).toInt(), 6); // Hidden history was never discarded.
-        QCOMPARE(root().data(PathRole).toString(), "/");
+        QCOMPARE(root().data(PathRole).toString(), data.path());
     }
     void waitingIconsAreGreenAndHistoryRemainsNeutral() {
         SessionModel model;
