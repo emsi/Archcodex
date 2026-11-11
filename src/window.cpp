@@ -1803,7 +1803,7 @@ void Window::activate(const QModelIndex &index) {
     const auto backend = index.data(BackendRole).toString();
     activateSession(backend, id);
 }
-void Window::activateSession(const QString &backend, const QString &id, bool requireAvailable) {
+void Window::activateSession(const QString &backend, const QString &id, bool requireConnected) {
     const auto key = sessionKey(backend, id);
     if (terminal->focusSession(key)) {
         // A visit prioritizes a pending restore, but never restarts an exited client.
@@ -1812,13 +1812,16 @@ void Window::activateSession(const QString &backend, const QString &id, bool req
             opening->request(view, false);
         return;
     }
-    const auto session = sessions.value(key, searchSessions.value(key));
-    if (requireAvailable && (!backends.contains(backend) || !backends[backend]->ready() ||
-                             session.id.isEmpty() || session.unavailable)) {
+    if (requireConnected && (!backends.contains(backend) || !backends[backend]->ready())) {
         statusBar()->showMessage(
             "This session is unavailable. Reconnect its server or refresh discovery.", 10000);
         return;
     }
+    // Attention events can precede metadata. The IDs identify the target; cached
+    // metadata only decorates its pending view. OpeningCoordinator verifies it live.
+    auto session = sessions.value(key, searchSessions.value(key));
+    session.backendId = backend;
+    session.id = id;
     openSession(backend, session);
 }
 bool Window::showingSearch() const {

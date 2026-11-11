@@ -7,10 +7,12 @@ questions. Ordinary discovery, history reads and reconnect snapshots do not aler
 
 The notification identifies the session and its server/container. Click its body
 or **Open session** to focus an existing terminal or use the usual validated
-session-opening path. Explorer filters do not prevent opening the target. Existing
-exited terminal views retain their output; unavailable targets show a status-bar
-message. Questions are answered in Codex. Their text and answer choices are never
-included in desktop notifications.
+session-opening path. Explorer filters and delayed metadata do not prevent opening
+the target. A pending view verifies the exact backend/session before launching;
+repeated clicks reuse that view. Existing exited terminal views retain their output.
+A disconnected or removed server shows a status-bar message; a failed session
+verification stays visible in the terminal view. Questions are answered in Codex.
+Their text and answer choices are never included in desktop notifications.
 
 Delivery alone does not activate the application. A click requests activation on
 the application's existing X11 desktop, without moving its window. Restoring a

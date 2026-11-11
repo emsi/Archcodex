@@ -4,6 +4,7 @@
 #include "discoverydialog.h"
 #include "fixture.h"
 #include "notifications.h"
+#include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
@@ -138,9 +139,97 @@ class WindowTests : public QObject {
         emit notifications->openRequested("removed-backend", "thread-1", {});
         QVERIFY(window.statusBar()->currentMessage().contains("unavailable"));
         QCOMPARE(area->workspace().views.size(), 2);
+        first.readErrors["removed-session"] = "thread not found: removed-session";
         emit notifications->openRequested(a.id, "removed-session", {});
-        QVERIFY(window.statusBar()->currentMessage().contains("unavailable"));
-        QCOMPARE(area->workspace().views.size(), 2);
+        QTRY_VERIFY(area->currentSession().clientIssue.contains("thread not found"));
+        QVERIFY(first.readIds.contains("removed-session"));
+        QCOMPARE(area->workspace().views.size(), 3); // Keep the verification error visible.
+        QVERIFY(!area->hasClient(sessionKey(a.id, "removed-session")));
+        window.close();
+    }
+    void notificationClickBeforeMetadataVerifiesTheSession_data() {
+        QTest::addColumn<QString>("failure");
+        QTest::newRow("available") << QString{};
+        QTest::newRow("removed") << "thread not found";
+        QTest::newRow("wrong-identity") << "Server returned metadata for a different session";
+    }
+    void notificationClickBeforeMetadataVerifiesTheSession() {
+        QFETCH(QString, failure);
+        QTemporaryDir data;
+        Fixture fixture;
+        fixture.delaySnapshot = fixture.delayRead = true;
+        auto p = fixture.profile();
+        p.executable = "/bin/true";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        auto *area = window.findChild<TerminalArea *>();
+        auto *notifications = window.findChild<Notifications *>();
+        QSignalSpy attention(backend, &Backend::attentionRequested);
+        QSignalSpy launches(window.findChild<OpeningCoordinator *>(),
+                            &OpeningCoordinator::launchRequested);
+        backend->connectServer();
+        QTRY_VERIFY(!fixture.snapshotId.isUndefined());
+        QVERIFY(backend->ready());
+        const QString id = "live-session";
+        const auto key = sessionKey(p.id, id);
+        fixture.notify(
+            "thread/status/changed",
+            {{"threadId", id},
+             {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        fixture.notify("thread/status/changed",
+                       {{"threadId", id}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_COMPARE(attention.size(), 1);
+        QTRY_COMPARE(fixture.readIds, QStringList{id});
+        const auto metadataRead = fixture.readId;
+        QVERIFY(visibleThreads(window.findChild<QTreeView *>()).isEmpty());
+        QVERIFY(area->workspace().views.isEmpty());
+
+        // Metadata is still in flight when the user clicks the real event's target.
+        const auto target = qvariant_cast<SessionAttention>(attention.first().first()).session;
+        QCOMPARE(target.id, id);
+        QCOMPARE(target.backendId, p.id);
+        emit notifications->openRequested(target.backendId, target.id, {});
+        QTRY_COMPARE(area->workspace().views.size(), 1);
+        QTRY_COMPARE(fixture.readIds, (QStringList{id, id}));
+        const auto verificationRead = fixture.readId;
+        QVERIFY(verificationRead != metadataRead);
+        QCOMPARE(area->currentKey(), key);
+        const auto viewId = area->view(key).id;
+        QCOMPARE(launches.size(), 0);
+        QVERIFY(area->findChildren<KParts::ReadOnlyPart *>().isEmpty());
+        emit notifications->openRequested(p.id, id, {}); // Reuse the pending verification.
+        QCOMPARE(area->view(key).id, viewId);
+
+        if (failure == "thread not found")
+            fixture.reject(verificationRead, failure);
+        else
+            fixture.reply(verificationRead,
+                          {{"thread", fixture.thread(failure.isEmpty() ? id : "another-session")}});
+        if (failure.isEmpty()) {
+            QTRY_COMPARE(launches.size(), 1);
+            const auto verified = qvariant_cast<Session>(launches.first().at(2));
+            QCOMPARE(verified.id, id);
+            QCOMPARE(verified.backendId, p.id);
+            QCOMPARE(verified.cwd, "/work/project");
+            QCOMPARE(area->view(key).title, "Example");
+            QCOMPARE(area->view(key).cwd, "/work/project");
+        } else {
+            QTRY_VERIFY(area->currentSession().clientIssue.contains(failure));
+            QCOMPARE(launches.size(), 0);
+            QCOMPARE(area->view(key).disposition, ViewDisposition::Disconnected);
+            QVERIFY(area->findChildren<KParts::ReadOnlyPart *>().isEmpty());
+        }
+        emit notifications->openRequested(p.id, id, {});
+        QCOMPARE(area->view(key).id, viewId);
+        QCOMPARE(area->workspace().views.size(), 1);
+        QCOMPARE(fixture.readIds, (QStringList{id, id}));
+        QVERIFY(backend->ready());
         window.close();
     }
     void contextMenuNewTracksRenameStatusAndRestoresTheSameConversation() {

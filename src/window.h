@@ -160,7 +160,7 @@ class Window : public QMainWindow {
     void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues);
     void activate(const QModelIndex &index);
     void activateSession(const QString &backend, const QString &thread,
-                         bool requireAvailable = false);
+                         bool requireConnected = false);
     void sessionContextMenu(const QPoint &position);
     void newSession(const QString &backend, const QString &path);
     void forkSession(const QString &backend, const QString &thread);
