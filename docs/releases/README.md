@@ -69,7 +69,7 @@ Issue fixes must first follow the dedicated-branch and PR-merge process in
 [AGENTS.md](../../AGENTS.md). Publishing a release does not bypass that process.
 
 1. Select the already built and accepted final-version bundle and its
-   `BUILD-INFO.json` receipt. Ensure its hash, executable and AppStream version
+   versioned `.BUILD-INFO.json` receipt. Ensure its hash, executable and AppStream version
    match. Publication uses these exact bytes and must not rebuild the package.
 2. Add its catalog entry. Generate release notes using GitHub's
    `repos/emsi/Archcodex/releases/generate-notes` API, with explicit `tag_name`,

@@ -40,14 +40,15 @@ local tags cannot reserve a name globally in other clones.
    dependency sources. It neither installs the app into the normal user
    installation nor pushes or publishes anything.
 3. The checks reject dirty source, versions at/below the published catalog, used
-   public/local version tags, an existing output directory, source changes during
+   public/local version tags, existing artifacts for that version, source changes during
    the build, mismatched application/AppStream versions and mismatched bundle
-   payloads. `dist/VERSION/` contains the bundle, `SHA256SUMS` and `BUILD-INFO.json`.
+   payloads. All files stay directly in `dist/`: `Archcodex-VERSION-ARCH.flatpak`,
+   its `.flatpak.sha256` checksum and `Archcodex-VERSION-ARCH.BUILD-INFO.json`.
    The receipt records the full source commit/tree, manifest hash, runtime,
    Flatpak commit, build method and bundle hash. There is no mutable shared
    `dist/SHA256SUMS` for these builds.
-4. On the desktop host, quit Archcodex, change into that version's output
-   directory, verify `sha256sum -c SHA256SUMS`, then install its exact bundle with
+4. On the desktop host, quit Archcodex, change into `dist/`, verify
+   `sha256sum -c Archcodex-VERSION-x86_64.flatpak.sha256`, then install its exact bundle with
    `flatpak install --user --or-update ./Archcodex-VERSION-x86_64.flatpak`.
    Check `flatpak run io.github.emsi.Archcodex --version` before testing.
 5. Record acceptance against the candidate version **and bundle SHA-256**, with
@@ -71,14 +72,14 @@ This container cannot launch Flatpak's user-namespace sandbox. Reuse the existin
 KDE SDK chroot and pinned, patched Konsole build instead of downloading a second
 SDK. This is a packaging fallback, not a sandbox test:
 
-1. Run `python3 scripts/release.py prepare` to reserve the output directory and
+1. Run `python3 scripts/release.py prepare` to reserve that version's filenames and
    source identity, then copy that clean source into the retained SDK. Set
    `SOURCE_DATE_EPOCH` to the source commit's Unix timestamp for configuration.
 2. Build/install Archcodex and the manifest-pinned Konsole into a temporary stage.
    Include the dependency licenses and the notification event configuration.
    Use the manifest's runtime, application ID and finish arguments. Strip the
    staged binaries, finalize with `flatpak build-finish`, export with
-   `flatpak build-export`, and bundle into the reserved output directory.
+   `flatpak build-export`, and write the versioned bundle directly into `dist/`.
 3. Run `python3 scripts/release.py finish --build-dir STAGE --repository REPOSITORY
    --sdk-root .build/sdk-root`. This checks the staged executable's version using
    the SDK loader, verifies the AppStream version, imports the actual bundle into
@@ -89,10 +90,11 @@ SDK. This is a packaging fallback, not a sandbox test:
    single SDK, output bundle, receipt and local tag. Report real Flatpak/KDE
    acceptance as unverified until it is tested on a host.
 
-A failed build leaves `building.json` and an incomplete output directory. Inspect
-the failure first. If that attempt was never distributed and has no completed
-receipt or version tag, remove only that incomplete output directory and retry
-the same committed source. Never delete a reservation to reuse a delivered number.
+A failed build leaves `dist/.Archcodex-VERSION.building.json` and may leave
+incomplete files for that version. Inspect the failure first. If that attempt was
+never distributed and has no completed receipt or version tag, remove only that
+version's marker and incomplete files, then retry the same committed source.
+Keep every other version's files. Never delete a reservation to reuse a delivered number.
 
 ## Cut and publish the final release
 

@@ -52,17 +52,24 @@ def digest(path):
 
 def prepare(root):
     state = source_state(root)
-    output = root / "dist" / state["version"]
-    # Atomic reservation also prevents two builds from overwriting one another.
-    output.mkdir(parents=True, exist_ok=False)
-    (output / "building.json").write_text(json.dumps(state, indent=2) + "\n")
+    output = root / "dist"
+    output.mkdir(parents=True, exist_ok=True)
+    artifact = re.compile(rf'Archcodex-{re.escape(state["version"])}-[A-Za-z0-9_]+\.'
+                          r'(?:flatpak(?:\.sha256)?|BUILD-INFO\.(?:json|txt)|TESTING\.md)')
+    if any(artifact.fullmatch(path.name) for path in output.iterdir()):
+        raise FileExistsError(f'Artifacts for {state["version"]} already exist in {output}')
+    # Reserve only this version; other versions keep their existing files in dist/.
+    with (output / f'.Archcodex-{state["version"]}.building.json').open("x") as f:
+        json.dump(state, f, indent=2)
+        f.write("\n")
     return output
 
 
 def finish(root, build, repository, sdk_root):
     state = source_state(root)
-    output = root / "dist" / state["version"]
-    if json.loads((output / "building.json").read_text()) != state:
+    output = root / "dist"
+    marker = output / f'.Archcodex-{state["version"]}.building.json'
+    if json.loads(marker.read_text()) != state:
         raise ValueError("Source identity changed during the build; this package cannot be recorded.")
     arch = run("flatpak", "--default-arch")
     ref = f"app/{APP_ID}/{arch}/stable"
@@ -107,13 +114,13 @@ def finish(root, build, repository, sdk_root):
                    build_method="retained-sdk-stage" if sdk_root else "flatpak-builder")
     if source_state(root) != state:
         raise ValueError("Source identity changed during verification.")
-    with (output / "BUILD-INFO.json").open("x") as f:
+    with (output / f"{bundle.stem}.BUILD-INFO.json").open("x") as f:
         json.dump(receipt, f, indent=2)
         f.write("\n")
-    with (output / "SHA256SUMS").open("x") as f:
+    with (output / f"{bundle.name}.sha256").open("x") as f:
         f.write(f'{receipt["sha256"]}  {bundle.name}\n')
     run("git", "-C", str(root), "tag", f'test/v{state["version"]}', state["source_commit"])
-    (output / "building.json").unlink()
+    marker.unlink()
     return output
 
 

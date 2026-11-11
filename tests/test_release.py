@@ -44,11 +44,37 @@ class ReleaseTests(unittest.TestCase):
                 release.version_key(version)
 
     def test_reservation_records_source_and_refuses_overwrite(self):
+        dist = self.root / "dist"
+        dist.mkdir()
+        previous = dist / "Archcodex-0.8.1-x86_64.flatpak"
+        previous.write_bytes(b"previous bundle")
         output = release.prepare(self.root)
-        recorded = json.loads((output / "building.json").read_text())
+        self.assertEqual(output, dist)
+        self.assertEqual(previous.read_bytes(), b"previous bundle")
+        recorded = json.loads((output / ".Archcodex-0.9.0-rc.1.building.json").read_text())
         self.assertEqual(recorded["source_commit"], self.git("rev-parse", "HEAD").strip())
         with self.assertRaises(FileExistsError):
             release.prepare(self.root)
+
+    def test_existing_bundle_is_not_overwritten(self):
+        dist = self.root / "dist"
+        dist.mkdir()
+        bundle = dist / "Archcodex-0.9.0-rc.1-x86_64.flatpak"
+        bundle.write_bytes(b"existing candidate")
+        with self.assertRaises(FileExistsError):
+            release.prepare(self.root)
+        self.assertEqual(bundle.read_bytes(), b"existing candidate")
+        self.assertFalse((dist / ".Archcodex-0.9.0-rc.1.building.json").exists())
+
+    def test_candidate_bundle_does_not_block_final_version(self):
+        dist = self.root / "dist"
+        dist.mkdir()
+        candidate = dist / "Archcodex-0.9.0-rc.1-x86_64.flatpak"
+        candidate.write_bytes(b"accepted candidate")
+        (self.root / "VERSION").write_text("0.9.0\n")
+        self.commit()
+        self.assertEqual(release.prepare(self.root), dist)
+        self.assertEqual(candidate.read_bytes(), b"accepted candidate")
 
     def test_dirty_source_is_rejected(self):
         (self.root / "VERSION").write_text("0.9.0-rc.2\n")

@@ -210,14 +210,16 @@ cd Archcodex
 
 The script keeps build runtimes in a separate `.build/flatpak` installation and
 reads the committed `VERSION`, and produces the bundle, checksums and source
-receipt in `dist/VERSION/`. Builds require clean committed source and an unused
-version; see the [candidate and release process](docs/releases/process.md).
+receipt directly in `dist/`, with versioned filenames. Builds require clean
+committed source and an unused version; see the
+[candidate and release process](docs/releases/process.md).
 For the current x86_64 candidate:
 
 ```sh
-cd "dist/$(cat VERSION)"
-sha256sum -c SHA256SUMS
-flatpak install --user --or-update ./Archcodex-*-x86_64.flatpak
+version=$(cat VERSION)
+cd dist
+sha256sum -c "Archcodex-$version-x86_64.flatpak.sha256"
+flatpak install --user --or-update "./Archcodex-$version-x86_64.flatpak"
 flatpak run io.github.emsi.Archcodex
 ```
 
