@@ -35,6 +35,7 @@
 #include <QMenu>
 #include <QMenuBar>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScopedValueRollback>
@@ -73,14 +74,53 @@ class TerminalTitle : public KSqueezedTextLabel {
 // Keep help beside the navigator, anchored to the row rather than the pointer,
 // and keep its text stable while metadata changes underneath it.
 class SessionTree : public QTreeView {
+    Q_OBJECT
     QPersistentModelIndex tooltipIndex;
+    QPersistentModelIndex pressedSession;
+    bool sessionClick = false;
+
+  signals:
+    void sessionActivated(const QModelIndex &index);
+    void activationRepeated();
 
   protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        sessionClick = false;
+        const auto index = indexAt(event->position().toPoint());
+        pressedSession = event->button() == Qt::LeftButton &&
+                                 index.data(KindRole).toInt() == int(NodeKind::Session)
+                             ? index
+                             : QModelIndex{};
+        QTreeView::mousePressEvent(event);
+    }
+    void mouseReleaseEvent(QMouseEvent *event) override {
+        const QPersistentModelIndex target = pressedSession;
+        pressedSession = QModelIndex{};
+        const bool activate = event->button() == Qt::LeftButton && target.isValid() &&
+                              target == indexAt(event->position().toPoint());
+        QTreeView::mouseReleaseEvent(event);
+        sessionClick = activate && target.isValid();
+        if (sessionClick)
+            emit sessionActivated(target);
+    }
+    void mouseDoubleClickEvent(QMouseEvent *event) override {
+        // The first release already opened the session. Do not open again on
+        // the second release, even if activation reordered the rows underneath.
+        pressedSession = QModelIndex{};
+        if (event->button() == Qt::LeftButton && sessionClick) {
+            emit activationRepeated(); // Return focus without opening/recording another visit.
+            event->accept();
+            return;
+        }
+        QTreeView::mouseDoubleClickEvent(event);
+    }
     void keyPressEvent(QKeyEvent *event) override {
         if ((event->key() == Qt::Key_Return || event->key() == Qt::Key_Enter) &&
-            currentIndex().isValid() &&
-            currentIndex().data(KindRole).toInt() != int(NodeKind::Session)) {
-            setExpanded(currentIndex(), !isExpanded(currentIndex()));
+            currentIndex().isValid()) {
+            if (currentIndex().data(KindRole).toInt() == int(NodeKind::Session))
+                emit sessionActivated(currentIndex());
+            else
+                setExpanded(currentIndex(), !isExpanded(currentIndex()));
             event->accept();
             return;
         }
@@ -215,6 +255,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tabs->setExpanding(false);
     left->addWidget(tabs);
     searchBox = new QLineEdit;
+    searchBox->setObjectName("sessionSearch");
     searchBox->setPlaceholderText("Search conversation text — Enter");
     searchBox->setAccessibleName("Search conversations");
     searchBox->setClearButtonEnabled(true);
@@ -241,7 +282,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     searchNotice->setTextFormat(Qt::PlainText);
     searchNotice->setWordWrap(true);
     left->addWidget(searchNotice);
-    tree = new SessionTree;
+    auto *sessionTree = new SessionTree;
+    tree = sessionTree;
     tree->setModel(filter);
     tree->setHeaderHidden(true);
     tree->setEditTriggers(QAbstractItemView::NoEditTriggers);
@@ -251,7 +293,9 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tree->setContextMenuPolicy(Qt::CustomContextMenu);
     connect(tree, &QWidget::customContextMenuRequested, this, &Window::sessionContextMenu);
     left->addWidget(tree, 1);
-    connect(tree, &QTreeView::activated, this, &Window::activate);
+    // Qt's activated signal depends on desktop single/double-click preferences.
+    // Use one explicit mouse/keyboard path, separate from selection updates.
+    connect(sessionTree, &SessionTree::sessionActivated, this, &Window::activate);
     connect(tabs, &QTabBar::currentChanged, this, &Window::switchExplorer);
     connect(tree, &QTreeView::collapsed, this, [this](const QModelIndex &index) {
         explorer[tabs->currentIndex()].navigation.collapsed.insert(index.data(KeyRole).toString());
@@ -282,6 +326,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 }
             });
             expandActivityViews();
+            syncCurrentSession();
         });
     }
     loadMore = new QPushButton("Load more history");
@@ -331,6 +376,17 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(terminal, &TerminalArea::clientStateChanged, this, &Window::clientStateChanged);
     connect(terminal, &TerminalArea::restartRequested, this, &Window::restartTerminal);
     connect(terminal, &TerminalArea::sessionFocused, this, &Window::terminalFocused);
+    connect(sessionTree, &SessionTree::activationRepeated, terminal, &TerminalArea::focusCurrent);
+    connect(terminal, &TerminalArea::currentSessionChanged, this, [this](const QString &key) {
+        if (key.isEmpty()) {
+            tree->selectionModel()->clear();
+            for (auto &state : explorer) {
+                state.navigation.selected.clear();
+                state.unfiltered.selected.clear();
+            }
+        } else
+            syncCurrentSession();
+    });
     connections = new QLabel;
     connections->setTextFormat(Qt::PlainText);
     statusBar()->addWidget(connections, 1);
@@ -640,6 +696,7 @@ void Window::restoreCache(bool connectOnStart) {
         tree->collapseAll();
         restoreTree(tree, settings.value("expanded").toStringList(), {});
     }
+    syncCurrentSession();
     if (connectOnStart)
         discover();
 }
@@ -1356,6 +1413,7 @@ void Window::presentProfile(const BackendProfile &p, const QString &label) {
     }
 }
 void Window::terminalFocused(const QString &key) {
+    syncCurrentSession();
     auto it = sessions.find(key);
     if (it == sessions.end())
         return;
@@ -1365,16 +1423,25 @@ void Window::terminalFocused(const QString &key) {
         searchSessions[key] = *it;
         results->upsert(*it);
     }
-    walkTree(filter, {}, [&](const QModelIndex &index) {
-        if (index.data(KeyRole) == key) {
-            tree->setCurrentIndex(index);
-            for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
-                tree->expand(parent);
-            tree->scrollTo(index);
-        }
-    });
     if (!it->id.startsWith("new-"))
         persist([&] { store->save(*it); });
+}
+void Window::syncCurrentSession() {
+    // With no displayed terminal, Projects remains available for browsing and
+    // choosing a search scope. Closing the displayed view clears its selection.
+    const auto key = terminal ? terminal->currentKey() : QString();
+    if (key.isEmpty())
+        return;
+    const auto *source = qobject_cast<SessionModel *>(filter->sourceModel());
+    const auto index = source ? filter->mapFromSource(source->sessionIndex(key)) : QModelIndex{};
+    if (!index.isValid()) {
+        tree->selectionModel()->clear();
+        return; // Keep the user's tab/query/scope; the terminal header identifies it.
+    }
+    tree->setCurrentIndex(index);
+    for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
+        tree->expand(parent);
+    tree->scrollTo(index);
 }
 void Window::clientStateChanged(const Session &client) {
     const auto key = sessionKey(client.backendId, client.id);
@@ -1880,8 +1947,7 @@ bool Window::showingSearch() const {
 void Window::rememberNavigation(int tab) {
     auto &navigation = explorer[tab].navigation;
     navigation.expanded = expandedKeys(tree);
-    if (tree->currentIndex().isValid())
-        navigation.selected = tree->currentIndex().data(KeyRole).toString();
+    navigation.selected = tree->currentIndex().data(KeyRole).toString();
     navigation.saved = true;
 }
 void Window::beginFiltering() {
@@ -1974,6 +2040,7 @@ void Window::showExplorer() {
     tree->setCurrentIndex({});
     restoreTree(tree, state.navigation.expanded, state.navigation.selected);
     expandActivityViews();
+    syncCurrentSession();
     updateSearchControls();
     if (showingSearch())
         updateSearchSummary();
@@ -2186,3 +2253,5 @@ void Window::closeEvent(QCloseEvent *event) {
     QMainWindow::closeEvent(event);
 }
 } // namespace Archcodex
+
+#include "window.moc"

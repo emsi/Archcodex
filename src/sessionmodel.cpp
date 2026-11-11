@@ -81,6 +81,10 @@ bool SessionModel::visible(const Session &s) const {
     }
     return false;
 }
+QModelIndex SessionModel::sessionIndex(const QString &key) const {
+    const auto *item = threads.value(key);
+    return item ? item->index() : QModelIndex{};
+}
 void SessionModel::setView(SessionView value, const SessionQuery &selection) {
     if (view == value && query == selection)
         return;

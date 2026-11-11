@@ -44,6 +44,7 @@ class TerminalArea : public QWidget {
     void freezeWorkspace();
   signals:
     void currentChanged(const QString &title);
+    void currentSessionChanged(const QString &key);
     void clientStateChanged(const Archcodex::Session &session);
     void clientExited(const QString &key, int exitCode, bool crashed);
     void restartRequested(const Archcodex::Session &session);
@@ -77,6 +78,7 @@ class TerminalArea : public QWidget {
     bool frozen = false;
     QStringList recent, cycle, cycleOrder, cycleProjectOrder;
     QString localCodexExecutable;
+    QString displayedKey;
     int cycleIndex = 0;
     bool cycleProjects = false;
     Qt::KeyboardModifiers cycleModifier;

@@ -31,6 +31,7 @@
 #include <QMenu>
 #include <QMessageBox>
 #include <QPlainTextEdit>
+#include <QProxyStyle>
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSettings>
@@ -43,6 +44,18 @@
 #include <QtTest>
 
 namespace {
+class TreeActivationStyle : public QProxyStyle {
+    bool singleClick;
+
+  public:
+    explicit TreeActivationStyle(bool single) : singleClick(single) {}
+    int styleHint(StyleHint hint, const QStyleOption *option, const QWidget *widget,
+                  QStyleHintReturn *data) const override {
+        if (hint == SH_ItemView_ActivateItemOnSingleClick)
+            return singleClick;
+        return QProxyStyle::styleHint(hint, option, widget, data);
+    }
+};
 QList<QModelIndex> serverNodes(QTreeView *tree) {
     QList<QModelIndex> found;
     const auto walk = [&](auto &&self, const QModelIndex &parent) -> void {
@@ -137,6 +150,260 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void singleClickOpensOnce_data() {
+        QTest::addColumn<bool>("singleClickStyle");
+        QTest::newRow("desktop-double-click") << false;
+        QTest::newRow("desktop-single-click") << true;
+    }
+    void singleClickOpensOnce() {
+        QFETCH(bool, singleClickStyle);
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        Fixture fixture;
+        QTemporaryDir data;
+        auto profile = fixture.profile();
+        profile.executable = probe.executable();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(profile);
+        }
+        Window window(data.path(), false);
+        window.resize(1100, 700);
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        auto *tree = window.findChild<QTreeView *>();
+        auto *area = window.findChild<TerminalArea *>();
+        auto *style = new TreeActivationStyle(singleClickStyle);
+        style->setParent(tree);
+        tree->setStyle(style);
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        backend->connectServer();
+        const auto key = sessionKey(profile.id, "thread-1");
+        QTRY_VERIFY(nodeWithKey(tree, key).isValid());
+        QTRY_VERIFY(backend->ready());
+        tree->expandAll();
+        const auto folder = nodeWithKey(tree, key).parent();
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, tree->visualRect(folder).center());
+        QVERIFY(area->workspace().views.isEmpty());
+        fixture.delayRead = true;
+        const auto reads = fixture.readIds.size();
+        QSignalSpy focused(area, &TerminalArea::sessionFocused);
+        auto point = tree->visualRect(nodeWithKey(tree, key)).center();
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, point);
+        QCOMPARE(area->currentKey(), key);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
+        QCOMPARE(focused.size(), 1);
+        QTRY_COMPARE(fixture.readIds.size(), reads + 1);
+        // A double click consists of that first click plus this second press/release.
+        QTest::mouseDClick(tree->viewport(), Qt::LeftButton, {}, point);
+        QTest::mouseRelease(tree->viewport(), Qt::LeftButton, {}, point);
+        QCOMPARE(focused.size(), 1);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
+        QCOMPARE(area->workspace().views.size(), 1);
+        fixture.delayRead = false;
+        fixture.reply(fixture.readId, {{"thread", fixture.thread()}});
+        QTRY_VERIFY(area->hasClient(key));
+        QTRY_VERIFY(!probe.records("thread-1").isEmpty());
+        QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 1);
+        QCOMPARE(fixture.readIds.size(), reads + 1);
+        QCOMPARE(focused.size(), 1); // Completing the open is not another visit.
+
+        auto other = Session::fromThread(profile.id, fixture.thread("other"));
+        backend->sessionChanged(other);
+        const auto otherKey = sessionKey(profile.id, other.id);
+        tree->expandAll();
+        point = tree->visualRect(nodeWithKey(tree, otherKey)).center();
+        QTest::mouseClick(tree->viewport(), Qt::RightButton, {}, point);
+        QCOMPARE(area->currentKey(), key);
+        QCOMPARE(focused.size(), 1);
+        tree->setCurrentIndex(nodeWithKey(tree, otherKey));
+        tree->setFocus();
+        QTest::keyClick(tree, Qt::Key_Return);
+        QCOMPARE(area->currentKey(), otherKey);
+        QTRY_VERIFY(area->hasClient(otherKey));
+        QCOMPARE(focused.size(), 2);
+        QCOMPARE(area->workspace().views.size(), 2);
+        tree->expandAll();
+        point = tree->visualRect(nodeWithKey(tree, key)).center();
+        QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, point);
+        QCOMPARE(area->currentKey(), key);
+        QCOMPARE(focused.size(), 3);
+        QTest::mouseDClick(tree->viewport(), Qt::LeftButton, {}, point);
+        QTest::mouseRelease(tree->viewport(), Qt::LeftButton, {}, point);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
+        QCOMPARE(focused.size(), 3);
+        QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 2);
+        QVERIFY(area->isAncestorOf(QApplication::focusWidget()));
+        window.close();
+    }
+    void selectionFollowsDisplayedSession() {
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        QTemporaryDir data;
+        BackendProfile first{"first", "First", "local-unix", "/unused", probe.executable(), false};
+        auto second = first;
+        second.id = "second";
+        second.name = "Second";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(first);
+            store.save(second);
+        }
+        Window window(data.path(), false);
+        window.resize(1100, 700);
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
+        QHash<QString, Backend *> backends;
+        for (auto *backend : window.findChildren<Backend *>())
+            backends[backend->profile.id] = backend;
+        auto *area = window.findChild<TerminalArea *>();
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
+        auto a = Session::fromThread(first.id, {{"id", "same-id"},
+                                                {"name", "Identical title"},
+                                                {"cwd", "/work/a"},
+                                                {"path", "/saved/a"},
+                                                {"status", QJsonObject{{"type", "idle"}}}});
+        auto b = a;
+        b.backendId = second.id;
+        b.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        auto c = a;
+        c.id = "other-project";
+        c.cwd = "/work/c";
+        for (const auto &s : {a, b, c})
+            backends[s.backendId]->sessionChanged(s);
+        const auto aKey = sessionKey(a.backendId, a.id);
+        const auto bKey = sessionKey(b.backendId, b.id);
+        const auto cKey = sessionKey(c.backendId, c.id);
+        const auto selected = [&] { return tree->currentIndex().data(KeyRole).toString(); };
+        const auto revealed = [&](const QString &key) {
+            const auto index = nodeWithKey(tree, key);
+            QVERIFY(index.isValid());
+            QCOMPARE(selected(), key);
+            QCOMPARE(tree->selectionModel()->selectedRows(), QList<QModelIndex>{index});
+            for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
+                QVERIFY(tree->isExpanded(parent));
+        };
+        tree->collapseAll();
+        QString error;
+        QVERIFY2(area->open(first, a, &error), qPrintable(error));
+        revealed(aKey);
+        const auto pending = area->prepare(second, b, false);
+        const auto pendingOther = area->prepare(first, c, false);
+        QCOMPARE(area->currentKey(), aKey);
+        revealed(aKey);
+        QSignalSpy focused(area, &TerminalArea::sessionFocused);
+        QSignalSpy changed(area, &TerminalArea::currentSessionChanged);
+        const auto recent = area->workspace().recent;
+        auto *focus = QApplication::focusWidget();
+        QVERIFY2(area->startPrepared(pending.id, second, b, &error), qPrintable(error));
+        QVERIFY2(area->startPrepared(pendingOther.id, first, c, &error), qPrintable(error));
+        QTRY_VERIFY(!probe.records(b.id).isEmpty());
+        QCOMPARE(QApplication::focusWidget(), focus);
+        QCOMPARE(area->workspace().recent, recent);
+        QCOMPARE(focused.size(), 0);
+        QCOMPARE(changed.size(), 0);
+        revealed(aKey);
+
+        const auto cycle = [&](int key, bool reverse, bool commit, const QString &target) {
+            const auto origin = area->currentKey();
+            const auto history = area->workspace().recent;
+            const auto modifiers =
+                Qt::ControlModifier | (reverse ? Qt::ShiftModifier : Qt::NoModifier);
+            QKeyEvent shortcut(QEvent::ShortcutOverride, key, modifiers);
+            QKeyEvent press(QEvent::KeyPress, key, modifiers);
+            QApplication::sendEvent(QApplication::focusWidget(), &shortcut);
+            QApplication::sendEvent(QApplication::focusWidget(), &press);
+            QCOMPARE(area->currentKey(), origin);
+            QCOMPARE(selected(), origin);
+            QCOMPARE(area->workspace().recent, history);
+            if (!commit)
+                QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier);
+            QApplication::sendEvent(QApplication::focusWidget(), &release);
+            QCOMPARE(area->currentKey(), target);
+            revealed(target);
+        };
+        cycle(Qt::Key_Tab, false, false, aKey);
+        QCOMPARE(focused.size(), 0);
+        cycle(Qt::Key_Tab, false, true, bKey);
+        cycle(Qt::Key_Tab, true, true, cKey);
+        cycle(Qt::Key_QuoteLeft, false, true, bKey);
+        cycle(Qt::Key_QuoteLeft, true, true, aKey);
+        QCOMPARE(focused.size(), 4);
+        QCOMPARE(changed.size(), 4);
+        const auto visits = area->workspace().recent;
+        focused.clear();
+        changed.clear();
+
+        // Each tab keeps its filter; hidden/missing current sessions leave no
+        // other backend's identically named/numbered session selected.
+        tabs->setCurrentIndex(int(SessionView::Running));
+        QVERIFY(nodeWithKey(tree, bKey).isValid());
+        QVERIFY(!tree->currentIndex().isValid());
+        QVERIFY(tree->selectionModel()->selectedRows().isEmpty());
+        tabs->setCurrentIndex(int(SessionView::Waiting));
+        revealed(aKey);
+        query->setFocus();
+        query->setText("late title");
+        QVERIFY(!tree->currentIndex().isValid());
+        a.title = "Late title";
+        backends[first.id]->sessionChanged(a);
+        revealed(aKey);
+        QCOMPARE(QApplication::focusWidget(), query);
+        QCOMPARE(query->text(), "late title");
+        a.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        backends[first.id]->sessionChanged(a);
+        QVERIFY(!tree->currentIndex().isValid());
+        tabs->setCurrentIndex(int(SessionView::Running));
+        revealed(aKey);
+        tabs->setCurrentIndex(int(SessionView::Opened));
+        revealed(aKey);
+        query->setText("other-project");
+        QVERIFY(!tree->currentIndex().isValid());
+        QCOMPARE(visibleThreads(tree), QStringList{c.id});
+        query->clear();
+        revealed(aKey);
+        tabs->setCurrentIndex(int(SessionView::Waiting));
+        QCOMPARE(query->text(), "late title");
+        QVERIFY(!tree->currentIndex().isValid());
+        tabs->setCurrentIndex(int(SessionView::All));
+        revealed(aKey);
+        tree->collapseAll();
+        a.cwd = "/elsewhere/deep/project";
+        backends[first.id]->sessionChanged(a);
+        revealed(aKey);
+        b.recency = QDateTime::currentSecsSinceEpoch() + 100;
+        backends[second.id]->sessionChanged(b);
+        revealed(aKey);
+        auto *model = qobject_cast<SessionModel *>(
+            qobject_cast<QSortFilterProxyModel *>(tree->model())->sourceModel());
+        QVERIFY(model);
+        model->remove(a.backendId, a.id);
+        QVERIFY(!tree->currentIndex().isValid());
+        QVERIFY(nodeWithKey(tree, bKey).isValid());
+        backends[first.id]->sessionChanged(a);
+        revealed(aKey);
+        QCOMPARE(focused.size(), 0);
+        QCOMPARE(changed.size(), 0);
+        QCOMPARE(area->workspace().recent, visits);
+        area->closeSession(bKey);
+        revealed(aKey);
+        area->closeCurrent();
+        QVERIFY(area->currentKey().isEmpty());
+        QVERIFY(!tree->currentIndex().isValid());
+        QVERIFY(tree->selectionModel()->selectedRows().isEmpty());
+        tabs->setCurrentIndex(int(SessionView::Opened));
+        QVERIFY(!tree->currentIndex().isValid());
+        QCOMPARE(changed.size(), 1);
+        QCOMPARE(changed.first().first().toString(), QString());
+        window.close();
+    }
     void terminalSwitchingPreservesPtySize() {
         PtyProbe probe;
         QVERIFY(probe.install());
@@ -377,11 +644,44 @@ class WindowTests : public QObject {
         QCOMPARE(visibleThreads(tree).size(), 0);
         emit notifications->openRequested(b.id, "thread-1", {});
         QTRY_COMPARE(area->currentKey(), sessionKey(b.id, "thread-1"));
+        QVERIFY(!tree->currentIndex().isValid());
+        QCOMPARE(tabs->currentIndex(), int(SessionView::Running));
+        tabs->setCurrentIndex(int(SessionView::All));
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), area->currentKey());
         const auto existing = area->view(area->currentKey()).id;
         emit notifications->openRequested(a.id, "thread-1", {});
         QTRY_COMPARE(area->currentKey(), sessionKey(a.id, "thread-1"));
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), area->currentKey());
         emit notifications->openRequested(b.id, "thread-1", {});
         QCOMPARE(area->view(area->currentKey()).id, existing);
+        QCOMPARE(area->workspace().views.size(), 2);
+        // All's asynchronous results are a separate model. An empty/partial
+        // result must not keep a stale selection or select another backend's ID.
+        QTRY_COMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 2);
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        first.delaySearch = second.delaySearch = true;
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
+        query->setFocus();
+        QCOMPARE(QApplication::focusWidget(), query);
+        query->setText("Example");
+        QTest::keyClick(query, Qt::Key_Return);
+        QVERIFY(!tree->currentIndex().isValid());
+        QTRY_COMPARE(first.searchIds.size(), 1);
+        QTRY_COMPARE(second.searchIds.size(), 1);
+        first.reply(first.searchIds.first(),
+                    {{"data", QJsonArray{QJsonObject{{"thread", first.thread()}}}},
+                     {"nextCursor", QJsonValue::Null}});
+        QTRY_COMPARE(visibleThreads(tree).size(), 1);
+        QVERIFY(!tree->currentIndex().isValid());
+        second.reply(second.searchIds.first(),
+                     {{"data", QJsonArray{QJsonObject{{"thread", second.thread()}}}},
+                      {"nextCursor", QJsonValue::Null}});
+        QTRY_COMPARE(tree->currentIndex().data(KeyRole).toString(), area->currentKey());
+        QCOMPARE(QApplication::focusWidget(), query);
+        QCOMPARE(query->text(), "Example");
+        query->clear();
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), area->currentKey());
         QCOMPARE(area->workspace().views.size(), 2);
         emit notifications->openRequested("removed-backend", "thread-1", {});
         QVERIFY(window.statusBar()->currentMessage().contains("unavailable"));
@@ -417,6 +717,7 @@ class WindowTests : public QObject {
         auto *backend = window.findChild<Backend *>();
         auto *area = window.findChild<TerminalArea *>();
         auto *notifications = window.findChild<Notifications *>();
+        auto *tree = window.findChild<QTreeView *>();
         QSignalSpy attention(backend, &Backend::attentionRequested);
         QSignalSpy launches(window.findChild<OpeningCoordinator *>(),
                             &OpeningCoordinator::launchRequested);
@@ -446,6 +747,7 @@ class WindowTests : public QObject {
         const auto verificationRead = fixture.readId;
         QVERIFY(verificationRead != metadataRead);
         QCOMPARE(area->currentKey(), key);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
         const auto viewId = area->view(key).id;
         QCOMPARE(launches.size(), 0);
         QVERIFY(area->findChildren<KParts::ReadOnlyPart *>().isEmpty());
@@ -465,6 +767,7 @@ class WindowTests : public QObject {
             QCOMPARE(verified.cwd, "/work/project");
             QCOMPARE(area->view(key).title, "Example");
             QCOMPARE(area->view(key).cwd, "/work/project");
+            QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
         } else {
             QTRY_VERIFY(area->currentSession().clientIssue.contains(failure));
             QCOMPARE(launches.size(), 0);
@@ -620,10 +923,12 @@ class WindowTests : public QObject {
             QTRY_COMPARE(area->workspace().views.size(), 1);
             QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 0);
             QCOMPARE(area->currentKey(), v.key());
+            auto *tree = window.findChild<QTreeView *>();
+            QCOMPARE(tree->currentIndex().data(KeyRole).toString(), v.key());
             auto *tabs = window.findChild<QTabBar *>();
             tabs->setCurrentIndex(int(SessionView::Opened));
-            auto *tree = window.findChild<QTreeView *>();
             QTRY_COMPARE(visibleThreads(tree), QStringList{v.threadId});
+            QCOMPARE(tree->currentIndex().data(KeyRole).toString(), v.key());
             const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
             if (!screenshots.isEmpty())
                 QVERIFY(window.grab().save(screenshots + "/workspace-placeholder.png"));
@@ -631,6 +936,7 @@ class WindowTests : public QObject {
             QVERIFY(backend);
             backend->connectServer();
             QTRY_VERIFY(area->hasClient(v.key()));
+            QCOMPARE(tree->currentIndex().data(KeyRole).toString(), v.key());
             QVERIFY(fixture.readIds.contains(v.threadId));
             QCOMPARE(focused.size(), 0);
             QCOMPARE(area->workspace().recent, saved.recent);
@@ -695,7 +1001,7 @@ class WindowTests : public QObject {
             backend->sessionChanged(s);
         }
         auto *tree = window.findChild<QTreeView *>();
-        auto *query = window.findChild<QLineEdit *>();
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
         auto *tabs = window.findChild<QTabBar *>();
         auto *terminal = window.findChild<TerminalArea *>();
         auto *commands = window.findChild<Commands *>();
@@ -917,7 +1223,7 @@ class WindowTests : public QObject {
         backend->connectServer();
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();
-        auto *query = window.findChild<QLineEdit *>();
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
         auto *scope = window.findChild<QComboBox *>();
         auto *feedback = window.findChild<QLabel *>("searchFeedback");
         auto *terminal = window.findChild<TerminalArea *>();
@@ -1062,7 +1368,7 @@ class WindowTests : public QObject {
         backend->connectServer();
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();
-        auto *query = window.findChild<QLineEdit *>();
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
         auto *feedback = window.findChild<QLabel *>("searchFeedback");
         QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
         query->setText("conversation text");
@@ -1758,7 +2064,7 @@ class WindowTests : public QObject {
         QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "waiting");
         QVERIFY(tree->isExpanded(folder()));
         // A local query must restore the tab tree, selection and expansion when cleared.
-        auto *query = window.findChild<QLineEdit *>();
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
         query->setText("needle");
         QTest::keyClick(query, Qt::Key_Return);
         query->clear();
@@ -1841,7 +2147,9 @@ class WindowTests : public QObject {
         QSignalSpy terminalStates(window.findChild<TerminalArea *>(),
                                   &TerminalArea::clientStateChanged);
         auto *area = window.findChild<TerminalArea *>();
-        tree->activated(session);
+        tree->setCurrentIndex(session);
+        tree->setFocus();
+        QTest::keyClick(tree, Qt::Key_Return);
         QTRY_VERIFY(area->currentSession().clientIssue.contains("thread not loaded: thread-1"));
         QCOMPARE(first.readIds.size(), 2);
         QCOMPARE(second.readIds.size(), 1);
@@ -1896,7 +2204,7 @@ class WindowTests : public QObject {
         // A selected server searches only that server, even on a shared host.
         tree->setCurrentIndex(project());
         window.findChild<QComboBox *>()->setCurrentIndex(1);
-        auto *query = window.findChild<QLineEdit *>();
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
         query->setText("needle");
         QTest::keyClick(query, Qt::Key_Return);
         QTRY_COMPARE(first.methods.count("thread/search") + second.methods.count("thread/search"),

@@ -94,7 +94,7 @@ planned protocol-observation option that requires no Codex changes.
 2. Launch Archcodex. Local servers and containers are discovered automatically.
 3. For remote myCodex containers, open **Connections → myCodex hosts…** and add
    an SSH host alias from your existing SSH configuration.
-4. Expand a host, server and project in **Projects**. Press Enter or double-click
+4. Expand a host, server and project in **Projects**. Click once or press Enter on
    a session to open its terminal.
 
 Projects are groups of existing working directories; no project setup is needed.
