@@ -65,8 +65,9 @@ customizable docking. These are not implied by the IDE resemblance.
 The five views share one model, one connection per backend and one set of pushed
 state updates. Filtering never opens/closes a terminal or resumes/cancels work.
 All is the initial view. Each tab retains its own query, scope, selection and
-expansion state while the application is open. Search never changes the selected
-tab or disables tab navigation.
+expansion state while the application is open; a displayed terminal takes priority
+over remembered row selection. Search never changes the selected tab or disables
+tab navigation.
 
 | View | Membership |
 | --- | --- |
@@ -101,7 +102,8 @@ All and Active remember expanded groups; the first visit inherits the current
 expansion state. Running, Waiting and Opened expand every branch by default, including
 new branches arriving through events. Explicitly collapsed branches are remembered
 separately for those views during the current GUI run and are not reopened by
-updates or tab changes. Matching sessions retain selection through recompression
+updates or tab changes unless needed to reveal the displayed terminal. Matching
+sessions retain selection through recompression
 and search return. Switching views does not activate a terminal. The initial sidebar is wider to accommodate the
 five labels; existing saved window geometry remains respected.
 
@@ -194,13 +196,32 @@ Detailed counts can appear in the tooltip. Final indicator appearance is open.
 
 ## 5. Opening a session and terminal behavior
 
-Proposed activation behavior is Enter or double-click on a session row; a single
-click selects it. Activating a session opens/focuses its Codex TUI in the main
+One left click or Enter on a session row opens/focuses its Codex TUI in the main
 workspace and passes the exact backend and thread identity to the terminal
-service. Existing terminal views can be focused even while the backend is
+service. This works independently of the desktop's single/double-click preference;
+the second click of a double click does not open another client or record another
+visit. Existing terminal views can be focused even while the backend is
 disconnected. A new attachment first validates the session with its own server;
 a failure displays that server error and does not fall back to another endpoint.
 Selecting or expanding a folder does not launch a terminal.
+
+Projects follows the displayed terminal by **backend ID and session ID**, including
+committed recent-terminal/project switches, notification actions and restoration.
+Tab/filter changes, delayed metadata and tree rebuilds reconcile the same identity;
+the matching row and its ancestors are revealed. The current terminal takes
+precedence over a tab's remembered selection. If its row is missing or excluded,
+Projects clears its selection without changing the tab, query or captured scope.
+The terminal header still identifies the conversation. Clearing a filter or
+receiving the missing metadata selects the row again when it belongs in that view.
+Closing the displayed view clears the selection and remembered row selections;
+closing a background view leaves the foreground selection alone.
+
+Synchronization never opens a client, moves keyboard focus or records a visit.
+Background starts and title/status-only changes do not count as terminal switches.
+Arrow keys and right clicks still select navigation/context-menu targets without
+opening them; Enter commits keyboard navigation. When no terminal is displayed,
+Projects retains normal browsing and search-scope selection. Selecting a session
+with the mouse opens it and focuses its terminal.
 
 Keep one visible terminal pane initially. Version 0.3.0 retains explicitly
 opened terminal clients until closed, without a terminal tab strip. The
@@ -307,8 +328,8 @@ press/release controller. Modal dialogs and shortcut recording retain their inpu
 Tree arrows navigate/expand/collapse, Enter opens a session or toggles a parent,
 and Menu/Shift+F10 opens the selected row's context menu without using the pointer.
 Tab and Shift+Tab retain normal widget focus traversal. Opening a session focuses
-its terminal; changing a tab or selecting a row does not. Terminal switching never
-clears explorer filters. Menu mnemonics are distinct. Backtick/tilde and Tab/Backtab
+its terminal; changing a tab or moving the keyboard cursor does not. Terminal
+switching never clears explorer filters. Menu mnemonics are distinct. Backtick/tilde and Tab/Backtab
 are normalized for held-cycle matching; settings remain layout-aware Qt sequences.
 
 The native KDE command palette lists actions by category. New/Fork/Restart and
@@ -368,8 +389,11 @@ its selected scope on each explicit submission, as before.
 Matching is applied before constructing compact folders and aggregate counts.
 Host/server grouping and backend identity remain intact. Filtered branches expand
 initially to reveal matches; manual collapses survive subsequent edits, events
-and tab switches. Clearing restores the selection and expansion from before the
-query, where those nodes still exist. Filtering never changes the active terminal.
+and tab switches, except for ancestors revealed to identify the current terminal.
+Clearing restores the expansion from before the query, where those nodes still
+exist, then reveals/selects the current terminal when visible. Without a displayed
+terminal, the remembered navigation selection is restored. Filtering never changes
+the active terminal.
 The field's placeholder and tooltip identify its current mode; local result
 feedback names the cached fields and any selected scope.
 

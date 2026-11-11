@@ -532,6 +532,10 @@ QString TerminalArea::currentKey() const {
 void TerminalArea::updateCurrent() {
     const auto key = currentKey();
     emit currentChanged(titles.value(key, "No terminal selected"));
+    if (key != displayedKey) {
+        displayedKey = key;
+        emit currentSessionChanged(key);
+    }
 }
 void TerminalArea::processExited(int exitCode, bool crashed) {
     if (frozen)

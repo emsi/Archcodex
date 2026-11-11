@@ -59,6 +59,7 @@ class SessionModel : public QStandardItemModel {
     void setContainerWorkdir(const QString &backend, const QString &path);
     void setMyCodexWorkdirOnly(bool enabled);
     void setView(SessionView view, const SessionQuery &query = {});
+    QModelIndex sessionIndex(const QString &key) const;
     SessionView currentView() const {
         return view;
     }

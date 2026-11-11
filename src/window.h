@@ -152,6 +152,7 @@ class Window : public QMainWindow {
     QString groupLabel(const BackendProfile &profile) const;
     void presentProfile(const BackendProfile &profile, const QString &label = {});
     void terminalFocused(const QString &key);
+    void syncCurrentSession();
     void clientStateChanged(const Session &session);
     void restartTerminal(const Session &session);
     void showSettings();
