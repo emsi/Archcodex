@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "commands.h"
 #include "launch.h"
+#include "ptyprobe.h"
 #include "terminal.h"
 #include "testenvironment.h"
 #include <KPluginFactory>
@@ -65,6 +66,86 @@ class TerminalTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void pendingAndExitedViewsKeepLivePtyGeometry_data() {
+        QTest::addColumn<bool>("background");
+        QTest::newRow("selected-restore") << false;
+        QTest::newRow("background-restore") << true;
+    }
+    void pendingAndExitedViewsKeepLivePtyGeometry() {
+        QFETCH(bool, background);
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        BackendProfile p{"b", "Fixture", "local-unix", "/unused", probe.executable(), false};
+        auto a = Session::fromThread(p.id, {{"id", "live"}, {"cwd", "/work"}});
+        auto b = Session::fromThread(p.id, {{"id", "restored"}, {"cwd", "/work/other"}});
+        TerminalArea area;
+        area.resize(800, 500);
+        area.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&area));
+        QString error;
+        QVERIFY2(area.open(p, a, &error), qPrintable(error));
+        auto *live = area.findChild<KParts::ReadOnlyPart *>();
+        QTRY_VERIFY(!probe.records(a.id).isEmpty());
+        const auto checkpoint = [&](KParts::ReadOnlyPart *part, const QString &id) {
+            QTest::qWait(100);
+            const auto count = probe.records(id).size();
+            PtyProbe::send(part);
+            QTRY_VERIFY(probe.records(id).size() > count);
+        };
+        checkpoint(live, a.id);
+        const auto initial = PtyProbe::size(probe.records(a.id).last());
+        const auto since = probe.records(a.id).size();
+        TerminalArea previous;
+        const auto pending = previous.prepare(p, b, true);
+        area.restoreWorkspace(previous.workspace(), {{p.id, p}});
+        area.openingState(pending.id, QString("A detailed connection failure. ").repeated(15),
+                          true);
+        QTest::qWait(100);
+        QVERIFY(area.focusSession(sessionKey(p.id, a.id)));
+        checkpoint(live, a.id);
+        const auto afterPending = probe.records(a.id);
+        for (qsizetype i = since; i < afterPending.size(); ++i) {
+            QCOMPARE(PtyProbe::size(afterPending[i]), initial);
+            QVERIFY(afterPending[i].toObject()["event"] != "resize");
+        }
+        if (!background)
+            QVERIFY(area.focusSession(sessionKey(p.id, b.id)));
+        QSignalSpy focusChanges(qApp, &QApplication::focusChanged);
+        // Launch at the final size, including background restoration. Preparing
+        // that hidden layout must not temporarily move keyboard focus either.
+        QVERIFY2(area.startPrepared(pending.id, p, b, &error), qPrintable(error));
+        if (background)
+            QCOMPARE(focusChanges.size(), 0);
+        auto *restored = area.findChildren<KParts::ReadOnlyPart *>().last();
+        QTRY_VERIFY(!probe.records(b.id).isEmpty());
+        QVERIFY(area.focusSession(sessionKey(p.id, b.id)));
+        checkpoint(restored, b.id);
+        for (const auto &record : probe.records(b.id)) {
+            QCOMPARE(PtyProbe::size(record), initial);
+            QVERIFY(record.toObject()["event"] != "resize");
+        }
+        QSignalSpy exits(&area, &TerminalArea::clientExited);
+        PtyProbe::send(restored, "x");
+        QTRY_COMPARE(exits.size(), 1);
+        QVERIFY(area.currentSession().clientIssue.contains("retained"));
+        QVERIFY(area.focusSession(sessionKey(p.id, a.id)));
+        checkpoint(live, a.id);
+        QVERIFY(area.focusSession(sessionKey(p.id, b.id)));
+        QVERIFY2(area.restart(p, b, &error), qPrintable(error));
+        restored = area.findChildren<KParts::ReadOnlyPart *>().last();
+        checkpoint(restored, b.id);
+        for (const auto &record : probe.records(b.id))
+            QCOMPARE(PtyProbe::size(record), initial);
+        QVERIFY(area.focusSession(sessionKey(p.id, a.id)));
+        checkpoint(live, a.id);
+        const auto records = probe.records(a.id);
+        for (qsizetype i = since; i < records.size(); ++i) {
+            QCOMPARE(PtyProbe::size(records[i]), initial);
+            QVERIFY2(records[i].toObject()["event"] != "resize",
+                     QJsonDocument(records).toJson(QJsonDocument::Compact).constData());
+        }
+        area.closeBackend(p.id);
+    }
     void editorEnvironmentAcrossTerminalLifecycle_data() {
         QTest::addColumn<bool>("relay");
         QTest::addColumn<QString>("mode");
@@ -761,7 +842,7 @@ class TerminalTests : public QObject {
             }
         }
         QVERIFY(retainedOutput);
-        auto *retry = area.findChild<QPushButton *>("reconnectTerminal");
+        auto *retry = failed->findChild<QPushButton *>("reconnectTerminal");
         QVERIFY(retry && retry->isVisible());
         QTest::mouseClick(retry, Qt::LeftButton);
         QCOMPARE(restarts.size(), 1);

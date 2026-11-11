@@ -12,6 +12,7 @@
 #include "settingsdialog.h"
 #include "terminal.h"
 #include <KCommandBar>
+#include <KSqueezedTextLabel>
 #include <QApplication>
 #include <QCheckBox>
 #include <QCloseEvent>
@@ -53,6 +54,22 @@
 
 namespace Archcodex {
 namespace {
+class TerminalTitle : public KSqueezedTextLabel {
+  public:
+    using KSqueezedTextLabel::KSqueezedTextLabel;
+
+  protected:
+    bool event(QEvent *event) override {
+        if (event->type() == QEvent::ToolTip) {
+            const auto *help = static_cast<QHelpEvent *>(event);
+            // Session metadata is plain text, even when it resembles HTML.
+            const auto text = accessibleName().toHtmlEscaped().replace('\n', "<br>");
+            QToolTip::showText(help->globalPos(), "<p>" + text + "</p>", this);
+            return true;
+        }
+        return KSqueezedTextLabel::event(event);
+    }
+};
 // Keep help beside the navigator, anchored to the row rather than the pointer,
 // and keep its text stable while metadata changes underneath it.
 class SessionTree : public QTreeView {
@@ -285,9 +302,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     auto *workspace = new QWidget;
     auto *right = new QVBoxLayout(workspace);
     auto *top = new QHBoxLayout;
-    terminalTitle = new QLabel("No terminal selected");
+    auto *terminalTitle = new TerminalTitle("No terminal selected");
+    terminalTitle->setObjectName("terminalTitle");
+    terminalTitle->setAccessibleName("No terminal selected");
     terminalTitle->setTextFormat(Qt::PlainText);
-    terminalTitle->setWordWrap(true);
+    terminalTitle->setTextInteractionFlags(Qt::TextSelectableByMouse);
     top->addWidget(terminalTitle, 1);
     auto *close = new QPushButton("Close terminal");
     top->addWidget(close);
@@ -298,7 +317,17 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     splitter->setStretchFactor(1, 1);
     splitter->setSizes({390, 760});
     connect(close, &QPushButton::clicked, terminal, &TerminalArea::closeCurrent);
-    connect(terminal, &TerminalArea::currentChanged, terminalTitle, &QLabel::setText);
+    connect(terminal, &TerminalArea::currentChanged, terminalTitle,
+            [terminalTitle](const QString &title) {
+                // Metadata may contain line separators. Keep one font-sized row;
+                // KDE supplies elision, a full-text tooltip and Copy Full Text.
+                auto line = title;
+                for (auto &c : line)
+                    if (c.isSpace())
+                        c = QLatin1Char(' ');
+                terminalTitle->setText(line);
+                terminalTitle->setAccessibleName(title);
+            });
     connect(terminal, &TerminalArea::clientStateChanged, this, &Window::clientStateChanged);
     connect(terminal, &TerminalArea::restartRequested, this, &Window::restartTerminal);
     connect(terminal, &TerminalArea::sessionFocused, this, &Window::terminalFocused);

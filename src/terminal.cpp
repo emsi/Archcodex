@@ -25,21 +25,6 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     qApp->installEventFilter(this);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
-    exitBar = new QWidget(this);
-    auto *exitLayout = new QHBoxLayout(exitBar);
-    exitText = new QLabel;
-    exitText->setTextFormat(Qt::PlainText);
-    exitText->setWordWrap(true);
-    exitText->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    exitLayout->addWidget(exitText, 1);
-    auto *retry = new QPushButton("Reconnect client");
-    retry->setObjectName("reconnectTerminal");
-    exitLayout->addWidget(retry);
-    auto *details = new QPushButton("Connections…");
-    connect(details, &QPushButton::clicked, this, &TerminalArea::connectionsRequested);
-    exitLayout->addWidget(details);
-    exitBar->hide();
-    layout->addWidget(exitBar);
     layout->addWidget(stack);
     auto *label = new QLabel(
         "Select an existing session\n\nLocal Codex sessions are discovered automatically.\n"
@@ -50,14 +35,6 @@ TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStacke
     empty = label;
     stack->addWidget(empty);
     connect(stack, &QStackedWidget::currentChanged, this, &TerminalArea::updateCurrent);
-    connect(retry, &QPushButton::clicked, this, [this] {
-        const auto key = currentKey();
-        if (key.isEmpty() || (!exits.contains(key) && !placeholders.contains(key)))
-            return;
-        // The controller owns current profiles and session evidence. Never retry
-        // a captured command after rediscovery has changed the execution context.
-        emit restartRequested(clients.value(key));
-    });
 }
 TerminalArea::~TerminalArea() {
     qApp->removeEventFilter(this);
@@ -112,7 +89,6 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     connect(part, SIGNAL(overrideShortcut(QKeyEvent *, bool &)), this,
             SLOT(overrideShortcut(QKeyEvent *, bool &)), Qt::DirectConnection);
     updateShortcuts();
-    stack->addWidget(part->widget());
     connect(part, &QObject::destroyed, this, [this] {
         if (frozen)
             return;
@@ -124,10 +100,10 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
                 emit workspaceChanged();
                 titles.remove(it.key());
                 exits.remove(it.key());
+                delete pages.take(it.key()).widget;
                 it = parts.erase(it);
             } else
                 ++it;
-        updateCurrent();
     });
     return part;
 }
@@ -249,21 +225,37 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     v.disposition = v.threadId.isEmpty() ? ViewDisposition::Unresolved : ViewDisposition::Automatic;
     v.summary.clear();
     emit clientStateChanged(s);
+    auto *oldPage = pages.value(key).widget;
+    placeholders.remove(key); // Owned by the old page.
+    auto *page = addPage(key, part->widget());
+    if (activate || replaceSelected)
+        stack->setCurrentWidget(page);
+    delete old;
+    delete oldPage;
+    // Arrange the new view before starting its client. A pending/error banner
+    // belongs to its own page and never subtracts space from a different PTY.
+    page->resize(stack->contentsRect().size());
+    page->layout()->activate();
+    if (stack->currentWidget() != page) {
+        // Konsole's nested splitters/display initialize their terminal size on
+        // show. Initialize a background restore beneath the current page with
+        // painting disabled, before a client exists. Selection/focus stay put.
+        page->setUpdatesEnabled(false);
+        page->stackUnder(stack->currentWidget());
+        page->show();
+        page->hide();
+        page->setUpdatesEnabled(true);
+    }
     // Konsole handles the Flatpak host boundary, without expanding editor values
     // or falling back to another program. Its interface includes argv[0].
     QMetaObject::invokeMethod(part, "startProgramLiteral", Q_ARG(QString, arguments.first()),
                               Q_ARG(QStringList, arguments));
-    if (activate || replaceSelected)
-        stack->setCurrentWidget(part->widget());
-    delete placeholders.take(key);
-    delete old;
     if (activate) {
         finishCycle(false);
         remember(key);
         part->widget()->setFocus();
         emit sessionFocused(key);
     }
-    updateCurrent();
     if (!frozen)
         emit workspaceChanged();
     return true;
@@ -281,7 +273,6 @@ bool TerminalArea::showSession(const QString &key) {
         return false;
     stack->setCurrentWidget(widget);
     widget->setFocus();
-    updateCurrent();
     emit sessionFocused(key);
     if (!frozen)
         emit workspaceChanged();
@@ -540,8 +531,6 @@ QString TerminalArea::currentKey() const {
 }
 void TerminalArea::updateCurrent() {
     const auto key = currentKey();
-    exitText->setText(exits.value(key));
-    exitBar->setVisible(exits.contains(key) || placeholders.contains(key));
     emit currentChanged(titles.value(key, "No terminal selected"));
 }
 void TerminalArea::processExited(int exitCode, bool crashed) {
@@ -564,7 +553,7 @@ void TerminalArea::processExited(int exitCode, bool crashed) {
                             .replace("Its output is retained below.",
                                      "Output is not saved across restarts.");
             emit clientStateChanged(clients[key]);
-            updateCurrent();
+            updateStatus(key);
             refreshCycle();
             emit clientExited(key, exitCode, crashed);
             emit workspaceChanged();
@@ -584,12 +573,11 @@ void TerminalArea::closeSession(const QString &key) {
     exits.remove(key);
     views.remove(key);
     auto *part = parts.take(key).data();
-    auto *placeholder = placeholders.take(key);
+    placeholders.remove(key);
     if (current)
         stack->setCurrentWidget(empty);
     delete part;
-    delete placeholder;
-    updateCurrent();
+    delete pages.take(key).widget;
     emit viewClosed(id);
     if (!frozen)
         emit workspaceChanged();
@@ -601,9 +589,47 @@ void TerminalArea::closeBackend(const QString &backend) {
             closeSession(key);
 }
 QWidget *TerminalArea::viewWidget(const QString &key) const {
-    if (auto *part = parts.value(key).data())
-        return part->widget();
-    return placeholders.value(key);
+    return pages.value(key).widget;
+}
+QWidget *TerminalArea::addPage(const QString &key, QWidget *content) {
+    Page page;
+    page.widget = new QWidget;
+    auto *layout = new QVBoxLayout(page.widget);
+    layout->setContentsMargins(0, 0, 0, 0);
+    page.banner = new QWidget;
+    auto *statusLayout = new QHBoxLayout(page.banner);
+    page.message = new QLabel;
+    page.message->setTextFormat(Qt::PlainText);
+    page.message->setWordWrap(true);
+    page.message->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    statusLayout->addWidget(page.message, 1);
+    auto *retry = new QPushButton("Reconnect client");
+    retry->setObjectName("reconnectTerminal");
+    connect(retry, &QPushButton::clicked, this, [this, key] {
+        if (!exits.contains(key) && !placeholders.contains(key))
+            return;
+        // The controller supplies current execution context; never replay a
+        // launch command captured before rediscovery.
+        emit restartRequested(clients.value(key));
+    });
+    statusLayout->addWidget(retry);
+    auto *details = new QPushButton("Connections…");
+    connect(details, &QPushButton::clicked, this, &TerminalArea::connectionsRequested);
+    statusLayout->addWidget(details);
+    layout->addWidget(page.banner);
+    layout->addWidget(content, 1);
+    page.widget->setFocusProxy(content);
+    pages[key] = page;
+    updateStatus(key);
+    stack->addWidget(page.widget);
+    return page.widget;
+}
+void TerminalArea::updateStatus(const QString &key) {
+    const auto page = pages.value(key);
+    if (!page.widget)
+        return;
+    page.message->setText(exits.value(key));
+    page.banner->setVisible(exits.contains(key) || placeholders.contains(key));
 }
 bool TerminalArea::hasClient(const QString &key) const {
     return parts.value(key) && !exits.contains(key);
@@ -622,7 +648,6 @@ void TerminalArea::addPlaceholder(const WorkspaceView &v, const QString &serverN
     label->setTextFormat(Qt::PlainText);
     label->setTextInteractionFlags(Qt::TextSelectableByMouse);
     placeholders[key] = label;
-    stack->addWidget(label);
     Session s;
     s.backendId = v.backendId;
     s.id = v.threadId.isEmpty() ? "new-" + v.id : v.threadId;
@@ -633,6 +658,7 @@ void TerminalArea::addPlaceholder(const WorkspaceView &v, const QString &serverN
     s.executionEnvironment = v.executionEnvironment;
     clients[key] = s;
     titles[key] = v.title + "  ·  " + serverName + "  ·  " + v.cwd;
+    addPage(key, label);
     const auto note =
         v.disposition == ViewDisposition::Unresolved
             ? QString("Conversation ID unknown. Open the saved conversation from Projects. "
@@ -701,7 +727,7 @@ void TerminalArea::openingState(const QString &id, const QString &text, bool att
         if (auto *label = qobject_cast<QLabel *>(placeholders.value(key)))
             label->setText(text + "\n\n" + it->cwd + "\n" + it->threadId);
         emit clientStateChanged(clients[key]);
-        updateCurrent();
+        updateStatus(key);
         if (attention && !frozen)
             emit workspaceChanged();
         return;
@@ -735,7 +761,6 @@ void TerminalArea::restoreWorkspace(const WorkspaceSnapshot &snapshot,
     if (keys.contains(snapshot.selected))
         stack->setCurrentWidget(viewWidget(keys[snapshot.selected]));
     frozen = oldFrozen;
-    updateCurrent();
 }
 void TerminalArea::freezeWorkspace() {
     frozen = true;
@@ -744,6 +769,7 @@ bool TerminalArea::smokeTest(QString *error) {
     auto *p = create(error);
     if (!p)
         return false;
+    stack->addWidget(p->widget());
     qobject_cast<TerminalInterface *>(p)->startProgram(
         "/bin/sh", {"/bin/sh", "-c", "printf 'Archcodex terminal smoke test\\n'; sleep 1"});
     stack->setCurrentWidget(p->widget());
