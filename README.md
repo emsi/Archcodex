@@ -39,6 +39,9 @@ notes and checksums.
   Codex or start app-servers.
 - **Host Python 3** at `/usr/bin/python3` for local discovery. No third-party
   Python packages are required.
+- **Host Bash** at `/bin/bash` and GNU `env` at `/usr/bin/env` for terminal
+  startup. Development builds initialize Bash's interactive configuration before
+  starting the local Codex TUI; see [external editors](docs/local-tui-connections.md#external-editors-and-terminal-startup).
 - **For myCodex:** Docker access and Python 3 on each selected host, plus a
   running systemd user manager on the local computer. Remote hosts also need
   an accepted SSH host key and non-interactive authentication, such as an SSH

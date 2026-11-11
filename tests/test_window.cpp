@@ -8,6 +8,7 @@
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
+#include "testenvironment.h"
 #include "window.h"
 #include "worker.h"
 #include <KCommandBar>
@@ -131,6 +132,7 @@ class WindowNotificationDaemon : public QObject {
 };
 class WindowTests : public QObject {
     Q_OBJECT
+    TestHome home;
   private slots:
     void onlyTheViewedTerminalIsSuppressed() {
         auto bus = QDBusConnection::connectToBus(QDBusConnection::SessionBus,

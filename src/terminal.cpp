@@ -86,9 +86,11 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     // Our pinned KPart exposes its existing hold-open facility and the PTY exit
     // event. Never inspect foreground processes or infer exit from terminal text.
     if (part->metaObject()->indexOfSignal("terminalProcessExited(int,bool)") < 0 ||
+        part->metaObject()->indexOfMethod("startProgramLiteral(QString,QStringList)") < 0 ||
         !QMetaObject::invokeMethod(part, "setAutoClose", Q_ARG(bool, false))) {
-        *error = "The Konsole component lacks Archcodex's terminal lifecycle support. Reinstall "
-                 "the matching package.";
+        *error =
+            "The Konsole component lacks Archcodex's terminal launch/lifecycle support. Reinstall "
+            "the matching package.";
         delete part;
         return nullptr;
     }
@@ -247,8 +249,10 @@ bool TerminalArea::launch(const QString &key, const QStringList &arguments, cons
     v.disposition = v.threadId.isEmpty() ? ViewDisposition::Unresolved : ViewDisposition::Automatic;
     v.summary.clear();
     emit clientStateChanged(s);
-    // Konsole already handles the Flatpak host boundary. Arguments stay separate.
-    qobject_cast<TerminalInterface *>(part)->startProgram("/bin/sh", arguments);
+    // Konsole handles the Flatpak host boundary, without expanding editor values
+    // or falling back to another program. Its interface includes argv[0].
+    QMetaObject::invokeMethod(part, "startProgramLiteral", Q_ARG(QString, arguments.first()),
+                              Q_ARG(QStringList, arguments));
     if (activate || replaceSelected)
         stack->setCurrentWidget(part->widget());
     delete placeholders.take(key);

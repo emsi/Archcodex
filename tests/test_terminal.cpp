@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "commands.h"
+#include "launch.h"
 #include "terminal.h"
+#include "testenvironment.h"
+#include <KPluginFactory>
+#include <KPluginMetaData>
 #include <KXMLGUIClient>
 #include <QAccessible>
 #include <QDialog>
@@ -59,7 +63,129 @@ QString candidate(TerminalArea &area) {
 
 class TerminalTests : public QObject {
     Q_OBJECT
+    TestHome home;
   private slots:
+    void editorEnvironmentAcrossTerminalLifecycle_data() {
+        QTest::addColumn<bool>("relay");
+        QTest::addColumn<QString>("mode");
+        for (bool relay : {false, true})
+            for (const auto &mode : {"open", "prepared-new", "restart", "restore"})
+                QTest::newRow((QByteArray(relay ? "relay-" : "direct-") + mode).constData())
+                    << relay << QString::fromLatin1(mode);
+    }
+    void editorEnvironmentAcrossTerminalLifecycle() {
+        QFETCH(bool, relay);
+        QFETCH(QString, mode);
+        QTemporaryDir dir;
+        TestEnvironment inherited;
+        inherited.set("HOME", dir.path().toUtf8());
+        const auto marker = dir.filePath("INJECTED");
+        const auto editor = "editor $HOME '${USER}' `touch " + marker + "` $(touch " + marker +
+                            ") ; \\ \"literal\"\nżółw";
+        inherited.set("EDITOR", editor.toUtf8());
+        inherited.set("VISUAL", "");
+        QFile rc(dir.filePath(".bashrc"));
+        QVERIFY(rc.open(QIODevice::WriteOnly));
+        rc.write("case $- in *i*) ;; *) return ;; esac\nexport STARTUP=interactive\n");
+        rc.close();
+        QFile script(dir.filePath("codex $HOME 'literal'"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write("#!/usr/bin/python3\nimport json,os,sys\n"
+                     "if '--version' in sys.argv: print('codex-cli 0.166.0')\n"
+                     "else:\n"
+                     " with open(__file__+'.json','w') as f: json.dump(dict("
+                     "argv=sys.argv[1:],editor=os.getenv('EDITOR'),visual=os.getenv('VISUAL'),"
+                     "startup=os.getenv('STARTUP')),f)\n"
+                     " print('CLIENT COMPLETED')\n");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        BackendProfile p{
+            "b", "Fixture", "local-unix", dir.filePath("socket $HOME"), script.fileName(), false};
+        if (relay) {
+            p.kind = "mycodex";
+            p.containerId = QString(64, 'a');
+            p.containerEpoch = "epoch";
+            p.environmentId = "environment";
+            p.runtimeUser = "test";
+            p.runtimeHome = "/home/test";
+            p.dockerContext = "default";
+            p.discoveryHost = "remote-mycodex";
+            p.sshHost = "must-not-be-contacted";
+            p.relaySocket = p.socketPath;
+            p.executable = "/container-only/codex";
+        }
+        auto s = Session::fromThread(p.id, {{"id", "thread $HOME"}, {"cwd", "/remote dir"}});
+        s.executionObserved = true;
+        s.executionEnvironment = p.environmentId;
+        TerminalArea area;
+        area.setLocalCodexExecutable(script.fileName());
+        area.resize(900, 600);
+        area.show();
+        QSignalSpy exits(&area, &TerminalArea::clientExited);
+        QString error;
+        if (mode == "restore") {
+            TerminalArea previous;
+            previous.prepare(p, s, false);
+            const auto saved = previous.workspace();
+            area.restoreWorkspace(saved, {{p.id, p}});
+            QVERIFY2(area.startPrepared(saved.views.first().id, p, s, &error), qPrintable(error));
+        } else if (mode == "prepared-new") {
+            const auto view = area.prepare(p, s, true);
+            QVERIFY2(area.startPrepared(view.id, p, s, &error), qPrintable(error));
+        } else {
+            QVERIFY2(area.open(p, s, &error), qPrintable(error));
+        }
+        QTRY_COMPARE(exits.size(), 1);
+        QCOMPARE(exits.last()[1].toInt(), 0);
+        QFile received(script.fileName() + ".json");
+        QVERIFY(received.open(QIODevice::ReadOnly));
+        const auto output = QJsonDocument::fromJson(received.readAll()).object();
+        received.close();
+        QCOMPARE(output["editor"].toString(), editor);
+        QCOMPARE(output["visual"], QJsonValue(""));
+        QCOMPARE(output["startup"].toString(), "interactive");
+        QCOMPARE(output["argv"].toArray(),
+                 (QJsonArray{"--remote", p.endpoint(), "resume", "--", s.id}));
+        QVERIFY(!QFile::exists(marker));
+        if (mode == "restart") {
+            inherited.set("VISUAL", "changed before reconnect");
+            QVERIFY2(area.restart(p, s, &error), qPrintable(error));
+            QTRY_COMPARE(exits.size(), 2);
+            QCOMPARE(exits.last()[1].toInt(), 0);
+            QVERIFY(received.open(QIODevice::ReadOnly));
+            QCOMPARE(QJsonDocument::fromJson(received.readAll()).object()["visual"].toString(),
+                     "changed before reconnect");
+        }
+    }
+    void literalLaunchFailureDoesNotOpenFallbackShell_data() {
+        QTest::addColumn<QString>("failure");
+        QTest::addColumn<int>("exitCode");
+        QTest::newRow("missing-program") << QString("program") << 126;
+        QTest::newRow("missing-bash") << QString("bash") << 127;
+        QTest::newRow("missing-client") << QString("client") << 127;
+    }
+    void literalLaunchFailureDoesNotOpenFallbackShell() {
+        QFETCH(QString, failure);
+        QFETCH(int, exitCode);
+        const auto result = KPluginFactory::instantiatePlugin<KParts::ReadOnlyPart>(
+            KPluginMetaData("kf6/parts/konsolepart"));
+        QVERIFY2(result, qPrintable(result.errorString));
+        std::unique_ptr<KParts::ReadOnlyPart> part(result.plugin);
+        QVERIFY(QMetaObject::invokeMethod(part.get(), "setAutoClose", Q_ARG(bool, false)));
+        QSignalSpy exits(part.get(), SIGNAL(terminalProcessExited(int, bool)));
+        const QString missing = home.directory.filePath("nonexistent-program");
+        auto args = terminalCommand({failure == "client" ? missing : "/bin/true"});
+        if (failure == "bash")
+            args[args.indexOf("/bin/bash")] = missing;
+        else if (failure == "program")
+            args = {missing};
+        QVERIFY(QMetaObject::invokeMethod(part.get(), "startProgramLiteral",
+                                          Q_ARG(QString, args.first()), Q_ARG(QStringList, args)));
+        QTRY_COMPARE(exits.size(), 1);
+        QCOMPARE(exits.first()[0].toInt(), exitCode);
+        QVERIFY(!exits.first()[1].toBool());
+        QVERIFY(part->widget());
+    }
     void restoredPlaceholdersPreserveNavigationAndExitIntent() {
         QTemporaryDir dir;
         QFile script(dir.filePath("client"));
@@ -194,7 +320,9 @@ class TerminalTests : public QObject {
         QVERIFY(part);
         auto *scrollbar = part->widget()->findChild<QScrollBar *>();
         QVERIFY(scrollbar);
-        QVERIFY(scrollbar->maximum() > 100);
+        // The emulation can answer the cursor query before its queued display
+        // update has installed the scrollbar range.
+        QTRY_VERIFY(scrollbar->maximum() > 100);
         const int bottom = scrollbar->maximum();
         QCOMPARE(scrollbar->value(), bottom);
         QTest::keyClick(input, Qt::Key_PageUp, Qt::ShiftModifier);

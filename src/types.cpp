@@ -230,24 +230,16 @@ QStringList clientArguments(const BackendProfile &p, const QString &id, const QS
                                   {"thread", id},
                                   {"cwd", cwd},
                                   {"executable", localExecutable}};
-        return QStringList{"/bin/sh", "-c", "exec \"$@\"", "archcodex"} +
-               transportCommand(
-                   "client", QString::fromLatin1(
-                                 QJsonDocument(request).toJson(QJsonDocument::Compact).toBase64()));
+        return terminalCommand(transportCommand(
+            "client",
+            QString::fromLatin1(QJsonDocument(request).toJson(QJsonDocument::Compact).toBase64())));
     }
-    // Constant script; every variable is a separate argv entry. Konsole includes argv[0].
-    auto args = QStringList{QStringLiteral("/bin/sh"),
-                            QStringLiteral("-c"),
-                            QStringLiteral("exec \"$@\""),
-                            QStringLiteral("archcodex"),
-                            p.executable,
-                            QStringLiteral("--remote"),
-                            p.endpoint()};
+    auto args = QStringList{p.executable, QStringLiteral("--remote"), p.endpoint()};
     if (id.isEmpty())
         args << "--cd" << cwd;
     else
         args << "resume" << "--" << id;
-    return args;
+    return terminalCommand(args);
 }
 QString serverLabel(const BackendProfile &p) {
     if (!p.discovered)
