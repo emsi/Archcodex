@@ -88,8 +88,8 @@ Actual desktop/client/server compatibility still requires testing.
 
 ## External editors and terminal startup
 
-Development builds addressing [issue #7](https://github.com/emsi/Archcodex/issues/7)
-start every terminal client on the **local computer** through `/usr/bin/env`,
+Since 0.9.0 ([issue #7](https://github.com/emsi/Archcodex/issues/7)), every terminal
+client starts on the **local computer** through `/usr/bin/env`,
 then `/bin/bash -ic`, then the selected Codex executable or transport client.
 This applies to direct and myCodex connections, including New, resume, reconnect
 and workspace restoration. The server endpoint, thread ID and remote working
