@@ -265,6 +265,7 @@ steps for terminal, Docker, SSH or Flatpak integration changes.
 - [UI design](docs/ui.md): project navigation, session views and interaction behavior.
 - [Implementation and testing](docs/implementation.md): delivered behavior and validation boundaries.
 - [Release history and publishing](docs/releases/README.md): notes, provenance and publication procedure.
+- [Flatpak update repository](docs/releases/flatpak-repository.md): local signing and deployment-only GitHub Pages tooling; initial publication setup is required.
 
 Design documents also describe future stages; their presence does not imply
 that every proposed feature is implemented.

@@ -105,6 +105,11 @@ use GitHub's prerelease flag when they should not replace the recommended build.
 Publication always needs task authorization; this procedure is not an unattended
 release workflow.
 
+For native Flatpak updates, see the [signed repository and Pages deployment
+procedure](flatpak-repository.md). Its locally prepared assets supplement the
+bundle/checksum asset set above for future releases using the update remote.
+Existing releases and notes remain unchanged.
+
 ## Initial history publication — 2026-11-10
 
 All 14 versions, v0.1.0 through v0.7.0, were published after draft verification.

@@ -119,6 +119,13 @@ Keep every other version's files. Never delete a reservation to reuse a delivere
    newest accepted normal release Latest. Any explicitly requested public RC
    would instead be a GitHub prerelease, never Latest.
 
+For releases distributed through the update remote, also follow the
+[signed Flatpak repository procedure](flatpak-repository.md): prepare/sign the
+Pages snapshot locally from the same accepted bundle, include its archive,
+signature and checksum in the verified draft, then explicitly dispatch the
+deployment-only workflow after publication. First-time signing/Pages setup is
+required. Repository preparation and deployment never rebuild the application.
+
 The catalog describes published releases. Local candidates stay in `dist/` and
 local `test/*` tags; they do not consume public release numbers or require public
 release notes. Gaps in RC numbers are harmless and preferable to reusing an identity.

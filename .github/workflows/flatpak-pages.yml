@@ -1,0 +1,68 @@
+name: Deploy prepared Flatpak repository
+
+on:
+  workflow_dispatch:
+    inputs:
+      release:
+        description: Published final release tag currently marked Latest (vX.Y.Z)
+        type: string
+        required: true
+      sha256:
+        description: Locally verified SHA-256 of the release's .pages.tar.gz asset
+        type: string
+        required: true
+      bootstrap:
+        description: First publication only (allow a missing deployed repository)
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+# Serialize verification and deployment together. A stale queued release is rejected.
+concurrency:
+  group: flatpak-pages
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    if: github.repository == 'emsi/Archcodex' && github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Verify and stage already prepared release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release }}
+          ARCHIVE_SHA256: ${{ inputs.sha256 }}
+          SIGNING_FINGERPRINT: ${{ vars.FLATPAK_SIGNING_FINGERPRINT }}
+          BOOTSTRAP: ${{ inputs.bootstrap }}
+        run: |
+          options=()
+          if [[ "$BOOTSTRAP" == true ]]; then options+=(--bootstrap); fi
+          python3 scripts/flatpak_repository.py stage-release \
+            --tag "$RELEASE_TAG" --sha256 "$ARCHIVE_SHA256" \
+            --fingerprint "$SIGNING_FINGERPRINT" --output "$RUNNER_TEMP/pages" "${options[@]}"
+      - name: Upload verified Pages files
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: ${{ runner.temp }}/pages
+          retention-days: 1
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy verified files
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
