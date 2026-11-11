@@ -71,6 +71,9 @@ planned protocol-observation option that requires no Codex changes.
   conversations, with recent-use ordering.
 - **Live status:** distinguish running and waiting sessions using app-server
   events, without status polling.
+- **Desktop notifications:** open the right session from a Running → Waiting
+  alert. Configure these in **Settings → Notifications**; see
+  [notification behavior and compatibility](docs/notifications.md).
 - **Embedded terminal:** use the Codex TUI in Konsole, with local clipboard and
   image input even when the workspace is in a remote myCodex container.
 - **Search and filters:** search full conversations across connected servers,
@@ -180,7 +183,7 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-The current **0.8.1** source supports existing local Unix-socket
+The current source supports existing local Unix-socket
 app-servers and local or SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
 to non-container app-servers remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.
@@ -206,11 +209,17 @@ cd Archcodex
 ```
 
 The script keeps build runtimes in a separate `.build/flatpak` installation and
-produces the bundle and checksums in `dist/`. On x86_64:
+reads the committed `VERSION`, and produces the bundle, checksums and source
+receipt directly in `dist/`, with versioned filenames. Builds require clean
+committed source and an unused version; see the
+[candidate and release process](docs/releases/process.md).
+For the current x86_64 candidate:
 
 ```sh
-sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.8.1-x86_64.flatpak
+version=$(cat VERSION)
+cd dist
+sha256sum -c "Archcodex-$version-x86_64.flatpak.sha256"
+flatpak install --user --or-update "./Archcodex-$version-x86_64.flatpak"
 flatpak run io.github.emsi.Archcodex
 ```
 

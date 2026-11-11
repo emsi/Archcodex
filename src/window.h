@@ -25,6 +25,7 @@ class TerminalArea;
 class DiscoveryDialog;
 class Commands;
 class OpeningCoordinator;
+class Notifications;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -35,6 +36,7 @@ class Window : public QMainWindow {
     void connectionSummaryChanged();
 
   protected:
+    bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
 
   private:
@@ -88,8 +90,10 @@ class Window : public QMainWindow {
     QLabel *searchNotice, *terminalTitle, *connections;
     QPushButton *loadMore;
     QSplitter *splitter;
-    TerminalArea *terminal;
+    TerminalArea *terminal = nullptr;
     OpeningCoordinator *opening;
+    Notifications *notifications = nullptr;
+    void updateViewedSession();
     QToolButton *workspaceStatus;
     bool workspaceLoaded = false, workspaceWritable = false, workspaceSaving = false;
     bool closing = false;
@@ -157,6 +161,8 @@ class Window : public QMainWindow {
     void discover();
     void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues);
     void activate(const QModelIndex &index);
+    void activateSession(const QString &backend, const QString &thread,
+                         bool requireConnected = false);
     void sessionContextMenu(const QPoint &position);
     void newSession(const QString &backend, const QString &path);
     void forkSession(const QString &backend, const QString &thread);

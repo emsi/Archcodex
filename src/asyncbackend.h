@@ -2,6 +2,7 @@
 #pragma once
 #include "backend.h"
 #include "worker.h"
+#include <atomic>
 namespace Archcodex {
 class BackendPump;
 class AsyncBackend final : public Backend {
@@ -28,6 +29,7 @@ class AsyncBackend final : public Backend {
     };
     std::shared_ptr<State> state;
     std::shared_ptr<Worker> worker;
+    std::shared_ptr<std::atomic<quint64>> attentionEpoch;
     bool connected = false;
 };
 } // namespace Archcodex

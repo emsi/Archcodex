@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "opening.h"
+#include "notificationlog.h"
 #include <QTimer>
 #include <utility>
 
@@ -261,8 +262,9 @@ void OpeningCoordinator::verified(const QString &backend, const QString &thread,
         fail(id, "Could not reopen this conversation: " + error.simplified().left(700));
         return;
     }
-    if (session.id != thread || session.backendId != backend || session.unavailable ||
-        (found->automatic && !session.isSaved())) {
+    qCDebug(notificationLog) << "verified open" << backend << thread << "saved"
+                             << session.isSaved();
+    if (session.id != thread || session.backendId != backend || !session.isSaved()) {
         fail(id, "This conversation has no available saved history. It was not replaced with a new "
                  "session.");
         return;

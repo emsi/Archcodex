@@ -54,6 +54,299 @@ class ProtocolFixtureBackend : public CodexBackend {
 class RuntimeTests : public QObject {
     Q_OBJECT
   private slots:
+    void waitingNotificationsOnlyFollowLiveRunningTransitions() {
+        Fixture f;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested);
+        b.connectServer();
+        QTRY_VERIFY(f.methods.contains("thread/read"));
+        QTest::qWait(50);
+        QCOMPARE(events.size(), 0);
+        const auto status = [&](const QJsonObject &value) {
+            f.notify("thread/status/changed", {{"threadId", "thread-1"}, {"status", value}});
+        };
+        const QJsonObject running{{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        const QJsonObject waiting{{"type", "active"},
+                                  {"activeFlags", QJsonArray{"waitingOnUserInput"}}};
+        const auto initialReads = f.methods.count("thread/read");
+        status({{"type", "idle"}});
+        status(running);
+        status(waiting);
+        status(waiting);
+        status({{"type", "idle"}});
+        QTRY_COMPARE(events.size(), 1);
+        const auto event = qvariant_cast<SessionAttention>(events.first()[0]);
+        QCOMPARE(event.session.backendId, b.profile.id);
+        QCOMPARE(event.session.id, "thread-1");
+        QCOMPARE(event.reason, SessionAttention::Reason::Waiting);
+        status(running);
+        status({{"type", "notLoaded"}});
+        status({{"type", "idle"}});
+        QTest::qWait(50);
+        QCOMPARE(events.size(), 1);
+        QCOMPARE(f.methods.count("thread/read"), initialReads);
+        b.disconnectServer();
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        status({{"type", "idle"}});
+        QTest::qWait(50);
+        QCOMPARE(events.size(), 1);
+        status(running);
+        status({{"type", "idle"}});
+        QTRY_COMPARE(events.size(), 2);
+        QVERIFY(!f.methods.contains("thread/resume"));
+        QVERIFY(!f.methods.contains("thread/items/list"));
+    }
+    void rapidTransitionsSurviveInventoryCoalescing() {
+        Fixture f;
+        AsyncBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested);
+        QSignalSpy batches(&b, &Backend::sessionsChanged);
+        b.connectServer();
+        QTRY_VERIFY(b.ready() && !batches.isEmpty());
+        for (int i = 0; i < 20; ++i) {
+            f.notify("thread/status/changed",
+                     {{"threadId", "thread-1"},
+                      {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+            f.notify("thread/status/changed",
+                     {{"threadId", "thread-1"}, {"status", QJsonObject{{"type", "idle"}}}});
+        }
+        QTRY_COMPARE(events.size(), 20);
+        b.disconnectServer();
+        const auto count = events.size();
+        QTest::qWait(100);
+        QCOMPARE(events.size(), count);
+    }
+    void transitionsBeforeMetadataReadsAreNotLost_data() {
+        QTest::addColumn<QString>("storage");
+        for (const auto &value : {"saved", "paginated", "ephemeral", "unsaved"})
+            QTest::newRow(value) << QString(value);
+    }
+    void transitionsBeforeMetadataReadsAreNotLost() {
+        QFETCH(QString, storage);
+        Fixture f;
+        f.delayRead = true;
+        f.delaySnapshot = true;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        f.notify("thread/status/changed",
+                 {{"threadId", "new-live-thread"},
+                  {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        f.notify("thread/status/changed",
+                 {{"threadId", "new-live-thread"}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_COMPARE(f.readIds.size(), 1);
+        QCOMPARE(events.size(), 0);
+        const auto firstRead = f.readId;
+        auto thread = f.thread("new-live-thread");
+        thread["path"] = QJsonValue::Null;
+        // An older read can precede first-turn persistence. The overlapping idle
+        // event already queued a refresh; do not discard the occurrence early.
+        f.reply(firstRead, {{"thread", thread}});
+        QTRY_COMPARE(f.readIds.size(), 2);
+        QCOMPARE(events.size(), 0);
+        thread["sessionId"] = "shared-tree";
+        thread["forkedFromId"] = "ancestor";
+        if (storage == "saved")
+            thread["path"] = "/saved/fork.jsonl";
+        if (storage == "paginated" || storage == "ephemeral")
+            thread["historyMode"] = "paginated";
+        thread["ephemeral"] = storage == "ephemeral";
+        QSignalSpy metadata(&b, &Backend::sessionChanged);
+        f.reply(f.readId, {{"thread", thread}});
+        QTRY_VERIFY(!metadata.isEmpty());
+        const bool saved = storage == "saved" || storage == "paginated";
+        QCOMPARE(events.size(), saved ? 1 : 0);
+        if (saved) {
+            const auto event = qvariant_cast<SessionAttention>(events.first()[0]);
+            QCOMPARE(event.session.id, "new-live-thread");
+            QCOMPARE(event.session.backendId, b.profile.id);
+            QCOMPARE(event.session.cwd, "/work/project");
+            QVERIFY(event.session.isSaved());
+        }
+        QCOMPARE(f.readIds.size(), 2); // Only the existing inventory refreshes.
+        QVERIFY(!f.methods.contains("thread/resume"));
+        QVERIFY(!f.methods.contains("thread/items/list"));
+    }
+    void startedSnapshotDoesNotRearmWaiting() {
+        Fixture f;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested), metadata(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(!metadata.isEmpty());
+        const auto status = [&](const QString &type) {
+            f.notify("thread/status/changed",
+                     {{"threadId", "thread-1"},
+                      {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+        };
+        status("active");
+        status("idle");
+        QTRY_COMPARE(events.size(), 1);
+        auto snapshot = f.thread();
+        snapshot["status"] = QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        f.notify("thread/started", {{"thread", snapshot}});
+        status("idle");
+        QTest::qWait(30);
+        QCOMPARE(events.size(), 1);
+        status("active");
+        status("idle");
+        QTRY_COMPARE(events.size(), 2);
+        f.notify("thread/closed", {{"threadId", "thread-1"}});
+        f.notify("thread/started", {{"thread", f.thread()}});
+        QTRY_VERIFY(qvariant_cast<Session>(metadata.last()[0]).isWaiting());
+        QCOMPARE(events.size(), 2);
+    }
+    void pendingAttentionIsBoundedAndInvalidated_data() {
+        QTest::addColumn<QString>("outcome");
+        for (const auto &value : {"saved", "failure", "archived", "closed", "disconnect"})
+            QTest::newRow(value) << QString(value);
+    }
+    void pendingAttentionIsBoundedAndInvalidated() {
+        QFETCH(QString, outcome);
+        Fixture f;
+        f.delaySnapshot = f.delayRead = true;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested), metadata(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        QTest::ignoreMessage(QtWarningMsg,
+                             "Notification metadata backlog exceeded 256; oldest event discarded.");
+        for (int i = 0; i < 300; ++i) {
+            for (const auto &type : {"active", "idle"})
+                f.notify("thread/status/changed",
+                         {{"threadId", "pending"},
+                          {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+        }
+        QTRY_COMPARE(f.readIds.size(), 1);
+        // Fence all preceding notifications through an event on this same socket.
+        f.notify("thread/started", {{"thread", f.thread("fence")}});
+        QTRY_VERIFY(!metadata.isEmpty());
+        QCOMPARE(events.size(), 0);
+        if (outcome == "disconnect") {
+            b.disconnectServer();
+            b.connectServer();
+            QTRY_VERIFY(b.ready());
+            f.notify("thread/started", {{"thread", f.thread("pending")}});
+        } else {
+            if (outcome == "archived" || outcome == "closed")
+                f.notify("thread/" + outcome, {{"threadId", "pending"}});
+            if (outcome == "failure")
+                f.reject(f.readId, "Metadata unavailable");
+            else
+                f.reply(f.readId, {{"thread", f.thread("pending")}});
+            QTRY_COMPARE(f.readIds.size(), 2);
+            f.reply(f.readId, {{"thread", f.thread("pending")}});
+        }
+        QTest::qWait(30);
+        QCOMPARE(events.size(), outcome == "saved" ? 256 : 0);
+        QVERIFY(!f.methods.contains("thread/resume"));
+    }
+    void blockedFacadeRetainsTransitionsButReconnectDiscardsThem() {
+        Fixture f;
+        AsyncBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested);
+        b.connectServer();
+        QTRY_VERIFY(f.methods.contains("thread/read"));
+        QTest::qWait(50);
+        const auto change = [&](const QString &type) {
+            f.notify("thread/status/changed",
+                     {{"threadId", "thread-1"},
+                      {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+        };
+        b.blockSignals(true); // Withhold batchAccepted, exactly as a busy GUI would.
+        change("active");
+        QTest::qWait(50);
+        change("idle");
+        change("active");
+        change("idle");
+        QTest::qWait(50);
+        b.blockSignals(false);
+        emit b.batchAccepted();
+        QTRY_COMPARE(events.size(), 2);
+        b.blockSignals(true);
+        change("active");
+        QTest::qWait(50);
+        change("idle");
+        QTest::qWait(50);
+        b.disconnectServer();
+        b.blockSignals(false);
+        emit b.batchAccepted();
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        QTest::qWait(50);
+        QCOMPARE(events.size(), 2);
+    }
+    void attentionBackpressureIsBoundedWithoutExtraRequests() {
+        Fixture f;
+        AsyncBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested);
+        b.connectServer();
+        QTRY_VERIFY(f.methods.contains("thread/read"));
+        QTest::qWait(50);
+        const auto change = [&](const QString &type) {
+            f.notify("thread/status/changed",
+                     {{"threadId", "thread-1"},
+                      {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+        };
+        b.blockSignals(true);
+        change("active");
+        QTest::qWait(50);
+        const auto requests = f.methods.size();
+        QTest::ignoreMessage(QtWarningMsg,
+                             "Session notification backlog exceeded 256; oldest event discarded.");
+        for (int i = 0; i < 300; ++i) {
+            change("idle");
+            change("active");
+        }
+        QTest::qWait(250);
+        b.blockSignals(false);
+        emit b.batchAccepted();
+        QTRY_COMPARE(events.size(), 256);
+        QCOMPARE(f.methods.size(), requests);
+        QVERIFY(b.ready());
+    }
+    void asynchronousQuestionEventsAreStructuredLiveAndDeduplicated() {
+        Fixture f;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested);
+        b.connectServer();
+        QTRY_VERIFY(f.methods.contains("thread/read"));
+        QTest::qWait(30);
+        const QJsonObject question{
+            {"id", "question-item"},
+            {"type", "agentMessage"},
+            {"delivery", "async"},
+            {"questions",
+             QJsonArray{QJsonObject{{"id", "choice"}, {"question", "PRIVATE QUESTION"}}}}};
+        const auto item = [&](const QJsonObject &value) {
+            f.notify("item/completed",
+                     {{"threadId", "thread-1"}, {"turnId", "turn-1"}, {"item", value}});
+        };
+        item(question); // No live turn: reconnect/history must not alert.
+        f.notify("turn/started",
+                 {{"threadId", "thread-1"}, {"turn", QJsonObject{{"id", "turn-1"}}}});
+        f.notify("thread/status/changed",
+                 {{"threadId", "thread-1"},
+                  {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        item({{"id", "text"}, {"type", "agentMessage"}, {"text", "Are you there?"}});
+        item(question);
+        item(question);
+        QTRY_COMPARE(events.size(), 1);
+        QCOMPARE(qvariant_cast<SessionAttention>(events.first()[0]).reason,
+                 SessionAttention::Reason::Question);
+        QVERIFY(!qvariant_cast<SessionAttention>(events.first()[0])
+                     .session.metadata()
+                     .contains("questions"));
+        f.notify("turn/completed",
+                 {{"threadId", "thread-1"}, {"turn", QJsonObject{{"id", "turn-1"}}}});
+        item(question);
+        QTest::qWait(30);
+        QCOMPARE(events.size(), 1);
+        QCOMPARE(f.methods.count("thread/resume"), 0);
+        QCOMPARE(f.methods.count("thread/items/list"), 0);
+        QCOMPARE(f.methods.count("turn/start"), 0);
+    }
     void discoveryStartupKeepsNewestHostConfiguration_data() {
         QTest::addColumn<QString>("firstHost");
         QTest::newRow("remote-first") << QString("remote");

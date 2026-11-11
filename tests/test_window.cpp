@@ -3,6 +3,8 @@
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "fixture.h"
+#include "notifications.h"
+#include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
@@ -15,6 +17,8 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QCryptographicHash>
+#include <QDBusConnection>
+#include <QDBusPendingCallWatcher>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QHelpEvent>
@@ -25,7 +29,9 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSettings>
+#include <QStatusBar>
 #include <QTabBar>
 #include <QToolButton>
 #include <QToolTip>
@@ -97,9 +103,232 @@ class SettingsShown : public QObject {
 };
 } // namespace
 
+class WindowNotificationDaemon : public QObject {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.Notifications")
+  public:
+    QStringList bodies;
+    QList<uint> closed;
+    uint nextId = 0;
+  public slots:
+    QStringList GetCapabilities() {
+        return {"actions", "body", "body-markup"};
+    }
+    QString GetServerInformation(QString &vendor, QString &version, QString &specification) {
+        vendor = "Archcodex tests";
+        version = "1";
+        specification = "1.2";
+        return "Window fixture";
+    }
+    uint Notify(const QString &, uint replaces, const QString &, const QString &,
+                const QString &body, const QStringList &, const QVariantMap &, int) {
+        bodies << body;
+        return replaces ? replaces : ++nextId;
+    }
+    void CloseNotification(uint id) {
+        closed << id;
+    }
+};
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void onlyTheViewedTerminalIsSuppressed() {
+        auto bus = QDBusConnection::connectToBus(QDBusConnection::SessionBus,
+                                                 "window-notification-fixture");
+        WindowNotificationDaemon desktop;
+        QVERIFY(bus.registerService("org.freedesktop.Notifications"));
+        QVERIFY(bus.registerObject("/org/freedesktop/Notifications", &desktop,
+                                   QDBusConnection::ExportAllSlots));
+        const auto unregister = qScopeGuard([&] {
+            bus.unregisterObject("/org/freedesktop/Notifications");
+            bus.unregisterService("org.freedesktop.Notifications");
+            QDBusConnection::disconnectFromBus("window-notification-fixture");
+        });
+        const auto delivered = [&] {
+            // Receiving Notify in the fixture precedes the client's delivery
+            // acknowledgement. Fence that reply before simulating a later visit.
+            QDBusPendingCallWatcher barrier(QDBusConnection::sessionBus().asyncCall(
+                QDBusMessage::createMethodCall("org.freedesktop.Notifications",
+                                               "/org/freedesktop/Notifications",
+                                               "org.freedesktop.DBus.Peer", "Ping")));
+            QTRY_VERIFY(barrier.isFinished());
+            QVERIFY2(!barrier.isError(), qPrintable(barrier.error().message()));
+        };
+        QTemporaryDir data;
+        Fixture fixture;
+        auto p = fixture.profile();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        QVERIFY(backend);
+        backend->connectServer();
+        QTRY_VERIFY(backend->ready());
+        auto *area = window.findChild<TerminalArea *>();
+        const auto first = Session::fromThread(p.id, fixture.thread());
+        auto second = Session::fromThread(p.id, fixture.thread("second"));
+        second.title = "Second conversation";
+        area->prepare(p, first, true);
+        area->prepare(p, second, false);
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        emit backend->attentionRequested({first, SessionAttention::Reason::Waiting});
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTRY_COMPARE(desktop.bodies.size(), 1);
+        delivered();
+        QVERIFY(desktop.bodies.first().contains(second.title));
+        area->focusSession(sessionKey(p.id, second.id));
+        QTRY_COMPARE(desktop.closed.size(), 1);
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTest::qWait(30);
+        QCOMPARE(desktop.bodies.size(), 1);
+        QWidget other;
+        other.show();
+        other.activateWindow();
+        QTRY_VERIFY(!window.isActiveWindow());
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTRY_COMPARE(desktop.bodies.size(), 2);
+        delivered();
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        QTRY_COMPARE(desktop.closed.size(), 2);
+        window.showMinimized();
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTRY_COMPARE(desktop.bodies.size(), 3);
+        delivered();
+    }
+    void notificationClicksRouteByIdentityAcrossFiltersAndHandleStaleTargets() {
+        QTemporaryDir data;
+        Fixture first, second;
+        auto a = first.profile(), b = second.profile();
+        b.id = "other-backend";
+        a.executable = b.executable = "/bin/true";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(a);
+            store.save(b);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
+        for (auto *backend : window.findChildren<Backend *>())
+            backend->connectServer();
+        QTRY_VERIFY(first.methods.contains("thread/read") &&
+                    second.methods.contains("thread/read"));
+        auto *notifications = window.findChild<Notifications *>();
+        auto *area = window.findChild<TerminalArea *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        auto *tree = window.findChild<QTreeView *>();
+        QTRY_COMPARE(visibleThreads(tree).size(), 2);
+        tabs->setCurrentIndex(int(SessionView::Running)); // Both sessions are hidden.
+        QCOMPARE(visibleThreads(tree).size(), 0);
+        emit notifications->openRequested(b.id, "thread-1", {});
+        QTRY_COMPARE(area->currentKey(), sessionKey(b.id, "thread-1"));
+        const auto existing = area->view(area->currentKey()).id;
+        emit notifications->openRequested(a.id, "thread-1", {});
+        QTRY_COMPARE(area->currentKey(), sessionKey(a.id, "thread-1"));
+        emit notifications->openRequested(b.id, "thread-1", {});
+        QCOMPARE(area->view(area->currentKey()).id, existing);
+        QCOMPARE(area->workspace().views.size(), 2);
+        emit notifications->openRequested("removed-backend", "thread-1", {});
+        QVERIFY(window.statusBar()->currentMessage().contains("unavailable"));
+        QCOMPARE(area->workspace().views.size(), 2);
+        first.readErrors["removed-session"] = "thread not found: removed-session";
+        emit notifications->openRequested(a.id, "removed-session", {});
+        QTRY_VERIFY(area->currentSession().clientIssue.contains("thread not found"));
+        QVERIFY(first.readIds.contains("removed-session"));
+        QCOMPARE(area->workspace().views.size(), 3); // Keep the verification error visible.
+        QVERIFY(!area->hasClient(sessionKey(a.id, "removed-session")));
+        window.close();
+    }
+    void notificationClickBeforeMetadataVerifiesTheSession_data() {
+        QTest::addColumn<QString>("failure");
+        QTest::newRow("available") << QString{};
+        QTest::newRow("removed") << "thread not found";
+        QTest::newRow("wrong-identity") << "Server returned metadata for a different session";
+    }
+    void notificationClickBeforeMetadataVerifiesTheSession() {
+        QFETCH(QString, failure);
+        QTemporaryDir data;
+        Fixture fixture;
+        fixture.delaySnapshot = fixture.delayRead = true;
+        auto p = fixture.profile();
+        p.executable = "/bin/true";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        auto *area = window.findChild<TerminalArea *>();
+        auto *notifications = window.findChild<Notifications *>();
+        QSignalSpy attention(backend, &Backend::attentionRequested);
+        QSignalSpy launches(window.findChild<OpeningCoordinator *>(),
+                            &OpeningCoordinator::launchRequested);
+        backend->connectServer();
+        QTRY_VERIFY(!fixture.snapshotId.isUndefined());
+        QVERIFY(backend->ready());
+        const QString id = "live-session";
+        const auto key = sessionKey(p.id, id);
+        fixture.notify(
+            "thread/status/changed",
+            {{"threadId", id},
+             {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
+        fixture.notify("thread/status/changed",
+                       {{"threadId", id}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_COMPARE(fixture.readIds, QStringList{id});
+        QCOMPARE(attention.size(), 0); // New alerts wait for classification now.
+        const auto metadataRead = fixture.readId;
+        QVERIFY(visibleThreads(window.findChild<QTreeView *>()).isEmpty());
+        QVERIFY(area->workspace().views.isEmpty());
+
+        // A previously delivered action must still verify its exact target even
+        // when the GUI has no cached metadata. Keep this routing regression separate
+        // from the backend's new notification eligibility check.
+        emit notifications->openRequested(p.id, id, {});
+        QTRY_COMPARE(area->workspace().views.size(), 1);
+        QTRY_COMPARE(fixture.readIds, (QStringList{id, id}));
+        const auto verificationRead = fixture.readId;
+        QVERIFY(verificationRead != metadataRead);
+        QCOMPARE(area->currentKey(), key);
+        const auto viewId = area->view(key).id;
+        QCOMPARE(launches.size(), 0);
+        QVERIFY(area->findChildren<KParts::ReadOnlyPart *>().isEmpty());
+        emit notifications->openRequested(p.id, id, {}); // Reuse the pending verification.
+        QCOMPARE(area->view(key).id, viewId);
+
+        if (failure == "thread not found")
+            fixture.reject(verificationRead, failure);
+        else
+            fixture.reply(verificationRead,
+                          {{"thread", fixture.thread(failure.isEmpty() ? id : "another-session")}});
+        if (failure.isEmpty()) {
+            QTRY_COMPARE(launches.size(), 1);
+            const auto verified = qvariant_cast<Session>(launches.first().at(2));
+            QCOMPARE(verified.id, id);
+            QCOMPARE(verified.backendId, p.id);
+            QCOMPARE(verified.cwd, "/work/project");
+            QCOMPARE(area->view(key).title, "Example");
+            QCOMPARE(area->view(key).cwd, "/work/project");
+        } else {
+            QTRY_VERIFY(area->currentSession().clientIssue.contains(failure));
+            QCOMPARE(launches.size(), 0);
+            QCOMPARE(area->view(key).disposition, ViewDisposition::Disconnected);
+            QVERIFY(area->findChildren<KParts::ReadOnlyPart *>().isEmpty());
+        }
+        emit notifications->openRequested(p.id, id, {});
+        QCOMPARE(area->view(key).id, viewId);
+        QCOMPARE(area->workspace().views.size(), 1);
+        QCOMPARE(fixture.readIds, (QStringList{id, id}));
+        QVERIFY(backend->ready());
+        window.close();
+    }
     void contextMenuNewTracksRenameStatusAndRestoresTheSameConversation() {
         QTemporaryDir data;
         Fixture fixture;
@@ -379,7 +608,9 @@ class WindowTests : public QObject {
         bool savedScreenshot = true;
         SettingsShown shown([&](SettingsDialog *dialog) {
             sawSettings = true;
-            dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(2);
+            auto *categories = dialog->findChild<QListWidget *>("settingsCategories");
+            categories->setCurrentItem(
+                categories->findItems("Keyboard Shortcuts", Qt::MatchExactly).first());
             if (!screenshots.isEmpty()) {
                 QApplication::processEvents();
                 savedScreenshot = dialog->grab().save(screenshots + "/keyboard-settings.png");
@@ -1100,7 +1331,9 @@ class WindowTests : public QObject {
             QVERIFY(dialog);
             QVERIFY(dialog->findChild<QCheckBox *>("hideUnsavedSetting")->isChecked());
             QVERIFY(!dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
-            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 3);
+            QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 4);
+            QVERIFY(dialog->findChild<QCheckBox *>("notificationsEnabled")->isChecked());
+            dialog->findChild<QCheckBox *>("notificationsEnabled")->setChecked(false);
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
             auto *buttons = dialog->findChild<QDialogButtonBox *>();
@@ -1117,7 +1350,9 @@ class WindowTests : public QObject {
                 dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(0);
                 QApplication::processEvents();
                 QVERIFY(dialog->grab().save(screenshots + "/settings-application.png"));
-                dialog->findChild<QListWidget *>("settingsCategories")->setCurrentRow(1);
+                auto *categories = dialog->findChild<QListWidget *>("settingsCategories");
+                categories->setCurrentItem(
+                    categories->findItems("Backends", Qt::MatchExactly).first());
                 QApplication::processEvents();
                 QVERIFY(dialog->grab().save(screenshots + "/settings.png"));
             }
@@ -1127,6 +1362,7 @@ class WindowTests : public QObject {
         settings.sync();
         QVERIFY(settings.value("backends/myCodex/showAllSessions").toBool());
         QVERIFY(!settings.value("hideUnsavedSessions").toBool());
+        QVERIFY(!settings.value("notifications/enabled", true).toBool());
         QCOMPARE(settings.value("application/localCodexExecutable").toString(),
                  "/local Codex/bin/codex");
         window.close();

@@ -356,6 +356,31 @@ class WorkspaceTests : public QObject {
         QTRY_COMPARE(c.pendingCount(), 0);
         QCOMPARE(b.count, 3);
     }
+    void explicitOpenRejectsUnsavedAndEphemeral_data() {
+        QTest::addColumn<bool>("ephemeral");
+        QTest::newRow("unsaved") << false;
+        QTest::newRow("ephemeral-with-history-mode") << true;
+    }
+    void explicitOpenRejectsUnsavedAndEphemeral() {
+        QFETCH(bool, ephemeral);
+        FakeBackend b(profile());
+        OpeningCoordinator c;
+        c.setSource(b.profile, &b);
+        b.connectServer();
+        QSignalSpy launched(&c, &OpeningCoordinator::launchRequested);
+        QSignalSpy states(&c, &OpeningCoordinator::stateChanged);
+        c.request(view(b.profile), false);
+        QTRY_COMPARE(b.reads.size(), 1);
+        const auto read = b.reads.takeFirst();
+        auto s = session(b.profile, read.id, false);
+        s.ephemeral = ephemeral;
+        if (ephemeral)
+            s.historyMode = "paginated";
+        emit b.sessionVerified(read.id, {}, read.token, s);
+        QCOMPARE(c.pendingCount(), 0);
+        QCOMPARE(launched.size(), 0);
+        QVERIFY(states.last()[1].toString().contains("no available saved history"));
+    }
     void identityAndContainerEvidence() {
         auto p = profile();
         p.kind = "mycodex";

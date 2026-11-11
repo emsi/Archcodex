@@ -212,6 +212,7 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         self.servers = []
         self.connections = set()
         self.event_fd = None
+        self.mark_routes = False
         for name in ('docker', 'ssh'):
             path = self.root / name
             path.write_text('#!' + sys.executable + '\n' +
@@ -222,11 +223,11 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         for number in range(2):
             cid = str(number + 1) * 64
             path = str(self.root / ('server-' + str(number)))
-            async def echo(reader, writer):
+            async def echo(reader, writer, number=number):
                 self.connections.add(writer)
                 try:
                     while block := await reader.read(16384):
-                        writer.write(block)
+                        writer.write(str(number + 1).encode() * len(block) if self.mark_routes else block)
                         await writer.drain()
                 except (ConnectionError, asyncio.CancelledError):
                     pass
@@ -248,13 +249,13 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         self.env = dict(os.environ, ARCHCODEX_TRANSPORT_FIXTURE=str(self.root),
                         PATH=str(self.root) + os.pathsep + os.environ.get('PATH', ''))
 
-    async def start(self, remote=True):
+    async def start(self, remote=True, count=2):
         self.proc = await asyncio.create_subprocess_exec(*transport.command('desktop'), self.token,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=self.env, limit=mux.JSON_LIMIT + 1)
         self.proc.stdin.write(mux.encoded({'hosts': [{'id': 'host', 'sshHost': 'fixture-host' if remote else ''}]}) + b'\n')
         await self.proc.stdin.drain()
-        return await self.inventory(lambda report: sum(len(c.get('endpoints', [])) for c in report.get('containers', [])) == 2)
+        return await self.inventory(lambda report: sum(len(c.get('endpoints', [])) for c in report.get('containers', [])) == count)
 
     async def inventory(self, predicate):
         async def read():
@@ -340,6 +341,31 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         path = report['containers'][0]['endpoints'][0]['localSocket']
         self.assertEqual(await self.roundtrip(path, b'local'), b'local')
         self.assertFalse(any(c['role'] == 'ssh' for c in self.commands()))
+
+    async def check_new_container_preserves_routes(self, remote):
+        # Echo alone cannot distinguish a wrong destination. Make each container
+        # identify itself, including after an inventory adds a new attachment.
+        self.mark_routes = True
+        full_state = json.loads((self.root / 'state.json').read_text())
+        initial = dict(full_state, containers=full_state['containers'][:1])
+        (self.root / 'state.json').write_text(json.dumps(initial))
+        report = await self.start(remote=remote, count=1)
+        first = report['containers'][0]['endpoints'][0]['localSocket']
+        self.assertEqual(await self.roundtrip(first, b'probe'), b'11111')
+        (self.root / 'state.json').write_text(json.dumps(full_state))
+        os.write(self.event_fd, b'{"Action":"start"}\n')
+        report = await self.inventory(lambda r: sum(bool(c.get('endpoints')) for c in r.get('containers', [])) == 2)
+        paths = {c['containerId']: c['endpoints'][0]['localSocket'] for c in report['containers']}
+        self.assertEqual(paths['1' * 64], first)
+        replies = await asyncio.gather(*(self.roundtrip(paths[str(n) * 64], b'probe')
+                                        for _ in range(10) for n in (1, 2)))
+        self.assertEqual(replies, [b'11111', b'22222'] * 10)
+
+    async def test_new_local_container_does_not_cross_existing_routes(self):
+        await self.check_new_container_preserves_routes(False)
+
+    async def test_new_remote_container_does_not_cross_existing_routes(self):
+        await self.check_new_container_preserves_routes(True)
 
     async def test_stalled_second_host_cannot_block_existing_host_or_shutdown(self):
         report = await self.start()

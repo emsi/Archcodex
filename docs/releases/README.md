@@ -61,11 +61,16 @@ history and preserve known limitations.
 
 ## Publishing another version
 
+Use the [local candidate and final-release process](process.md) for version
+allocation, build checks, receipts and test acceptance. The build and publication
+steps are separate; a local test-build request does not authorize publication.
+
 Issue fixes must first follow the dedicated-branch and PR-merge process in
 [AGENTS.md](../../AGENTS.md). Publishing a release does not bypass that process.
 
-1. Build and validate the version, recording the exact source commit and bundle
-   hash. Ensure the artifact's version matches its source and AppStream metadata.
+1. Select the already built and accepted final-version bundle and its
+   versioned `.BUILD-INFO.json` receipt. Ensure its hash, executable and AppStream version
+   match. Publication uses these exact bytes and must not rebuild the package.
 2. Add its catalog entry. Generate release notes using GitHub's
    `repos/emsi/Archcodex/releases/generate-notes` API, with explicit `tag_name`,
    `previous_tag_name` and the built source commit as `target_commitish`.

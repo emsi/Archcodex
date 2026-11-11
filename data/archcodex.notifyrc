@@ -1,0 +1,17 @@
+[Global]
+IconName=io.github.emsi.Archcodex
+Name=Archcodex
+Comment=Codex sessions
+DesktopEntry=io.github.emsi.Archcodex.desktop
+
+[Event/SessionWaiting]
+Name=Session waiting
+Comment=A running Codex session is waiting
+Action=Popup
+Urgency=Normal
+
+[Event/SessionQuestion]
+Name=Session question
+Comment=Codex needs your input
+Action=Popup
+Urgency=Normal
