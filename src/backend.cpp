@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "backend.h"
+#include "notificationlog.h"
 #include <QDateTime>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -9,6 +10,7 @@
 #include <utility>
 
 namespace Archcodex {
+Q_LOGGING_CATEGORY(notificationLog, "archcodex.notifications", QtWarningMsg)
 static QJsonArray sources() {
     return {"cli",
             "vscode",
@@ -60,6 +62,8 @@ CodexBackend::~CodexBackend() {
 void CodexBackend::shutdownProcess() {
     ++generation;
     liveTurns.clear();
+    unclassifiedAttention.clear();
+    attentionMetadataOverflow = false;
     initialized = false;
     listing = false;
     pending.clear();
@@ -322,15 +326,20 @@ void CodexBackend::message(const QJsonObject &m) {
         after.status = statuses[id];
         after.known = true;
         if (method == "thread/status/changed" && before.isRunning() && after.isWaiting())
-            emit attentionRequested({after, SessionAttention::Reason::Waiting});
-        if (method == "thread/closed")
+            requestAttention({after, SessionAttention::Reason::Waiting});
+        if (method == "thread/closed") {
             liveTurns.remove(id);
+            discardAttention(id);
+        }
     } else if (method == "thread/started") {
         const auto thread = p["thread"].toObject();
         const auto startedId = thread["id"].toString();
         observed.insert(startedId);
         loaded.insert(startedId);
-        if (thread["status"].isObject())
+        // A started/resumed snapshot may arrive after newer live status. Seed a
+        // previously unknown/reopened thread, but never rearm a delivered transition.
+        if (thread["status"].isObject() &&
+            (!statuses.contains(startedId) || statuses[startedId]["type"] == "notLoaded"))
             statuses[startedId] = thread["status"].toObject();
         upsert(thread, true);
     } else if (method == "thread/name/updated" || method == "thread/nameUpdated") {
@@ -346,6 +355,7 @@ void CodexBackend::message(const QJsonObject &m) {
         names.remove(id);
         activityRecency.remove(id);
         liveTurns.remove(id);
+        discardAttention(id);
         emit sessionRemoved(id);
     } else if (method == "thread/unarchived") {
         removed.remove(id);
@@ -380,8 +390,59 @@ void CodexBackend::message(const QJsonObject &m) {
         session.id = id;
         // Blocking questions are covered solely by the status transition. Do not
         // copy any question text or choices into the notification event.
-        emit attentionRequested({session, SessionAttention::Reason::Question});
+        requestAttention({session, SessionAttention::Reason::Question});
     }
+}
+void CodexBackend::requestAttention(const SessionAttention &event) {
+    const auto metadata = sessions.constFind(event.session.id);
+    if (metadata != sessions.cend()) {
+        if (metadata->ephemeral) {
+            qCDebug(notificationLog) << "suppress ephemeral" << profile.id << event.session.id;
+            return;
+        }
+        if (metadata->isSaved()) {
+            auto ready = event;
+            ready.session = *metadata;
+            ready.session.status = event.session.status;
+            ready.session.known = event.session.known;
+            qCDebug(notificationLog)
+                << "deliver" << profile.id << event.session.id << "reason" << int(event.reason);
+            emit attentionRequested(ready);
+            return;
+        }
+    }
+    // Status handling already schedules metadata reads for unknown/unsaved threads.
+    // Keep the occurrence until those reads classify it; never add notification I/O.
+    if (unclassifiedAttention.size() == 256) {
+        unclassifiedAttention.dequeue();
+        if (!attentionMetadataOverflow)
+            qWarning("Notification metadata backlog exceeded 256; oldest event discarded.");
+        attentionMetadataOverflow = true;
+    }
+    qCDebug(notificationLog) << "await metadata" << profile.id << event.session.id;
+    unclassifiedAttention.enqueue(event);
+}
+void CodexBackend::discardAttention(const QString &id) {
+    unclassifiedAttention.removeIf([&](const auto &event) { return event.session.id == id; });
+    if (unclassifiedAttention.isEmpty())
+        attentionMetadataOverflow = false;
+}
+void CodexBackend::resolveAttention(const QString &id) {
+    const auto metadata = sessions.value(id);
+    // An overlapping event already requested a fresh read. A first turn may have
+    // materialized history since the older read; wait for that existing refresh.
+    if (!metadata.isSaved() && !metadata.ephemeral && dirtyReads.contains(id))
+        return;
+    QList<SessionAttention> ready;
+    for (const auto &event : std::as_const(unclassifiedAttention))
+        if (event.session.id == id)
+            ready << event;
+    discardAttention(id);
+    if (metadata.isSaved()) {
+        for (const auto &event : ready)
+            requestAttention(event);
+    } else if (!ready.isEmpty())
+        qCDebug(notificationLog) << "suppress unsaved" << profile.id << id;
 }
 void CodexBackend::upsert(QJsonObject t, bool verified) {
     const auto id = t["id"].toString();
@@ -406,6 +467,10 @@ void CodexBackend::upsert(QJsonObject t, bool verified) {
         return;
     s.unavailable = !verified && sessions.value(id).unavailable;
     sessions[id] = s;
+    qCDebug(notificationLog) << "metadata" << profile.id << id << "sessionId"
+                             << t["sessionId"].toString().left(128) << "forkedFromId"
+                             << t["forkedFromId"].toString().left(128) << "saved" << s.isSaved();
+    resolveAttention(id);
     emit sessionChanged(s);
 }
 void CodexBackend::listPage(const QString &cursor) {
@@ -528,6 +593,7 @@ void CodexBackend::pumpReads() {
     }
 }
 void CodexBackend::readFailure(const QString &id, const QString &error) {
+    discardAttention(id);
     // These are the precise protocol errors emitted by the inspected server.
     // Authentication/transport/other failures are not evidence of a missing session.
     if (error != "thread not loaded: " + id && error != "thread not found: " + id)

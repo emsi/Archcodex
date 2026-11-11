@@ -17,6 +17,8 @@
 #include <QClipboard>
 #include <QComboBox>
 #include <QCryptographicHash>
+#include <QDBusConnection>
+#include <QDBusPendingCallWatcher>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QHelpEvent>
@@ -27,6 +29,7 @@
 #include <QMessageBox>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QSettings>
 #include <QStatusBar>
 #include <QTabBar>
@@ -100,9 +103,104 @@ class SettingsShown : public QObject {
 };
 } // namespace
 
+class WindowNotificationDaemon : public QObject {
+    Q_OBJECT
+    Q_CLASSINFO("D-Bus Interface", "org.freedesktop.Notifications")
+  public:
+    QStringList bodies;
+    QList<uint> closed;
+    uint nextId = 0;
+  public slots:
+    QStringList GetCapabilities() {
+        return {"actions", "body", "body-markup"};
+    }
+    QString GetServerInformation(QString &vendor, QString &version, QString &specification) {
+        vendor = "Archcodex tests";
+        version = "1";
+        specification = "1.2";
+        return "Window fixture";
+    }
+    uint Notify(const QString &, uint replaces, const QString &, const QString &,
+                const QString &body, const QStringList &, const QVariantMap &, int) {
+        bodies << body;
+        return replaces ? replaces : ++nextId;
+    }
+    void CloseNotification(uint id) {
+        closed << id;
+    }
+};
 class WindowTests : public QObject {
     Q_OBJECT
   private slots:
+    void onlyTheViewedTerminalIsSuppressed() {
+        auto bus = QDBusConnection::connectToBus(QDBusConnection::SessionBus,
+                                                 "window-notification-fixture");
+        WindowNotificationDaemon desktop;
+        QVERIFY(bus.registerService("org.freedesktop.Notifications"));
+        QVERIFY(bus.registerObject("/org/freedesktop/Notifications", &desktop,
+                                   QDBusConnection::ExportAllSlots));
+        const auto unregister = qScopeGuard([&] {
+            bus.unregisterObject("/org/freedesktop/Notifications");
+            bus.unregisterService("org.freedesktop.Notifications");
+            QDBusConnection::disconnectFromBus("window-notification-fixture");
+        });
+        const auto delivered = [&] {
+            // Receiving Notify in the fixture precedes the client's delivery
+            // acknowledgement. Fence that reply before simulating a later visit.
+            QDBusPendingCallWatcher barrier(QDBusConnection::sessionBus().asyncCall(
+                QDBusMessage::createMethodCall("org.freedesktop.Notifications",
+                                               "/org/freedesktop/Notifications",
+                                               "org.freedesktop.DBus.Peer", "Ping")));
+            QTRY_VERIFY(barrier.isFinished());
+            QVERIFY2(!barrier.isError(), qPrintable(barrier.error().message()));
+        };
+        QTemporaryDir data;
+        Fixture fixture;
+        auto p = fixture.profile();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        QVERIFY(backend);
+        backend->connectServer();
+        QTRY_VERIFY(backend->ready());
+        auto *area = window.findChild<TerminalArea *>();
+        const auto first = Session::fromThread(p.id, fixture.thread());
+        auto second = Session::fromThread(p.id, fixture.thread("second"));
+        second.title = "Second conversation";
+        area->prepare(p, first, true);
+        area->prepare(p, second, false);
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        emit backend->attentionRequested({first, SessionAttention::Reason::Waiting});
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTRY_COMPARE(desktop.bodies.size(), 1);
+        delivered();
+        QVERIFY(desktop.bodies.first().contains(second.title));
+        area->focusSession(sessionKey(p.id, second.id));
+        QTRY_COMPARE(desktop.closed.size(), 1);
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTest::qWait(30);
+        QCOMPARE(desktop.bodies.size(), 1);
+        QWidget other;
+        other.show();
+        other.activateWindow();
+        QTRY_VERIFY(!window.isActiveWindow());
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTRY_COMPARE(desktop.bodies.size(), 2);
+        delivered();
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        QTRY_COMPARE(desktop.closed.size(), 2);
+        window.showMinimized();
+        emit backend->attentionRequested({second, SessionAttention::Reason::Waiting});
+        QTRY_COMPARE(desktop.bodies.size(), 3);
+        delivered();
+    }
     void notificationClicksRouteByIdentityAcrossFiltersAndHandleStaleTargets() {
         QTemporaryDir data;
         Fixture first, second;
@@ -184,17 +282,16 @@ class WindowTests : public QObject {
              {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
         fixture.notify("thread/status/changed",
                        {{"threadId", id}, {"status", QJsonObject{{"type", "idle"}}}});
-        QTRY_COMPARE(attention.size(), 1);
         QTRY_COMPARE(fixture.readIds, QStringList{id});
+        QCOMPARE(attention.size(), 0); // New alerts wait for classification now.
         const auto metadataRead = fixture.readId;
         QVERIFY(visibleThreads(window.findChild<QTreeView *>()).isEmpty());
         QVERIFY(area->workspace().views.isEmpty());
 
-        // Metadata is still in flight when the user clicks the real event's target.
-        const auto target = qvariant_cast<SessionAttention>(attention.first().first()).session;
-        QCOMPARE(target.id, id);
-        QCOMPARE(target.backendId, p.id);
-        emit notifications->openRequested(target.backendId, target.id, {});
+        // A previously delivered action must still verify its exact target even
+        // when the GUI has no cached metadata. Keep this routing regression separate
+        // from the backend's new notification eligibility check.
+        emit notifications->openRequested(p.id, id, {});
         QTRY_COMPARE(area->workspace().views.size(), 1);
         QTRY_COMPARE(fixture.readIds, (QStringList{id, id}));
         const auto verificationRead = fixture.readId;

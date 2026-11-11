@@ -36,6 +36,7 @@ class Window : public QMainWindow {
     void connectionSummaryChanged();
 
   protected:
+    bool event(QEvent *event) override;
     void closeEvent(QCloseEvent *event) override;
 
   private:
@@ -89,9 +90,10 @@ class Window : public QMainWindow {
     QLabel *searchNotice, *terminalTitle, *connections;
     QPushButton *loadMore;
     QSplitter *splitter;
-    TerminalArea *terminal;
+    TerminalArea *terminal = nullptr;
     OpeningCoordinator *opening;
-    Notifications *notifications;
+    Notifications *notifications = nullptr;
+    void updateViewedSession();
     QToolButton *workspaceStatus;
     bool workspaceLoaded = false, workspaceWritable = false, workspaceSaving = false;
     bool closing = false;

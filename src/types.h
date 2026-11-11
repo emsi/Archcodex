@@ -58,6 +58,7 @@ struct Session {
     bool isRunning() const;
     bool isWaiting() const;
     bool isSaved() const;
+    bool inWorkdir(const QString &workdir) const;
     QString stateText() const;
     int attention() const;
     static Session fromThread(const QString &backend, const QJsonObject &thread);

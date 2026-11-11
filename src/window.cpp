@@ -5,6 +5,7 @@
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "launch.h"
+#include "notificationlog.h"
 #include "notifications.h"
 #include "opening.h"
 #include "sessionmodel.h"
@@ -377,6 +378,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     model->setHideUnsaved(hideUnsaved->isChecked());
     results->setHideUnsaved(hideUnsaved->isChecked());
     const bool workdirOnly = !settings.value("backends/myCodex/showAllSessions", false).toBool();
+    notifications->setMyCodexWorkdirOnly(workdirOnly);
     model->setMyCodexWorkdirOnly(workdirOnly);
     results->setMyCodexWorkdirOnly(workdirOnly);
     hideUnsaved->setToolTip(
@@ -465,7 +467,10 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     });
     connect(tree->selectionModel(), &QItemSelectionModel::currentChanged, this,
             [this] { updateCommandAvailability(); });
-    connect(terminal, &TerminalArea::currentChanged, this, [this] { updateCommandAvailability(); });
+    connect(terminal, &TerminalArea::currentChanged, this, [this] {
+        updateCommandAvailability();
+        updateViewedSession();
+    });
     connect(terminal, &TerminalArea::clientStateChanged, this,
             [this] { updateCommandAvailability(); });
     connect(this, &Window::connectionSummaryChanged, this, &Window::updateCommandAvailability);
@@ -643,6 +648,10 @@ void Window::error(const QString &text) {
     box.exec();
 }
 void Window::attach(const BackendProfile &p, bool start) {
+    notifications->withdrawBackend(p.id);
+    qCDebug(notificationLog) << "bind backend" << p.id << "container" << p.containerId << "epoch"
+                             << p.containerEpoch << "endpoint" << p.socketPath << "relay"
+                             << p.relaySocket;
     for (auto it = pendingForks.begin(); it != pendingForks.end();)
         if (it->startsWith(p.id + QChar(0x1f)))
             it = pendingForks.erase(it);
@@ -681,10 +690,13 @@ void Window::attach(const BackendProfile &p, bool start) {
         results->upsertMany(matches);
     });
     connect(b, &Backend::connectionChanged, this,
-            [this, id = p.id](const QString &text, bool ready) {
+            [this, b, id = p.id](const QString &text, bool ready) {
+                if (backends.value(id) != b)
+                    return;
                 connectionStates[id] = text;
                 connectionReady[id] = ready;
                 if (!ready) {
+                    notifications->withdrawBackend(id);
                     QList<Session> updates, matches;
                     for (auto it = sessions.begin(); it != sessions.end(); ++it)
                         if (it->backendId == id) {
@@ -712,10 +724,13 @@ void Window::attach(const BackendProfile &p, bool start) {
     connect(b, &Backend::sessionsChanged, this, &Window::applySessions);
     connect(b, &Backend::attentionRequested, this,
             [this, b, id = p.id](const SessionAttention &event) {
-                if (!closing && backends.value(id) == b && b->ready() && profiles.contains(id))
+                if (!closing && backends.value(id) == b && b->ready() && profiles.contains(id)) {
+                    updateViewedSession();
                     notifications->show(event, profiles[id]);
+                }
             });
     connect(b, &Backend::sessionRemoved, this, [this, id = p.id](const QString &thread) {
+        notifications->withdrawSession(id, thread);
         const auto key = sessionKey(id, thread);
         if (sessions.value(key).terminalOpen) {
             auto &s = sessions[key];
@@ -1495,6 +1510,7 @@ void Window::showSettings() {
                 settings.setValue("application/restoreOpenedTerminals", restore);
                 settings.setValue("notifications/enabled", notify);
                 notifications->setEnabled(notify);
+                notifications->setMyCodexWorkdirOnly(!showAll);
                 settings.sync();
                 configuredLocalCodex = localExecutable;
                 terminal->setLocalCodexExecutable(
@@ -1653,6 +1669,7 @@ void Window::connectionsDialog() {
             return;
         ignoredSockets.insert(
             profiles[id].isContainer() ? id : discoveredPaths.value(id, profiles[id].socketPath));
+        notifications->withdrawBackend(id);
         if (auto *b = backends.take(id)) {
             b->disconnectServer();
             b->deleteLater();
@@ -1806,6 +1823,8 @@ void Window::activate(const QModelIndex &index) {
 void Window::activateSession(const QString &backend, const QString &id, bool requireConnected) {
     const auto key = sessionKey(backend, id);
     if (terminal->focusSession(key)) {
+        if (requireConnected)
+            qCDebug(notificationLog) << "click reuses terminal" << backend << id;
         // A visit prioritizes a pending restore, but never restarts an exited client.
         const auto view = terminal->view(key);
         if (!terminal->hasClient(key) && view.disposition == ViewDisposition::Automatic)
@@ -1820,6 +1839,8 @@ void Window::activateSession(const QString &backend, const QString &id, bool req
     // Attention events can precede metadata. The IDs identify the target; cached
     // metadata only decorates its pending view. OpeningCoordinator verifies it live.
     auto session = sessions.value(key, searchSessions.value(key));
+    if (requireConnected)
+        qCDebug(notificationLog) << "click verifies new terminal" << backend << id;
     session.backendId = backend;
     session.id = id;
     openSession(backend, session);
@@ -2109,6 +2130,20 @@ void Window::showWorkspaceDetails() {
     refresh();
     dialog->resize(680, 420);
     dialog->show();
+}
+void Window::updateViewedSession() {
+    if (!notifications || !terminal)
+        return;
+    const auto session =
+        isVisible() && !isMinimized() && isActiveWindow() ? terminal->currentSession() : Session{};
+    notifications->setViewedSession(session.backendId, session.id);
+}
+bool Window::event(QEvent *event) {
+    const bool result = QMainWindow::event(event);
+    if (event->type() == QEvent::ActivationChange || event->type() == QEvent::WindowStateChange ||
+        event->type() == QEvent::Show || event->type() == QEvent::Hide)
+        updateViewedSession();
+    return result;
 }
 void Window::closeEvent(QCloseEvent *event) {
     freezeWorkspace();

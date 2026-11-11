@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "notifications.h"
+#include "notificationlog.h"
 #include <KNotification>
 #include <KWindowInfo>
 #include <KWindowSystem>
@@ -12,6 +13,7 @@
 #include <QFile>
 #include <QUuid>
 #include <QWidget>
+#include <utility>
 
 namespace Archcodex {
 static constexpr auto service = "org.freedesktop.portal.Desktop";
@@ -35,6 +37,36 @@ void Notifications::setEnabled(bool value) {
     if (!enabled)
         clear();
 }
+bool Notifications::inScope(const Session &session, const BackendProfile &profile) const {
+    return !profile.isContainer() || !myCodexWorkdirOnly ||
+           session.inWorkdir(profile.identity["containerWorkdir"].toString());
+}
+void Notifications::setMyCodexWorkdirOnly(bool value) {
+    myCodexWorkdirOnly = value;
+    const auto ids = order;
+    for (const auto &id : ids) {
+        const auto &target = targets[id];
+        if (!inScope(target.session, target.profile))
+            remove(id);
+    }
+}
+void Notifications::withdrawBackend(const QString &backend) {
+    const auto ids = order;
+    for (const auto &id : ids)
+        if (targets[id].profile.id == backend)
+            remove(id);
+}
+void Notifications::withdrawSession(const QString &backend, const QString &thread) {
+    const auto ids = order;
+    for (const auto &id : ids)
+        if (targets[id].profile.id == backend && targets[id].session.id == thread)
+            remove(id);
+}
+void Notifications::setViewedSession(const QString &backend, const QString &thread) {
+    viewedSession = backend.isEmpty() || thread.isEmpty() ? QString() : sessionKey(backend, thread);
+    if (!viewedSession.isEmpty())
+        withdrawSession(backend, thread);
+}
 void Notifications::clear() {
     const auto ids = order;
     for (const auto &id : ids)
@@ -44,6 +76,7 @@ void Notifications::remove(const QString &id) {
     if (!targets.contains(id))
         return;
     const auto target = targets.take(id);
+    qCDebug(notificationLog) << "withdraw popup" << id << target.profile.id << target.session.id;
     order.removeAll(id);
     if (portal) {
         auto message =
@@ -58,7 +91,8 @@ void Notifications::activate(const QString &id, const QString &token) {
         return;
     const auto target = targets[id];
     remove(id);
-    emit openRequested(target.backend, target.thread, token);
+    qCDebug(notificationLog) << "activate popup" << id << target.profile.id << target.session.id;
+    emit openRequested(target.profile.id, target.session.id, token);
 }
 void Notifications::portalAction(const QString &id, const QString &action,
                                  const QVariantList &parameters) {
@@ -85,16 +119,38 @@ void Notifications::show(const SessionAttention &event, const BackendProfile &pr
     if (!enabled || session.id.isEmpty() || session.backendId != profile.id ||
         (portal && pendingDeliveries >= 128))
         return;
-    // Keep at most one outstanding popup per session and a fixed total bound.
-    const auto ids = order;
-    for (const auto &id : ids)
-        if (targets[id].backend == profile.id && targets[id].thread == session.id)
-            remove(id);
-    if (order.size() >= 128)
-        remove(order.first());
-    const auto id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-    targets[id] = {profile.id, session.id, {}};
+    if (viewedSession == sessionKey(profile.id, session.id)) {
+        qCDebug(notificationLog) << "suppress viewed terminal" << profile.id << session.id;
+        return;
+    }
+    if (!session.isSaved() || !inScope(session, profile)) {
+        qCDebug(notificationLog) << "suppress popup" << profile.id << session.id << "saved"
+                                 << session.isSaved() << "in scope" << inScope(session, profile);
+        withdrawSession(profile.id, session.id);
+        return;
+    }
+    // Update in place: withdrawing/recreating makes bursts flicker and removes
+    // actionable notifications from the desktop history before the user can click.
+    QString id;
+    for (const auto &candidate : std::as_const(order))
+        if (targets[candidate].profile.id == profile.id &&
+            targets[candidate].session.id == session.id) {
+            id = candidate;
+            break;
+        }
+    if (id.isEmpty()) {
+        if (order.size() >= 128)
+            remove(order.first());
+        id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+    }
+    auto &target = targets[id];
+    target.session = session;
+    target.profile = profile;
+    target.delivery = ++nextDelivery;
+    order.removeAll(id);
     order << id;
+    qCDebug(notificationLog) << "show/update popup" << id << profile.id << session.id << "container"
+                             << profile.containerId << "endpoint" << profile.socketPath;
     const bool question = event.reason == SessionAttention::Reason::Question;
     const QString title = question ? "Codex needs your input" : "Codex is waiting";
     const QString name = session.title.isEmpty() ? "Session " + session.id.left(12) : session.title;
@@ -112,16 +168,24 @@ void Notifications::show(const SessionAttention &event, const BackendProfile &pr
         message << id << properties;
         auto *watcher = new QDBusPendingCallWatcher(bus.asyncCall(message, 5000), this);
         ++pendingDeliveries;
-        connect(watcher, &QDBusPendingCallWatcher::finished, this, [this, watcher, id] {
-            --pendingDeliveries;
-            const QDBusPendingReply<> reply = *watcher;
-            if (reply.isError()) {
-                qWarning() << "Desktop notification failed:" << reply.error().name();
-                targets.remove(id);
-                order.removeAll(id);
-            }
-            watcher->deleteLater();
-        });
+        connect(watcher, &QDBusPendingCallWatcher::finished, this,
+                [this, watcher, id, delivery = target.delivery] {
+                    --pendingDeliveries;
+                    const QDBusPendingReply<> reply = *watcher;
+                    if (reply.isError()) {
+                        qWarning() << "Desktop notification failed:" << reply.error().name();
+                        // An older failed send must not erase a newer successful update.
+                        if (targets.contains(id) && targets[id].delivery == delivery)
+                            remove(id);
+                    }
+                    watcher->deleteLater();
+                });
+        return;
+    }
+    if (target.native) {
+        // KNotification setters schedule an update to the existing notification.
+        target.native->setTitle(title);
+        target.native->setText(body.toHtmlEscaped().replace('\n', "<br/>"));
         return;
     }
     auto *notification = new KNotification(question ? "SessionQuestion" : "SessionWaiting");
@@ -130,7 +194,7 @@ void Notifications::show(const SessionAttention &event, const BackendProfile &pr
     notification->setTitle(title);
     notification->setText(body.toHtmlEscaped().replace('\n', "<br/>"));
     notification->setIconName("io.github.emsi.Archcodex");
-    targets[id].native = notification;
+    target.native = notification;
     const auto open = [this, id, notification] {
         activate(id, notification->xdgActivationToken());
     };

@@ -62,12 +62,9 @@ bool SessionModel::visible(const Session &s) const {
     // setting excludes their history or the client has exited.
     if (view == SessionView::Opened)
         return s.terminalOpen;
-    if (myCodexWorkdirOnly && containerWorkdirs.contains(s.backendId)) {
-        const auto workdir = containerWorkdirs.value(s.backendId);
-        const auto path = normalized(s.cwd);
-        if (workdir.isEmpty() || path.isEmpty() || !within(path, workdir))
-            return false;
-    }
+    if (myCodexWorkdirOnly && containerWorkdirs.contains(s.backendId) &&
+        !s.inWorkdir(containerWorkdirs.value(s.backendId)))
+        return false;
     if (!s.terminalOpen && hideUnsaved && (s.unavailable || (s.persistenceKnown && !s.isSaved())))
         return false;
     switch (view) {

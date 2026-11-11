@@ -93,7 +93,11 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
     help(notifications,
          "Notify when a running session becomes waiting, or when a server delivers a live "
          "structured asynchronous question. Question text and answer choices are kept out of "
-         "notifications. Click a notification to open its session.\n\n"
+         "notifications. Alerts require saved conversation metadata; myCodex alerts follow "
+         "the working-directory setting under Backends. The selected terminal stays quiet while "
+         "Archcodex is visible and active. Click a notification to open its session. "
+         "Repeated alerts update the existing notification; popup duration follows your desktop "
+         "settings.\n\n"
          "Some servers do not broadcast asynchronous questions to observers. Those questions "
          "cannot notify unless the session also becomes waiting. Notification availability "
          "and window activation depend on your desktop settings.");
@@ -105,7 +109,8 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
     backends->addWidget(showAllMyCodexSessions);
     help(backends,
          "By default, each local or remote myCodex server lists sessions in its container's "
-         "WORKDIR and subdirectories. This applies to history/activity tabs and search results. "
+         "WORKDIR and subdirectories. This applies to history/activity tabs, search results and "
+         "notifications. "
          "Opened always lists all open terminal views. "
          "Other shared-history sessions stay hidden until you enable this option.\n\n"
          "Shared-history sessions can be opened only where Archcodex has already observed them "

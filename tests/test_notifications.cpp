@@ -3,8 +3,10 @@
 #include <KWindowInfo>
 #include <KX11Extras>
 #include <QDBusArgument>
+#include <QDBusContext>
 #include <QDBusMetaType>
 #include <QDBusPendingCallWatcher>
+#include <QDBusPendingReply>
 #include <QDir>
 #include <QFile>
 #include <QSocketNotifier>
@@ -15,15 +17,22 @@
 #include <xcb/xcb.h>
 using namespace Archcodex;
 
-class Portal : public QObject {
+class Portal : public QObject, protected QDBusContext {
     Q_OBJECT
     Q_CLASSINFO("D-Bus Interface", "org.freedesktop.portal.Notification")
   public:
     QList<QPair<QString, QVariantMap>> added;
     QStringList removed;
+    bool delayNext = false;
+    QList<QDBusMessage> delayed;
   public slots:
     void AddNotification(const QString &id, const QVariantMap &properties) {
         added.append({id, properties});
+        if (delayNext) {
+            delayNext = false;
+            setDelayedReply(true);
+            delayed << message();
+        }
     }
     void RemoveNotification(const QString &id) {
         removed << id;
@@ -38,6 +47,7 @@ class Desktop : public QObject {
     uint lastId = 0;
     QString body;
     QStringList actions;
+    QList<uint> replacements;
   public slots:
     QStringList GetCapabilities() {
         return {"actions", "body", "body-markup"};
@@ -48,11 +58,12 @@ class Desktop : public QObject {
         specification = "1.2";
         return "Fixture";
     }
-    uint Notify(const QString &, uint, const QString &, const QString &, const QString &text,
-                const QStringList &buttons, const QVariantMap &, int) {
+    uint Notify(const QString &, uint replaces, const QString &, const QString &,
+                const QString &text, const QStringList &buttons, const QVariantMap &, int) {
         body = text;
         actions = buttons;
-        return ++lastId;
+        replacements << replaces;
+        return replaces ? replaces : ++lastId;
     }
     void CloseNotification(uint) {}
   signals:
@@ -64,11 +75,16 @@ class NotificationsTests : public QObject {
     Portal portal;
     Desktop desktop;
     QDBusConnection bus = QDBusConnection::sessionBus();
+    QDBusConnection serviceBus =
+        QDBusConnection::connectToBus(QDBusConnection::SessionBus, "notification-fixture");
     SessionAttention event() {
         SessionAttention result;
         result.session.backendId = "backend";
         result.session.id = "session";
         result.session.title = "Named session <test>";
+        result.session.cwd = "/work/project";
+        result.session.rolloutPath = "/saved/session.jsonl";
+        result.session.persistenceKnown = true;
         result.reason = SessionAttention::Reason::Question;
         return result;
     }
@@ -81,16 +97,24 @@ class NotificationsTests : public QObject {
   private slots:
     void initTestCase() {
         QVERIFY(bus.isConnected());
-        QVERIFY(bus.registerService("org.freedesktop.portal.Desktop"));
-        QVERIFY(bus.registerObject("/org/freedesktop/portal/desktop", &portal,
-                                   QDBusConnection::ExportAllSlots |
-                                       QDBusConnection::ExportAllSignals));
-        QVERIFY(bus.registerService("org.freedesktop.Notifications"));
-        QVERIFY(bus.registerObject("/org/freedesktop/Notifications", &desktop,
-                                   QDBusConnection::ExportAllSlots |
-                                       QDBusConnection::ExportAllSignals));
+        QVERIFY(serviceBus.isConnected());
+        QVERIFY(serviceBus.registerService("org.freedesktop.portal.Desktop"));
+        QVERIFY(serviceBus.registerObject("/org/freedesktop/portal/desktop", &portal,
+                                          QDBusConnection::ExportAllSlots |
+                                              QDBusConnection::ExportAllSignals));
+        QVERIFY(serviceBus.registerService("org.freedesktop.Notifications"));
+        QVERIFY(serviceBus.registerObject("/org/freedesktop/Notifications", &desktop,
+                                          QDBusConnection::ExportAllSlots |
+                                              QDBusConnection::ExportAllSignals));
     }
     void init() {
+        // Drain withdrawals from the preceding test across the separate bus
+        // connections before resetting counters for this test.
+        QDBusPendingCallWatcher barrier(bus.asyncCall(QDBusMessage::createMethodCall(
+            "org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
+            "org.freedesktop.DBus.Peer", "Ping")));
+        QTRY_VERIFY(barrier.isFinished());
+        QVERIFY(!QDBusPendingReply<>(barrier).isError());
         portal.added.clear();
         portal.removed.clear();
     }
@@ -120,7 +144,7 @@ class NotificationsTests : public QObject {
         QCOMPARE(open.size(), 1);
         QTRY_VERIFY(portal.removed.contains(id));
     }
-    void replacementDisableAndShutdownWithdrawNotifications() {
+    void updatesReuseIdentityAndDisableAndShutdownWithdraw() {
         QString second;
         {
             Notifications notifications(true, bus);
@@ -131,8 +155,8 @@ class NotificationsTests : public QObject {
             notifications.show(event(), profile());
             QTRY_COMPARE(portal.added.size(), 2);
             second = portal.added.last().first;
-            QTRY_VERIFY(portal.removed.contains(first));
-            emit portal.ActionInvoked(first, "open", {});
+            QCOMPARE(second, first);
+            QVERIFY(portal.removed.isEmpty());
             notifications.setEnabled(false);
             notifications.show(event(), profile());
             QTRY_VERIFY(portal.removed.contains(second));
@@ -145,6 +169,129 @@ class NotificationsTests : public QObject {
             second = portal.added.last().first;
         }
         QTRY_VERIFY(portal.removed.contains(second));
+    }
+    void containerScopeAndActionsStayBoundToTheirSource() {
+        Notifications notifications(true, bus);
+        QSignalSpy open(&notifications, &Notifications::openRequested);
+        auto a = profile(), b = profile();
+        a.id = "container-a";
+        b.id = "container-b";
+        a.kind = b.kind = "mycodex";
+        a.identity["containerWorkdir"] = "/work/a";
+        b.identity["containerWorkdir"] = "/work/b";
+        auto attention = event();
+        attention.session.id = "shared-history-id";
+        attention.session.cwd = "/work/a/sub";
+        attention.session.backendId = a.id;
+        notifications.show(attention, a);
+        QTRY_COMPARE(portal.added.size(), 1);
+        const auto aPopup = portal.added.last().first;
+        attention.session.backendId = b.id;
+        notifications.show(attention, b); // Same shared record, wrong container WORKDIR.
+        attention.session.cwd = "/work/b-other";
+        notifications.show(attention, b); // Path-component boundary, not a string prefix.
+        attention.session.cwd.clear();
+        notifications.show(attention, b);
+        QTest::qWait(20);
+        QCOMPARE(portal.added.size(), 1);
+        attention.session.id = "own-b";
+        attention.session.cwd = "/work/b";
+        notifications.show(attention, b);
+        QTRY_COMPARE(portal.added.size(), 2);
+        const auto bPopup = portal.added.last().first;
+        notifications.setMyCodexWorkdirOnly(false);
+        attention.session.id = "shared-history-id";
+        attention.session.cwd = "/work/a/sub";
+        notifications.show(attention, b);
+        QTRY_COMPARE(portal.added.size(), 3);
+        const auto foreignPopup = portal.added.last().first;
+        QVERIFY(foreignPopup != aPopup);
+        notifications.setMyCodexWorkdirOnly(true);
+        QTRY_VERIFY(portal.removed.contains(foreignPopup));
+        emit portal.ActionInvoked(foreignPopup, "open", {});
+        emit portal.ActionInvoked(aPopup, "open", {});
+        emit portal.ActionInvoked(bPopup, "open", {});
+        QTRY_COMPARE(open.size(), 2);
+        QCOMPARE(open[0][0].toString(), a.id);
+        QCOMPARE(open[0][1].toString(), "shared-history-id");
+        QCOMPARE(open[1][0].toString(), b.id);
+        QCOMPARE(open[1][1].toString(), "own-b");
+    }
+    void unsavedTargetsAndWithdrawnBackendsCannotActivate() {
+        Notifications notifications(true, bus);
+        QSignalSpy open(&notifications, &Notifications::openRequested);
+        auto attention = event();
+        attention.session.ephemeral = true;
+        notifications.show(attention, profile());
+        attention.session.ephemeral = false;
+        attention.session.rolloutPath.clear();
+        notifications.show(attention, profile());
+        QTest::qWait(20);
+        QVERIFY(portal.added.isEmpty());
+        notifications.show(event(), profile());
+        QTRY_COMPARE(portal.added.size(), 1);
+        const auto id = portal.added.last().first;
+        notifications.withdrawBackend(profile().id);
+        QTRY_VERIFY(portal.removed.contains(id));
+        emit portal.ActionInvoked(id, "open", {});
+        QTest::qWait(20);
+        QVERIFY(open.isEmpty());
+    }
+    void viewedTerminalIsQuietButOtherSourcesAndBackgroundStillNotify() {
+        Notifications notifications(true, bus);
+        notifications.show(event(), profile());
+        QTRY_COMPARE(portal.added.size(), 1);
+        const auto old = portal.added.last().first;
+        notifications.setViewedSession("backend", "session");
+        QTRY_VERIFY(portal.removed.contains(old));
+        notifications.show(event(), profile());
+        auto background = event();
+        background.session.id = "another-open-terminal";
+        notifications.show(background, profile());
+        auto other = profile();
+        other.id = "other-backend";
+        background.session.id = "session";
+        background.session.backendId = other.id;
+        notifications.show(background, other);
+        QTRY_COMPARE(portal.added.size(), 3);
+        notifications.setViewedSession({}, {}); // Window is hidden, minimized or inactive.
+        notifications.show(event(), profile());
+        QTRY_COMPARE(portal.added.size(), 4);
+    }
+    void olderFailedSendCannotEraseUpdatedPopup() {
+        Notifications notifications(true, bus);
+        QSignalSpy open(&notifications, &Notifications::openRequested);
+        portal.delayNext = true;
+        notifications.show(event(), profile());
+        QTRY_COMPARE(portal.delayed.size(), 1);
+        notifications.show(event(), profile());
+        QTRY_COMPARE(portal.added.size(), 2);
+        QCOMPARE(portal.added[0].first, portal.added[1].first);
+        QTRY_COMPARE(notifications.findChildren<QDBusPendingCallWatcher *>().size(), 1);
+        QTest::ignoreMessage(QtWarningMsg,
+                             "Desktop notification failed: \"org.freedesktop.DBus.Error.Failed\"");
+        QVERIFY(serviceBus.send(portal.delayed.takeFirst().createErrorReply(
+            "org.freedesktop.DBus.Error.Failed", "Delayed first send failed")));
+        QTRY_VERIFY(notifications.findChildren<QDBusPendingCallWatcher *>().isEmpty());
+        QVERIFY(portal.removed.isEmpty());
+        emit portal.ActionInvoked(portal.added.last().first, "open", {});
+        QTRY_COMPARE(open.size(), 1);
+    }
+    void nativeUpdatesReplaceExistingDesktopNotification() {
+        Notifications notifications(false, bus);
+        QSignalSpy open(&notifications, &Notifications::openRequested);
+        const auto before = desktop.replacements.size();
+        notifications.show(event(), profile());
+        QTRY_COMPARE(desktop.replacements.size(), before + 1);
+        const auto id = desktop.lastId;
+        auto attention = event();
+        attention.session.title = "Updated title";
+        notifications.show(attention, profile());
+        QTRY_COMPARE(desktop.replacements.size(), before + 2);
+        QCOMPARE(desktop.replacements.last(), id);
+        QCOMPARE(desktop.body.count("Updated title"), 1);
+        emit desktop.ActionInvoked(id, "default");
+        QTRY_COMPARE(open.size(), 1);
     }
     void olderPortalDefaultActionWorksWithoutToken() {
         Notifications notifications(true, bus);

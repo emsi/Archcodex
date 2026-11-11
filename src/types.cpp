@@ -86,6 +86,13 @@ bool Session::isSaved() const {
     // Paginated history lives in the server's store and need not have a rollout file.
     return !ephemeral && !unavailable && (!rolloutPath.isEmpty() || historyMode == "paginated");
 }
+bool Session::inWorkdir(const QString &workdir) const {
+    // These are server paths: never resolve them against the desktop filesystem.
+    if (!QDir::isAbsolutePath(cwd) || !QDir::isAbsolutePath(workdir))
+        return false;
+    const auto path = QDir::cleanPath(cwd), root = QDir::cleanPath(workdir);
+    return path == root || path.startsWith(root == "/" ? "/" : root + "/");
+}
 bool Session::isActive() const {
     // Runtime presence and turn activity are different. Preserve last-known
     // presence while disconnected, but never claim a current running/waiting state.

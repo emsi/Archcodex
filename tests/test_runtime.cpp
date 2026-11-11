@@ -117,7 +117,13 @@ class RuntimeTests : public QObject {
         QTest::qWait(100);
         QCOMPARE(events.size(), count);
     }
+    void transitionsBeforeMetadataReadsAreNotLost_data() {
+        QTest::addColumn<QString>("storage");
+        for (const auto &value : {"saved", "paginated", "ephemeral", "unsaved"})
+            QTest::newRow(value) << QString(value);
+    }
     void transitionsBeforeMetadataReadsAreNotLost() {
+        QFETCH(QString, storage);
         Fixture f;
         f.delayRead = true;
         f.delaySnapshot = true;
@@ -130,8 +136,111 @@ class RuntimeTests : public QObject {
                   {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
         f.notify("thread/status/changed",
                  {{"threadId", "new-live-thread"}, {"status", QJsonObject{{"type", "idle"}}}});
+        QTRY_COMPARE(f.readIds.size(), 1);
+        QCOMPARE(events.size(), 0);
+        const auto firstRead = f.readId;
+        auto thread = f.thread("new-live-thread");
+        thread["path"] = QJsonValue::Null;
+        // An older read can precede first-turn persistence. The overlapping idle
+        // event already queued a refresh; do not discard the occurrence early.
+        f.reply(firstRead, {{"thread", thread}});
+        QTRY_COMPARE(f.readIds.size(), 2);
+        QCOMPARE(events.size(), 0);
+        thread["sessionId"] = "shared-tree";
+        thread["forkedFromId"] = "ancestor";
+        if (storage == "saved")
+            thread["path"] = "/saved/fork.jsonl";
+        if (storage == "paginated" || storage == "ephemeral")
+            thread["historyMode"] = "paginated";
+        thread["ephemeral"] = storage == "ephemeral";
+        QSignalSpy metadata(&b, &Backend::sessionChanged);
+        f.reply(f.readId, {{"thread", thread}});
+        QTRY_VERIFY(!metadata.isEmpty());
+        const bool saved = storage == "saved" || storage == "paginated";
+        QCOMPARE(events.size(), saved ? 1 : 0);
+        if (saved) {
+            const auto event = qvariant_cast<SessionAttention>(events.first()[0]);
+            QCOMPARE(event.session.id, "new-live-thread");
+            QCOMPARE(event.session.backendId, b.profile.id);
+            QCOMPARE(event.session.cwd, "/work/project");
+            QVERIFY(event.session.isSaved());
+        }
+        QCOMPARE(f.readIds.size(), 2); // Only the existing inventory refreshes.
+        QVERIFY(!f.methods.contains("thread/resume"));
+        QVERIFY(!f.methods.contains("thread/items/list"));
+    }
+    void startedSnapshotDoesNotRearmWaiting() {
+        Fixture f;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested), metadata(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(!metadata.isEmpty());
+        const auto status = [&](const QString &type) {
+            f.notify("thread/status/changed",
+                     {{"threadId", "thread-1"},
+                      {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+        };
+        status("active");
+        status("idle");
         QTRY_COMPARE(events.size(), 1);
-        QCOMPARE(qvariant_cast<SessionAttention>(events.first()[0]).session.id, "new-live-thread");
+        auto snapshot = f.thread();
+        snapshot["status"] = QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        f.notify("thread/started", {{"thread", snapshot}});
+        status("idle");
+        QTest::qWait(30);
+        QCOMPARE(events.size(), 1);
+        status("active");
+        status("idle");
+        QTRY_COMPARE(events.size(), 2);
+        f.notify("thread/closed", {{"threadId", "thread-1"}});
+        f.notify("thread/started", {{"thread", f.thread()}});
+        QTRY_VERIFY(qvariant_cast<Session>(metadata.last()[0]).isWaiting());
+        QCOMPARE(events.size(), 2);
+    }
+    void pendingAttentionIsBoundedAndInvalidated_data() {
+        QTest::addColumn<QString>("outcome");
+        for (const auto &value : {"saved", "failure", "archived", "closed", "disconnect"})
+            QTest::newRow(value) << QString(value);
+    }
+    void pendingAttentionIsBoundedAndInvalidated() {
+        QFETCH(QString, outcome);
+        Fixture f;
+        f.delaySnapshot = f.delayRead = true;
+        LocalBackend b(f.profile(), BRIDGE_PATH);
+        QSignalSpy events(&b, &Backend::attentionRequested), metadata(&b, &Backend::sessionChanged);
+        b.connectServer();
+        QTRY_VERIFY(b.ready());
+        QTest::ignoreMessage(QtWarningMsg,
+                             "Notification metadata backlog exceeded 256; oldest event discarded.");
+        for (int i = 0; i < 300; ++i) {
+            for (const auto &type : {"active", "idle"})
+                f.notify("thread/status/changed",
+                         {{"threadId", "pending"},
+                          {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
+        }
+        QTRY_COMPARE(f.readIds.size(), 1);
+        // Fence all preceding notifications through an event on this same socket.
+        f.notify("thread/started", {{"thread", f.thread("fence")}});
+        QTRY_VERIFY(!metadata.isEmpty());
+        QCOMPARE(events.size(), 0);
+        if (outcome == "disconnect") {
+            b.disconnectServer();
+            b.connectServer();
+            QTRY_VERIFY(b.ready());
+            f.notify("thread/started", {{"thread", f.thread("pending")}});
+        } else {
+            if (outcome == "archived" || outcome == "closed")
+                f.notify("thread/" + outcome, {{"threadId", "pending"}});
+            if (outcome == "failure")
+                f.reject(f.readId, "Metadata unavailable");
+            else
+                f.reply(f.readId, {{"thread", f.thread("pending")}});
+            QTRY_COMPARE(f.readIds.size(), 2);
+            f.reply(f.readId, {{"thread", f.thread("pending")}});
+        }
+        QTest::qWait(30);
+        QCOMPARE(events.size(), outcome == "saved" ? 256 : 0);
+        QVERIFY(!f.methods.contains("thread/resume"));
     }
     void blockedFacadeRetainsTransitionsButReconnectDiscardsThem() {
         Fixture f;

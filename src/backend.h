@@ -80,6 +80,11 @@ class CodexBackend : public Backend {
     QByteArray buffer, stderrTail;
     QHash<qint64, Pending> pending;
     QHash<QString, QJsonObject> statuses;
+    QQueue<SessionAttention> unclassifiedAttention;
+    bool attentionMetadataOverflow = false;
+    void requestAttention(const SessionAttention &event);
+    void resolveAttention(const QString &id);
+    void discardAttention(const QString &id);
     QHash<QString, QString> names;
     QHash<QString, qint64> activityRecency;
     QSet<QString> forking;
