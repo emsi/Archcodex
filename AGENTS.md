@@ -4,3 +4,13 @@
 
 ## Document decisions and divergences in both the issue and PR
 
+## Local test builds and public releases
+
+Follow [the release process](docs/releases/process.md). `VERSION` is the single
+version source. Package only clean committed source; use a new `-rc.N` candidate
+number for each test delivery and retain its local `test/v...` tag and build receipt.
+Building or testing does not authorize pushing, creating a GitHub draft, or
+publishing. Publish only on an explicit release request, using the already verified
+final-version bundle and GitHub-generated notes. Never push `test/*` tags, overwrite
+a distributed artifact, or rebuild a bundle as part of publication.
+

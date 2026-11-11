@@ -183,7 +183,7 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-The current **0.8.1** source supports existing local Unix-socket
+The current source supports existing local Unix-socket
 app-servers and local or SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
 to non-container app-servers remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.
@@ -209,11 +209,15 @@ cd Archcodex
 ```
 
 The script keeps build runtimes in a separate `.build/flatpak` installation and
-produces the bundle and checksums in `dist/`. On x86_64:
+reads the committed `VERSION`, and produces the bundle, checksums and source
+receipt in `dist/VERSION/`. Builds require clean committed source and an unused
+version; see the [candidate and release process](docs/releases/process.md).
+For the current x86_64 candidate:
 
 ```sh
-sha256sum -c dist/SHA256SUMS
-flatpak install --user --or-update ./dist/Archcodex-0.8.1-x86_64.flatpak
+cd "dist/$(cat VERSION)"
+sha256sum -c SHA256SUMS
+flatpak install --user --or-update ./Archcodex-*-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
