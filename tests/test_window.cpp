@@ -5,6 +5,7 @@
 #include "fixture.h"
 #include "notifications.h"
 #include "opening.h"
+#include "ptyprobe.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
@@ -13,6 +14,7 @@
 #include "worker.h"
 #include <KCommandBar>
 #include <KShortcutsEditor>
+#include <KSqueezedTextLabel>
 #include <QAction>
 #include <QCheckBox>
 #include <QClipboard>
@@ -32,6 +34,7 @@
 #include <QPushButton>
 #include <QScopeGuard>
 #include <QSettings>
+#include <QSplitter>
 #include <QStatusBar>
 #include <QTabBar>
 #include <QToolButton>
@@ -134,6 +137,150 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void terminalSwitchingPreservesPtySize() {
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        QTemporaryDir data;
+        BackendProfile p{"pty",
+                         "myCodex · long-container-name · remote.example.test · Shared",
+                         "local-unix",
+                         "/unused",
+                         probe.executable(),
+                         false};
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.resize(1100, 700);
+        window.show();
+        window.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *area = window.findChild<TerminalArea *>();
+        auto *tree = window.findChild<QTreeView *>();
+        auto *tabs = window.findChild<QTabBar *>();
+        tabs->setCurrentIndex(int(SessionView::Opened));
+        auto a = Session::fromThread(p.id, {{"id", "short"}, {"name", "Short"}, {"cwd", "/work"}});
+        auto b = Session::fromThread(p.id,
+                                     {{"id", "long"},
+                                      {"name", QString("A long session title ").repeated(12)},
+                                      {"cwd", "/work/" + QString("nested-project/").repeated(10)}});
+        QString error;
+        QVERIFY2(area->open(p, a, &error), qPrintable(error));
+        auto *first = area->findChildren<KParts::ReadOnlyPart *>().last();
+        QTRY_VERIFY(!probe.records(a.id).isEmpty());
+        QVERIFY2(area->open(p, b, &error), qPrintable(error));
+        auto *second = area->findChildren<KParts::ReadOnlyPart *>().last();
+        QTRY_VERIFY(!probe.records(b.id).isEmpty());
+        // Let queued Konsole display/layout work finish, then acknowledge input
+        // through each PTY. This bounded observation period is test-only.
+        const auto checkpoint = [&](KParts::ReadOnlyPart *part, const QString &id) {
+            QTest::qWait(100);
+            const auto count = probe.records(id).size();
+            PtyProbe::send(part);
+            QTRY_VERIFY(probe.records(id).size() > count);
+            QCOMPARE(probe.records(id).last().toObject()["event"].toString(), "checkpoint");
+        };
+        checkpoint(first, a.id);
+        checkpoint(second, b.id);
+        const auto aSize = PtyProbe::size(probe.records(a.id).last());
+        const auto bSize = PtyProbe::size(probe.records(b.id).last());
+        QVERIFY(aSize.width() > 10 && aSize.height() > 5);
+        for (const auto &id : {a.id, b.id})
+            for (const auto &record : probe.records(id)) {
+                QCOMPARE(PtyProbe::size(record), aSize);
+                QVERIFY(record.toObject()["event"] != "resize");
+            }
+        const auto unchanged = [&](const QString &id, qsizetype since, QSize size) {
+            const auto records = probe.records(id);
+            for (qsizetype i = since; i < records.size(); ++i) {
+                QCOMPARE(PtyProbe::size(records[i]), size);
+                QVERIFY2(records[i].toObject()["event"] != "resize",
+                         QJsonDocument(records).toJson(QJsonDocument::Compact).constData());
+            }
+        };
+        QSignalSpy focused(area, &TerminalArea::sessionFocused);
+        for (int i = 0; i < 4; ++i) {
+            const auto aCount = probe.records(a.id).size();
+            const auto bCount = probe.records(b.id).size();
+            // Projects activation must reuse the terminal, select its row and
+            // record one visit; holding Ctrl+Tab must leave that view untouched.
+            const auto index = nodeWithKey(tree, sessionKey(p.id, a.id));
+            QVERIFY(index.isValid());
+            tree->setCurrentIndex(index);
+            tree->setFocus();
+            QTest::keyClick(tree, Qt::Key_Return);
+            QCOMPARE(area->currentKey(), sessionKey(p.id, a.id));
+            QTRY_VERIFY(area->isAncestorOf(QApplication::focusWidget()));
+            checkpoint(first, a.id);
+            const auto recent = area->workspace().recent;
+            QKeyEvent tab(QEvent::KeyPress, Qt::Key_Tab, Qt::ControlModifier);
+            QKeyEvent shortcut(QEvent::ShortcutOverride, Qt::Key_Tab, Qt::ControlModifier);
+            QApplication::sendEvent(QApplication::focusWidget(), &shortcut);
+            QApplication::sendEvent(QApplication::focusWidget(), &tab);
+            QCOMPARE(area->currentKey(), sessionKey(p.id, a.id));
+            QCOMPARE(area->workspace().recent, recent);
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier);
+            QApplication::sendEvent(QApplication::focusWidget(), &release);
+            QCOMPARE(area->currentKey(), sessionKey(p.id, b.id));
+            QCOMPARE(tree->currentIndex().data(KeyRole).toString(), sessionKey(p.id, b.id));
+            QCOMPARE(area->workspace().recent.first(), area->view(sessionKey(p.id, b.id)).id);
+            checkpoint(second, b.id);
+            unchanged(a.id, aCount, aSize);
+            unchanged(b.id, bCount, bSize);
+        }
+        QCOMPARE(focused.size(), 8);
+        QCOMPARE(area->findChildren<KParts::ReadOnlyPart *>().size(), 2);
+        QCOMPARE(aSize, bSize);
+        auto *title = window.findChild<KSqueezedTextLabel *>("terminalTitle");
+        QVERIFY(title);
+        const auto fullTitle = b.title + "  ·  " + p.name + "  ·  " + b.cwd;
+        QCOMPARE(title->fullText(), fullTitle);
+        QCOMPARE(title->toolTip(), fullTitle);
+        QCOMPARE(title->accessibleName(), fullTitle);
+        QVERIFY(title->isSqueezed());
+        const auto beforeRename = probe.records(b.id).size();
+        b.title = "Renamed <b>literally</b>\nwith a second line\u2028and another";
+        area->updateSession(b, p.name);
+        checkpoint(second, b.id);
+        unchanged(b.id, beforeRename, bSize);
+        QVERIFY(!title->fullText().contains('\n'));
+        QVERIFY(title->accessibleName().contains(b.title));
+        QHelpEvent help(QEvent::ToolTip, QPoint(4, 4), title->mapToGlobal(QPoint(4, 4)));
+        QApplication::sendEvent(title, &help);
+        QVERIFY(QToolTip::text().contains("&lt;b&gt;literally&lt;/b&gt;"));
+        QVERIFY(QToolTip::text().contains(b.cwd));
+        QToolTip::hideText();
+
+        // Real window and sidebar resizing still reaches the child.
+        window.resize(window.width() + 160, window.height() + 100);
+        checkpoint(second, b.id);
+        auto larger = PtyProbe::size(probe.records(b.id).last());
+        QVERIFY(larger.width() > bSize.width() && larger.height() > bSize.height());
+        auto *splitter = window.findChild<QSplitter *>();
+        auto sizes = splitter->sizes();
+        sizes[0] += 100;
+        sizes[1] -= 100;
+        splitter->setSizes(sizes);
+        checkpoint(second, b.id);
+        QVERIFY(PtyProbe::size(probe.records(b.id).last()).width() < larger.width());
+        // A changed font must also reflow normally, not use a fixed pixel height.
+        auto font = title->font();
+        font.setPointSize(font.pointSize() + 8);
+        title->setFont(font);
+        checkpoint(second, b.id);
+        QVERIFY(title->height() >= title->fontMetrics().height());
+        const auto resized = PtyProbe::size(probe.records(b.id).last());
+        QVERIFY(area->focusSession(sessionKey(p.id, a.id)));
+        checkpoint(first, a.id);
+        QCOMPARE(PtyProbe::size(probe.records(a.id).last()), resized);
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty())
+            QVERIFY(window.grab().save(screenshots + "/terminal-header.png"));
+        area->closeBackend(p.id);
+        window.close();
+    }
     void onlyTheViewedTerminalIsSuppressed() {
         auto bus = QDBusConnection::connectToBus(QDBusConnection::SessionBus,
                                                  "window-notification-fixture");

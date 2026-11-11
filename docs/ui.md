@@ -3,7 +3,7 @@
 Status: rudimentary layout requested by the user; interaction details below are
 the design baseline. The [initial implementation](implementation.md) now delivers
 the two-pane layout and records which refinements remain open.
-Last updated: 2026-11-09.
+Last updated: 2026-11-11.
 
 ## 1. Starting layout
 
@@ -209,7 +209,25 @@ sessions may create terminal widgets, and changing a filter cannot detach or
 cancel the current session.
 
 The workspace header identifies the conversation, project and backend even when
-the session is hidden by a navigation filter. Before any session is opened, show
+the session is hidden by a navigation filter. It occupies one text row, sized by
+the current font rather than a fixed pixel height. Long titles are elided in the
+middle; hover for the complete title, server and working directory, or use the
+label's **Copy Full Text** context action. Line separators in metadata display as
+spaces in that row; accessibility text and the escaped tooltip retain the original.
+Title changes therefore do not resize the PTY when switching or renaming sessions.
+
+Each terminal page owns its pending/error banner. Switching to that page does not
+change the space available to other terminals. Replacement views are laid out
+before their client starts, preserving the previous output until validation and
+component creation succeed. Window/sidebar resizing and font changes still reach
+Konsole normally. Background restores initialize their nested terminal layout
+beneath the selected page, with painting disabled, before the client starts;
+selection and keyboard focus remain unchanged. Regression tests exercise the
+actual window, Konsole component and PTY clients recording dimensions and
+`SIGWINCH`, including Projects, held Ctrl+Tab, pending/retained errors, restoration
+and reconnect.
+
+Before any session is opened, show
 a "Select an existing session" empty state and the Discover/custom-connection
 actions. Application-wide discovery status belongs in the status bar.
 Client exit retains the terminal buffer and displays an inline exit/crash message.

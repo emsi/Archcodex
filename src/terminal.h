@@ -62,8 +62,12 @@ class TerminalArea : public QWidget {
   private:
     QStackedWidget *stack;
     QWidget *empty;
-    QWidget *exitBar;
-    QLabel *exitText;
+    struct Page {
+        QWidget *widget = nullptr;
+        QWidget *banner = nullptr;
+        QLabel *message = nullptr;
+    };
+    QHash<QString, Page> pages;
     QHash<QString, QPointer<KParts::ReadOnlyPart>> parts;
     QHash<QString, QString> titles;
     QHash<QString, QString> exits;
@@ -97,6 +101,8 @@ class TerminalArea : public QWidget {
     bool launch(const QString &key, const QStringList &arguments, const QString &title,
                 const Session &session, QString *error, bool activate = true);
     QWidget *viewWidget(const QString &key) const;
+    QWidget *addPage(const QString &key, QWidget *content);
+    void updateStatus(const QString &key);
     void addPlaceholder(const WorkspaceView &view, const QString &serverName);
     void updateCurrent();
 };

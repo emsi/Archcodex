@@ -87,7 +87,7 @@ class Window : public QMainWindow {
     QTabBar *tabs;
     QLineEdit *searchBox;
     QComboBox *scope;
-    QLabel *searchNotice, *terminalTitle, *connections;
+    QLabel *searchNotice, *connections;
     QPushButton *loadMore;
     QSplitter *splitter;
     TerminalArea *terminal = nullptr;
