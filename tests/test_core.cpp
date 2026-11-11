@@ -3,6 +3,7 @@
 #include "discovery.h"
 #include "fixture.h"
 #include "store.h"
+#include "testenvironment.h"
 #include <QFile>
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -18,6 +19,7 @@ using namespace Archcodex;
 
 class CoreTests : public QObject {
     Q_OBJECT
+    TestHome home;
   private slots:
     void validationAndArgumentIsolation() {
         BackendProfile p{"id", "name", "local-unix", "/tmp/socket with spaces", "/bin/echo", false};
@@ -34,9 +36,8 @@ class CoreTests : public QObject {
         auto args = terminalArguments(p, id);
         QCOMPARE(args.last(), id);
         QCOMPARE(args.at(args.size() - 2), "--");
-        args.removeFirst();
         QProcess process;
-        process.start("/bin/sh", args);
+        process.start(args.first(), args.mid(1));
         QVERIFY(process.waitForFinished());
         QVERIFY(QString::fromUtf8(process.readAllStandardOutput()).contains(id));
         QVERIFY(!QFile::exists(marker));

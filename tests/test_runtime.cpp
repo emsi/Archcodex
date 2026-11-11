@@ -5,6 +5,7 @@
 #include "fixture.h"
 #include "jsonprocess.h"
 #include "launch.h"
+#include "testenvironment.h"
 #include <QElapsedTimer>
 #include <QSqlQuery>
 #include <QStandardPaths>
@@ -53,6 +54,7 @@ class ProtocolFixtureBackend : public CodexBackend {
 
 class RuntimeTests : public QObject {
     Q_OBJECT
+    TestHome home;
   private slots:
     void waitingNotificationsOnlyFollowLiveRunningTransitions() {
         Fixture f;

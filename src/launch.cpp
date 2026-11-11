@@ -2,6 +2,7 @@
 #include "launch.h"
 #include <QFile>
 #include <QJsonDocument>
+#include <QProcessEnvironment>
 #include <QRegularExpression>
 
 static void initResources() {
@@ -26,6 +27,20 @@ QStringList hostCommand(QStringList command, bool sandbox) {
     if (sandbox && QFile::exists("/.flatpak-info"))
         command = QStringList{"/usr/bin/flatpak-spawn", "--watch-bus", "--host"} + command;
     return command;
+}
+QStringList terminalCommand(const QStringList &command) {
+    // KSandbox omits environment entries identical to Archcodex's environment.
+    // Carry just these explicit overrides as literal argv entries across the host
+    // boundary. Unset variables retain host inheritance; empty values stay empty.
+    QStringList args{"/usr/bin/env", "--"};
+    const auto environment = QProcessEnvironment::systemEnvironment();
+    for (const auto *name : {"EDITOR", "VISUAL"})
+        if (environment.contains(name))
+            args << QString::fromLatin1(name) + '=' + environment.value(name);
+    // Bash initializes the local host's interactive configuration, then replaces
+    // itself with the client. A failed exec must not leave an interactive shell.
+    return args + QStringList{"/bin/bash", "-ic", "exec \"$@\"; exit \"$?\"", "archcodex"} +
+           command;
 }
 QStringList sshCommand(const QString &host, const QStringList &command, bool terminal) {
     if (host.isEmpty())

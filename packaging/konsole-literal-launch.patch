@@ -1,0 +1,163 @@
+--- a/src/session/Session.h
++++ b/src/session/Session.h
+@@ -233,6 +233,8 @@
+     void setArguments(const QStringList &arguments);
+     /** Sets the program to be executed when run() is called. */
+     void setProgram(const QString &program);
++    // Exact argv for embedding clients: no variable expansion or shell fallback.
++    void setProgramLiteral(const QString &program, const QStringList &arguments);
+ 
+     /** Returns the session's current working directory. */
+     QString initialWorkingDirectory()
+@@ -1012,6 +1014,7 @@
+ 
+     QString _program = QString();
+     QStringList _arguments;
++    bool _literalProgram = false;
+ 
+     QStringList _environment;
+     int _sessionId = 0;
+--- a/src/session/Session.cpp
++++ b/src/session/Session.cpp
+@@ -283,6 +283,13 @@
+     _arguments = ShellCommand::expand(arguments);
+ }
+ 
++void Session::setProgramLiteral(const QString &program, const QStringList &arguments)
++{
++    _program = program;
++    _arguments = arguments;
++    _literalProgram = true;
++}
++
+ void Session::setInitialWorkingDirectory(const QString &dir)
+ {
+     _initialWorkingDir = validDirectory(KShell::tildeExpand(ShellCommand::expand(dir)));
+@@ -505,47 +512,49 @@
+         _uniqueIdentifier = QUuid::createUuid();
+     }
+ 
+-    QStringList programs = {_program, QString::fromUtf8(qgetenv("SHELL")), QStringLiteral("/bin/sh")};
++    QString exec = _program;
++    if (!_literalProgram) {
++        QStringList programs = {_program, QString::fromUtf8(qgetenv("SHELL")), QStringLiteral("/bin/sh")};
+ 
+ #if HAVE_GETPWUID
+-    auto pw = getpwuid(getuid());
+-    // pw: Do not pass the returned pointer to free.
+-    if (pw != nullptr) {
+-        if (KSandbox::isFlatpak()) {
+-            QProcess proc;
+-            proc.setProgram(QStringLiteral("getent"));
+-            proc.setArguments({QStringLiteral("passwd"), QString::number(pw->pw_uid)});
+-            KSandbox::startHostProcess(proc);
+-            proc.waitForFinished();
+-            const auto shell = proc.readAllStandardOutput().simplified().split(':').at(6);
+-            programs.insert(1, QString::fromUtf8(shell));
+-        } else {
+-            programs.insert(1, QString::fromLocal8Bit(pw->pw_shell));
+-        }
+-    }
++        auto pw = getpwuid(getuid());
++        // pw: Do not pass the returned pointer to free.
++        if (pw != nullptr) {
++            if (KSandbox::isFlatpak()) {
++                QProcess proc;
++                proc.setProgram(QStringLiteral("getent"));
++                proc.setArguments({QStringLiteral("passwd"), QString::number(pw->pw_uid)});
++                KSandbox::startHostProcess(proc);
++                proc.waitForFinished();
++                const auto shell = proc.readAllStandardOutput().simplified().split(':').at(6);
++                programs.insert(1, QString::fromUtf8(shell));
++            } else {
++                programs.insert(1, QString::fromLocal8Bit(pw->pw_shell));
++            }
++        }
+ #endif
+ 
+-    QString exec;
+-    for (const auto &choice : programs) {
+-        exec = checkProgram(choice);
+-        if (!exec.isEmpty()) {
+-            break;
+-        }
+-    }
+-
+-    // if nothing could be found (not even the fallbacks), print a warning and do not run
+-    if (exec.isEmpty()) {
+-        terminalWarning(i18n("Could not find an interactive shell to start."));
+-        return;
+-    }
+-
+-    // if a program was specified via setProgram(), but it couldn't be found (but a fallback was), print a warning
+-    if (exec != checkProgram(_program)) {
+-        terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", _program, exec));
+-        _arguments.clear(); // ignore args if program is invalid
+-    } else if (exec != checkProgram(exec)) {
+-        terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", exec, checkProgram(exec)));
+-        _arguments.clear(); // ignore args if program is invalid
++        for (const auto &choice : programs) {
++            exec = checkProgram(choice);
++            if (!exec.isEmpty()) {
++                break;
++            }
++        }
++
++        // if nothing could be found (not even the fallbacks), print a warning and do not run
++        if (exec.isEmpty()) {
++            terminalWarning(i18n("Could not find an interactive shell to start."));
++            return;
++        }
++
++        // if a program was specified via setProgram(), but it couldn't be found (but a fallback was), print a warning
++        if (exec != checkProgram(_program)) {
++            terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", _program, exec));
++            _arguments.clear(); // ignore args if program is invalid
++        } else if (exec != checkProgram(exec)) {
++            terminalWarning(i18n("Could not find '%1', starting '%2' instead.  Please check your profile settings.", exec, checkProgram(exec)));
++            _arguments.clear(); // ignore args if program is invalid
++        }
+     }
+ 
+     // if no arguments are specified, fall back to program name
+@@ -639,6 +648,9 @@
+     if (result < 0) {
+         terminalWarning(i18n("Could not start program '%1' with arguments '%2'.", exec, arguments.join(QLatin1String(" "))));
+         terminalWarning(_shellProcess->errorString());
++        if (_literalProgram) {
++            done(126, QProcess::NormalExit);
++        }
+         return;
+     }
+ 
+--- a/src/Part.h
++++ b/src/Part.h
+@@ -74,6 +74,9 @@
+     Q_INVOKABLE void setContextMenuAdditionalActions(const QList<QAction *> &extension);
+ 
+ public Q_SLOTS:
++    // Like startProgram(), including argv[0], but with literal arguments and
++    // no fallback to a shell when the requested program cannot be started.
++    void startProgramLiteral(const QString &program, const QStringList &arguments);
+     void setAutoClose(bool enabled);
+     /**
+      * creates and run a session using the specified profile and directory
+--- a/src/Part.cpp
++++ b/src/Part.cpp
+@@ -114,6 +114,16 @@
+     activeSession()->run();
+ }
+ 
++void Part::startProgramLiteral(const QString &program, const QStringList &arguments)
++{
++    Q_ASSERT(activeSession());
++    if (activeSession()->isRunning()) {
++        return;
++    }
++    activeSession()->setProgramLiteral(program, arguments);
++    activeSession()->run();
++}
++
+ void Part::setAutoClose(bool enabled)
+ {
+     if (auto *session = activeSession()) {

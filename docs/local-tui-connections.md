@@ -1,6 +1,6 @@
 # Local TUI connections: current plan
 
-Updated: 2026-11-10. Status: adopted; the shared myCodex transport and desktop
+Updated: 2026-11-11. Status: adopted; the shared myCodex transport and desktop
 TUI launch are implemented in 0.6.0. Generic SSH socket profiles and direct TCP
 remain future adapters. See [current integration](mycodex.md) and the
 [security design](container-transport-security.md).
@@ -85,6 +85,52 @@ endpoints, including Unix sockets. The local TUI reads the desktop clipboard and
 transfers image contents through the protocol. No SCP upload service, shared
 temporary directory, remote X11 forwarding or automatic workspace sync is planned.
 Actual desktop/client/server compatibility still requires testing.
+
+## External editors and terminal startup
+
+Development builds addressing [issue #7](https://github.com/emsi/Archcodex/issues/7)
+start every terminal client on the **local computer** through `/usr/bin/env`,
+then `/bin/bash -ic`, then the selected Codex executable or transport client.
+This applies to direct and myCodex connections, including New, resume, reconnect
+and workspace restoration. The server endpoint, thread ID and remote working
+directory keep their existing meanings.
+
+Existing `EDITOR` and `VISUAL` values in Archcodex are passed as literal arguments
+to `env`, before Bash starts. This avoids KDE's Flatpak helper omitting overrides
+that match the application's own environment. Unset variables retain ordinary
+host inheritance; explicitly empty values remain empty. Bash then reads its
+normal interactive startup files, including `~/.bashrc`, which may set or override
+those values. For example, export `EDITOR='kate --block'` in the local host's
+`.bashrc`. Choose an editor command that waits for editing to finish. Codex still
+selects the editor: `VISUAL` takes precedence over `EDITOR`, including an empty
+`VISUAL`. An export made only in a different terminal cannot be recovered unless
+it also reaches Archcodex, the host launch environment or Bash's startup files.
+
+Bash is required at `/bin/bash`, regardless of `$SHELL` or the account's default
+shell. This is an interactive, non-login invocation: login-only configuration is
+not added. Startup files run normally and can affect launch time or environment;
+Archcodex neither parses nor edits them. It does not forward arbitrary variables
+or rewrite `PATH`, display variables, `HOME` or `CODEX_HOME`. The editor runs on
+the local computer even for remote myCodex sessions.
+
+The bundled Konsole component exposes `startProgramLiteral`, preserving argv
+without its usual environment-variable expansion and disabling shell fallback
+for that call. Existing callers of Konsole's ordinary `startProgram` keep their
+behavior. A missing launcher, Bash or Codex produces a failed terminal with
+retained output; it never opens a different shell. Archcodex rejects an older
+component missing this API with a reinstall message.
+
+`env` and Bash replace themselves using `exec`; the relay-backed client also
+executes Codex in place. There is no persistent additional launcher process.
+No Flatpak permission change is needed.
+
+Regression coverage includes real PTYs with the patched KPart, interactive
+startup overrides, unset/empty/literal editor values, both client routes and
+terminal lifecycle paths. The KDE host-context fixture checks identical-value
+filtering against the actual CoreAddons library with absent/stale helper values.
+It does not replace the remaining installed Flatpak desktop acceptance check:
+open the chosen editor from Codex, save and return, cancel/fail and recover, and
+verify clipboard/image input plus backend routing on the target KDE desktop.
 
 ## Ownership, disconnect and recovery requirements
 
