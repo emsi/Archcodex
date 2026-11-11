@@ -222,6 +222,19 @@
       "sha256": "7547027b654926a846237a3731afc6f839c735a709ec74fdc652c28a4c51961f",
       "bytes": 2356880,
       "notes": "v0.8.1.md"
+    },
+    {
+      "version": "0.9.0",
+      "tag": "v0.9.0",
+      "previous_tag": "v0.8.1",
+      "title": "Archcodex 0.9.0 \u2014 Session notifications and external editors",
+      "source_commit": "74cbbced5356fe20980fc77c86cb1979c220bb14",
+      "source_commit_date": "2026-11-11T16:53:36Z",
+      "flatpak_commit": "e69a6904ee1375647d1864cb889cb5dcf77750fedba1c3d15a5e7a8bb562d339",
+      "asset": "Archcodex-0.9.0-x86_64.flatpak",
+      "sha256": "85b686d8c857b9c0bc8d8db533d586ea160b7663b20f12161619e52ea8a743db",
+      "bytes": 2408312,
+      "notes": "v0.9.0.md"
     }
   ]
 }
