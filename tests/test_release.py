@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Exercise version reservations against real, isolated Git repositories."""
 import importlib.util
+import gzip
 import json
 from pathlib import Path
 import subprocess
@@ -108,6 +109,40 @@ class ReleaseTests(unittest.TestCase):
         self.commit()
         with self.assertRaisesRegex(ValueError, "newer than"):
             release.prepare(self.root)
+
+    def appstream_fixture(self, version="0.10.1", component=release.APP_ID):
+        build = self.root / "stage"
+        source = build / "files/share/metainfo" / f"{release.APP_ID}.metainfo.xml"
+        catalog = build / "files/share/app-info/xmls" / f"{release.APP_ID}.xml.gz"
+        source.parent.mkdir(parents=True, exist_ok=True)
+        catalog.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text('<component><releases><release version="0.10.1"/></releases></component>')
+        catalog.write_bytes(gzip.compress(f'<components><component><id>{component}</id><releases><release version="{version}"/></releases></component></components>'.encode()))
+        return build, catalog
+
+    def test_composed_appstream_matches_package(self):
+        build, _ = self.appstream_fixture()
+        release.verify_appstream(build, "0.10.1")
+
+    def test_missing_composed_appstream_rejected(self):
+        build, catalog = self.appstream_fixture()
+        catalog.unlink()
+        with self.assertRaisesRegex(ValueError, "Compose it before export"):
+            release.verify_appstream(build, "0.10.1")
+
+    def test_wrong_composed_appstream_rejected(self):
+        for version, component in [("0.10.0", release.APP_ID), ("0.10.1", "other.application")]:
+            with self.subTest(version=version, component=component):
+                build, _ = self.appstream_fixture(version, component)
+                with self.assertRaisesRegex(ValueError, "component/version differs"):
+                    release.verify_appstream(build, "0.10.1")
+
+    def test_invalid_composed_appstream_rejected(self):
+        build, catalog = self.appstream_fixture()
+        for content in [b"not gzip", gzip.compress(b"<broken")]:
+            catalog.write_bytes(content)
+            with self.assertRaisesRegex(ValueError, "invalid compiled AppStream"):
+                release.verify_appstream(build, "0.10.1")
 
 
 if __name__ == "__main__":

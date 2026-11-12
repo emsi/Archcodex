@@ -77,13 +77,21 @@ SDK. This is a packaging fallback, not a sandbox test:
    `SOURCE_DATE_EPOCH` to the source commit's Unix timestamp for configuration.
 2. Build/install Archcodex and the manifest-pinned Konsole into a temporary stage.
    Include the dependency licenses and the notification event configuration.
+   Compose the AppStream catalog using `appstreamcli compose --no-net --prefix=/
+   --origin=io.github.emsi.Archcodex --components=io.github.emsi.Archcodex
+   --data-dir=STAGE/files/share/app-info/xmls
+   --icons-dir=STAGE/files/share/app-info/icons/flatpak STAGE/files`.
+   The host or SDK's AppStream tool can be used; Flatpak Builder normally supplies
+   this step. Installing only the source metainfo XML leaves `flatpak list` without
+   a version and prevents the updater from verifying a changed deployment.
    Use the manifest's runtime, application ID and finish arguments. Strip the
    staged binaries, finalize with `flatpak build-finish`, export with
    `flatpak build-export`, and write the versioned bundle directly into `dist/`.
 3. Run `python3 scripts/release.py finish --build-dir STAGE --repository REPOSITORY
    --sdk-root .build/sdk-root`. This checks the staged executable's version using
-   the SDK loader, verifies the AppStream version, imports the actual bundle into
-   a temporary repository and compares its commit and executable, then writes the
+   the SDK loader, verifies both source and compiled AppStream versions, imports
+   the actual bundle into a temporary repository and compares its commit,
+   executable and compiled catalog, then writes the
    receipt/checksums and reserves the local tag. Its temporary verification import
    is removed automatically. Verify packaged Konsole startup separately.
 4. Remove the temporary stage/export repository after validation, retaining the

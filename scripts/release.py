@@ -2,6 +2,7 @@
 """Local package identity checks and receipts. This tool never publishes anything."""
 import argparse
 import configparser
+import gzip
 import hashlib
 import json
 import os
@@ -65,6 +66,24 @@ def prepare(root):
     return output
 
 
+def verify_appstream(build, version):
+    metainfo = build / "files/share/metainfo" / f"{APP_ID}.metainfo.xml"
+    if ET.parse(metainfo).find("releases/release").get("version") != version:
+        raise ValueError("Staged AppStream version differs from VERSION.")
+    # Flatpak records the installed version from the composed catalog, not the
+    # source metainfo file. The retained-SDK fallback must compose it too.
+    catalog = build / "files/share/app-info/xmls" / f"{APP_ID}.xml.gz"
+    try:
+        with gzip.open(catalog) as stream:
+            components = ET.parse(stream).getroot().findall("component")
+    except (OSError, EOFError, ET.ParseError) as error:
+        raise ValueError("Missing or invalid compiled AppStream catalog. Compose it before export.") from error
+    matches = [c for c in components if c.findtext("id") == APP_ID]
+    if (len(matches) != 1 or matches[0].find("releases/release") is None
+            or matches[0].find("releases/release").get("version") != version):
+        raise ValueError("Compiled AppStream component/version differs from VERSION.")
+
+
 def finish(root, build, repository, sdk_root):
     state = source_state(root)
     output = root / "dist"
@@ -79,9 +98,7 @@ def finish(root, build, repository, sdk_root):
     runtime = f'{manifest["runtime"]}/{arch}/{manifest["runtime-version"]}'
     if metadata["Application"]["name"] != APP_ID or metadata["Application"]["runtime"] != runtime:
         raise ValueError("Staged application ID or runtime differs from the manifest.")
-    appstream = build / "files/share/metainfo" / f"{APP_ID}.metainfo.xml"
-    if ET.parse(appstream).find("releases/release").get("version") != state["version"]:
-        raise ValueError("Staged AppStream version differs from VERSION.")
+    verify_appstream(build, state["version"])
     with tempfile.TemporaryDirectory(prefix="archcodex-package-check-") as temp:
         env = dict(os.environ, QT_QPA_PLATFORM="offscreen", XDG_CONFIG_HOME=temp,
                    XDG_DATA_HOME=temp, XDG_CACHE_HOME=temp, XDG_RUNTIME_DIR=temp)
@@ -109,6 +126,9 @@ def finish(root, build, repository, sdk_root):
         packaged = subprocess.check_output(["ostree", f"--repo={repo}", "cat", ref, "/files/bin/archcodex"])
         if hashlib.sha256(packaged).hexdigest() != digest(build / "files/bin/archcodex"):
             raise ValueError("Bundle executable differs from the verified executable.")
+        catalog = f"files/share/app-info/xmls/{APP_ID}.xml.gz"
+        if subprocess.check_output(["ostree", f"--repo={repo}", "cat", ref, "/" + catalog]) != (build / catalog).read_bytes():
+            raise ValueError("Bundle AppStream catalog differs from the verified catalog.")
     receipt = dict(state, schema=1, bundle=bundle.name, sha256=digest(bundle), bytes=bundle.stat().st_size,
                    flatpak_ref=ref, flatpak_commit=commit, runtime=runtime,
                    build_method="retained-sdk-stage" if sdk_root else "flatpak-builder")
