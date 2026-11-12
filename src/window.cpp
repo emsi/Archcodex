@@ -10,6 +10,8 @@
 #include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
+#include "updatedialog.h"
+#include "updater.h"
 #include "terminal.h"
 #include <KCommandBar>
 #include <KSqueezedTextLabel>
@@ -534,6 +536,17 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                                           [this] { showSettings(); }));
     terminal->setCommands(commands);
     auto *help = menuBar()->addMenu("&Help");
+    updater = new Updater(ARCHCODEX_VERSION, dataDirectory, this);
+    updateStatus = new QToolButton(this);
+    updateStatus->setObjectName("updateStatus");
+    updateStatus->setAutoRaise(true);
+    statusBar()->addPermanentWidget(updateStatus);
+    connect(updateStatus, &QToolButton::clicked, this, [this] { showUpdates(false); });
+    connect(updater, &Updater::changed, this, &Window::updateUpdateStatus);
+    connect(updater, &Updater::restartReady, this, [this] { this->close(); });
+    updateUpdateStatus();
+    help->addAction(commands->add("check_updates", "Check for Updates…", "Application", {},
+                                  [this] { showUpdates(); }));
     auto *about = help->addAction("About Archcodex", this, [this] {
         QMessageBox::about(
             this, "Archcodex",
@@ -669,6 +682,9 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         restoreTree(tree, settings.value("expanded").toStringList(), {});
     }
     updateSummary();
+    if (connectOnStart && QFile::exists("/.flatpak-info") &&
+        settings.value("updates/checkOnStartup", true).toBool())
+        QTimer::singleShot(0, updater, &Updater::check);
 }
 void Window::restoreCache(bool connectOnStart) {
     QList<Session> batch;
@@ -1595,16 +1611,18 @@ void Window::showSettings() {
                           settings.value("backends/myCodex/showAllSessions", false).toBool(),
                           configuredLocalCodex, this, commands,
                           settings.value("application/restoreOpenedTerminals", true).toBool(),
-                          settings.value("notifications/enabled", true).toBool());
+                          settings.value("notifications/enabled", true).toBool(),
+                          settings.value("updates/checkOnStartup", true).toBool());
     connect(&dialog, &SettingsDialog::settingsApplied, this,
             [this, hideUnsaved](bool hide, bool showAll, const QString &localExecutable,
-                                bool restore, bool notify) {
+                                bool restore, bool notify, bool checkUpdates) {
                 hideUnsaved->setChecked(hide);
                 QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
                 settings.setValue("backends/myCodex/showAllSessions", showAll);
                 settings.setValue("application/localCodexExecutable", localExecutable);
                 settings.setValue("application/restoreOpenedTerminals", restore);
                 settings.setValue("notifications/enabled", notify);
+                settings.setValue("updates/checkOnStartup", checkUpdates);
                 notifications->setEnabled(notify);
                 notifications->setMyCodexWorkdirOnly(!showAll);
                 settings.sync();
@@ -1617,6 +1635,35 @@ void Window::showSettings() {
                     updateSearchSummary();
             });
     dialog.exec();
+}
+void Window::showUpdates(bool check) {
+    if (!updateDialog) {
+        updateDialog = new UpdateDialog(updater, ARCHCODEX_VERSION, this);
+        connect(updateDialog, &UpdateDialog::skipVersion, this, [this](const QString &version) {
+            QSettings(dataDirectory + "/window.ini", QSettings::IniFormat)
+                .setValue("updates/skippedVersion", version);
+            updateUpdateStatus();
+        });
+    }
+    updateDialog->show();
+    updateDialog->raise();
+    updateDialog->activateWindow();
+    if (check && !updater->busy())
+        updater->check();
+}
+void Window::updateUpdateStatus() {
+    using State = Updater::State;
+    const auto state = updater->state();
+    const auto version = updater->release()["version"].toString();
+    const auto skipped = QSettings(dataDirectory + "/window.ini", QSettings::IniFormat)
+                             .value("updates/skippedVersion").toString();
+    updateStatus->setVisible((state == State::Available && version != skipped) ||
+                            state == State::Installed || state == State::Downloading ||
+                            state == State::Installing || state == State::Error);
+    updateStatus->setText(state == State::Installed ? "Update installed — restart…" :
+                          state == State::Available ? "Update available: " + version + "…" :
+                          state == State::Error ? "Update check / install failed…" : "Updating…");
+    updateStatus->setToolTip(state == State::Error ? updater->error() : "Archcodex updates");
 }
 void Window::showDiscoveryDetails() {
     if (!discoveryDialog) {
@@ -2242,6 +2289,13 @@ bool Window::event(QEvent *event) {
     return result;
 }
 void Window::closeEvent(QCloseEvent *event) {
+    if (updater && updater->finishing()) {
+        statusBar()->showMessage("Wait for the update operation to finish before quitting.");
+        event->ignore();
+        return;
+    }
+    if (updater)
+        updater->cancel();
     freezeWorkspace();
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
     settings.setValue("geometry", saveGeometry());

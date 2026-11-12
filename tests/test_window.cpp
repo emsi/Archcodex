@@ -9,6 +9,7 @@
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
+#include "updater.h"
 #include "testenvironment.h"
 #include "window.h"
 #include "worker.h"
@@ -1764,6 +1765,8 @@ class WindowTests : public QObject {
         QTemporaryDir data;
         Window window(data.path(), false);
         window.show();
+        QVERIFY(window.findChild<QAction *>("check_updates"));
+        QCOMPARE(window.findChild<Updater *>()->state(), Updater::State::Idle);
         auto *action = window.findChild<QAction *>("configureArchcodex");
         auto *quickSetting = window.findChild<QAction *>("hideUnsavedSessions");
         QVERIFY(action && quickSetting);
@@ -1774,6 +1777,7 @@ class WindowTests : public QObject {
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
             dialog->findChild<QLineEdit *>("localCodexExecutable")->setText("/cancelled/codex");
+            dialog->findChild<QCheckBox *>("checkUpdatesOnStartup")->setChecked(false);
             dialog->reject();
         });
         action->trigger();
@@ -1781,6 +1785,7 @@ class WindowTests : public QObject {
         QSettings settings(data.path() + "/window.ini", QSettings::IniFormat);
         QVERIFY(!settings.value("backends/myCodex/showAllSessions", false).toBool());
         QVERIFY(settings.value("application/localCodexExecutable").toString().isEmpty());
+        QVERIFY(settings.value("updates/checkOnStartup", true).toBool());
         QTimer::singleShot(0, &window, [&] {
             auto *dialog = window.findChild<SettingsDialog *>();
             QVERIFY(dialog);
@@ -1788,6 +1793,8 @@ class WindowTests : public QObject {
             QVERIFY(!dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
             QCOMPARE(dialog->findChild<QListWidget *>("settingsCategories")->count(), 4);
             QVERIFY(dialog->findChild<QCheckBox *>("notificationsEnabled")->isChecked());
+            QVERIFY(dialog->findChild<QCheckBox *>("checkUpdatesOnStartup")->isChecked());
+            dialog->findChild<QCheckBox *>("checkUpdatesOnStartup")->setChecked(false);
             dialog->findChild<QCheckBox *>("notificationsEnabled")->setChecked(false);
             dialog->findChild<QCheckBox *>("hideUnsavedSetting")->setChecked(false);
             dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->setChecked(true);
@@ -1818,6 +1825,7 @@ class WindowTests : public QObject {
         QVERIFY(settings.value("backends/myCodex/showAllSessions").toBool());
         QVERIFY(!settings.value("hideUnsavedSessions").toBool());
         QVERIFY(!settings.value("notifications/enabled", true).toBool());
+        QVERIFY(!settings.value("updates/checkOnStartup", true).toBool());
         QCOMPARE(settings.value("application/localCodexExecutable").toString(),
                  "/local Codex/bin/codex");
         window.close();
@@ -1827,6 +1835,7 @@ class WindowTests : public QObject {
             auto *dialog = reopened.findChild<SettingsDialog *>();
             QVERIFY(dialog);
             QVERIFY(dialog->findChild<QCheckBox *>("showAllMyCodexSessions")->isChecked());
+            QVERIFY(!dialog->findChild<QCheckBox *>("checkUpdatesOnStartup")->isChecked());
             QCOMPARE(dialog->findChild<QLineEdit *>("localCodexExecutable")->text(),
                      "/local Codex/bin/codex");
             dialog->reject();

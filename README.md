@@ -25,11 +25,15 @@ The package targets **x86_64 Linux with X11 or XWayland**. KDE on Debian 13 and
 Ubuntu 26.04 or newer is the initial desktop baseline. Flatpak may prompt to
 download the KDE 6.11 runtime; matching host Qt/KDE libraries are not required.
 
-To update, download a newer release and repeat the installation command with
-its filename. These are standalone development bundles for host testing;
-installing one does not configure an automatic Flatpak update repository.
-See [all releases](https://github.com/emsi/Archcodex/releases) for version-specific
-notes and checksums.
+To update an older version, download a newer release and repeat the installation
+command with its filename. Starting with **0.10.0-rc.1**, Archcodex also checks
+GitHub once at startup and offers **Help → Check for Updates…** (also in the
+command palette). Click **Download and Install** to update the existing per-user
+Flatpak, then restart when ready. **Settings → Application → Check for updates
+on startup** controls the automatic check; installation always needs your approval.
+These standalone bundles come directly from GitHub Releases.
+See [update behavior and limitations](docs/updates.md) and
+[all releases](https://github.com/emsi/Archcodex/releases) for notes and checksums.
 
 ### Requirements
 

@@ -1,1 +1,1 @@
-<RCC><qresource prefix="/archcodex"><file>discover.py</file><file>containers.py</file><file>mux.py</file><file>transport.py</file></qresource></RCC>
+<RCC><qresource prefix="/archcodex"><file>discover.py</file><file>containers.py</file><file>mux.py</file><file>transport.py</file><file>updates.py</file></qresource></RCC>
