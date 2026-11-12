@@ -8,7 +8,7 @@ interface.
 
 ## Install from Flatpak
 
-Download **`Archcodex-0.9.0-x86_64.flatpak`** and **`SHA256SUMS`** from the
+Download **`Archcodex-0.10.0-x86_64.flatpak`** and **`SHA256SUMS`** from the
 [latest GitHub release](https://github.com/emsi/Archcodex/releases/latest) into
 the same directory.
 
@@ -17,7 +17,7 @@ in your **local host terminal**, outside myCodex or any other container:
 
 ```sh
 sha256sum -c SHA256SUMS
-flatpak install --user --or-update ./Archcodex-0.9.0-x86_64.flatpak
+flatpak install --user --or-update ./Archcodex-0.10.0-x86_64.flatpak
 flatpak run io.github.emsi.Archcodex
 ```
 
