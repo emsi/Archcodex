@@ -15,7 +15,8 @@
 
 namespace Archcodex {
 SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExecutable,
-                               QWidget *parent, Commands *registry, bool restore, bool notify)
+                               QWidget *parent, Commands *registry, bool restore, bool notify,
+                               bool checkUpdates)
     : QDialog(parent), commands(registry) {
     setWindowTitle("Configure Archcodex");
     setObjectName("settingsDialog");
@@ -51,6 +52,12 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
         content->addStretch();
     };
     auto *application = page("Application", "Application preferences");
+    checkUpdatesOnStartup = new QCheckBox("Check for updates on startup");
+    checkUpdatesOnStartup->setObjectName("checkUpdatesOnStartup");
+    checkUpdatesOnStartup->setChecked(checkUpdates);
+    checkUpdatesOnStartup->setToolTip(
+        "Check GitHub once when the Flatpak starts. Installation always requires your approval.");
+    application->addWidget(checkUpdatesOnStartup);
     restoreOpened = new QCheckBox("Restore opened terminals on startup");
     restoreOpened->setObjectName("restoreOpenedTerminals");
     restoreOpened->setChecked(restore);
@@ -168,7 +175,8 @@ bool SettingsDialog::apply() {
         }
     }
     emit settingsApplied(hideUnsaved->isChecked(), showAllMyCodexSessions->isChecked(), executable,
-                         restoreOpened->isChecked(), notificationsEnabled->isChecked());
+                         restoreOpened->isChecked(), notificationsEnabled->isChecked(),
+                         checkUpdatesOnStartup->isChecked());
     return true;
 }
 } // namespace Archcodex

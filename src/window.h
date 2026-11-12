@@ -26,6 +26,8 @@ class DiscoveryDialog;
 class Commands;
 class OpeningCoordinator;
 class Notifications;
+class Updater;
+class UpdateDialog;
 class Window : public QMainWindow {
     Q_OBJECT
   public:
@@ -93,6 +95,11 @@ class Window : public QMainWindow {
     TerminalArea *terminal = nullptr;
     OpeningCoordinator *opening;
     Notifications *notifications = nullptr;
+    Updater *updater = nullptr;
+    QPointer<UpdateDialog> updateDialog;
+    QToolButton *updateStatus;
+    void showUpdates(bool check = true);
+    void updateUpdateStatus();
     void updateViewedSession();
     QToolButton *workspaceStatus;
     bool workspaceLoaded = false, workspaceWritable = false, workspaceSaving = false;

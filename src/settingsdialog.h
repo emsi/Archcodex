@@ -14,14 +14,15 @@ class SettingsDialog : public QDialog {
     SettingsDialog(bool hideUnsaved, bool showAllMyCodexSessions,
                    const QString &localExecutable = {}, QWidget *parent = nullptr,
                    Commands *commands = nullptr, bool restoreOpened = true,
-                   bool notificationsEnabled = true);
+                   bool notificationsEnabled = true, bool checkUpdatesOnStartup = true);
   signals:
     void settingsApplied(bool hideUnsaved, bool showAllMyCodexSessions,
                          const QString &localExecutable, bool restoreOpened,
-                         bool notificationsEnabled);
+                         bool notificationsEnabled, bool checkUpdatesOnStartup);
 
   private:
     QCheckBox *hideUnsaved, *showAllMyCodexSessions, *restoreOpened, *notificationsEnabled;
+    QCheckBox *checkUpdatesOnStartup;
     QLineEdit *localCodex;
     QLabel *validation;
     Commands *commands;
