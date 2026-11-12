@@ -8,6 +8,7 @@
 #include <KPluginMetaData>
 #include <KXMLGUIClient>
 #include <QAccessible>
+#include <QClipboard>
 #include <QDialog>
 #include <QFile>
 #include <QFrame>
@@ -66,6 +67,181 @@ class TerminalTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void controlCCopiesOnlyTerminalSelections_data() {
+        QTest::addColumn<bool>("enhancedKeyboard");
+        QTest::newRow("legacy") << false;
+        QTest::newRow("enhanced-keyboard-request") << true;
+    }
+    void controlCCopiesOnlyTerminalSelections() {
+        QFETCH(bool, enhancedKeyboard);
+        QTemporaryDir dir;
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(R"PY(#!/usr/bin/python3
+import json, os, pathlib, select, sys, tty
+out = pathlib.Path(__file__).parent
+name = sys.argv[-1]
+tty.setraw(0)
+os.write(1, b'\x1b[3J\x1b[2J\x1b[H' + ('COPY TARGET ' + name + '\r\n').encode())
+if name.startswith('kitty'): os.write(1, b'\x1b[>7u')
+os.write(1, b'\x1b[6n')
+reply = b''
+while not reply.endswith(b'R'):
+    assert select.select([0], [], [], 5)[0], 'No cursor-position reply'
+    reply += os.read(0, 1)
+(out / (name + '.ready')).touch()
+received, checkpoints = b'', []
+while True:
+    byte = os.read(0, 1)
+    if not byte: break
+    if byte == b'\x1d':
+        checkpoints.append(received.hex())
+        (out / (name + '.json')).write_text(json.dumps(checkpoints))
+        received = b''
+    else:
+        received += byte
+)PY");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        auto *field = new QLineEdit("Application text field");
+        auto *area = new TerminalArea;
+        layout->addWidget(field);
+        layout->addWidget(area);
+        Commands commands(&host);
+        host.resize(900, 500);
+        host.show();
+        host.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        BackendProfile profile{"b", "Fixture", "local-unix", "/unused", script.fileName(), false};
+        const QString id = enhancedKeyboard ? "kitty" : "legacy";
+        auto session = Session::fromThread("b", {{"id", id}, {"cwd", dir.path()}});
+        QString error;
+        QVERIFY2(area->open(profile, session, &error), qPrintable(error));
+        QTRY_VERIFY(QFile::exists(dir.filePath(id + ".ready")));
+        QTRY_VERIFY(area->isAncestorOf(QApplication::focusWidget()));
+        auto *input = QApplication::focusWidget();
+        auto *part = area->findChild<KParts::ReadOnlyPart *>();
+        auto *accessible = QAccessible::queryAccessibleInterface(input);
+        QVERIFY(accessible && accessible->textInterface());
+        auto *text = accessible->textInterface();
+        QTRY_VERIFY(text->text(0, text->characterCount()).contains("COPY TARGET " + id));
+        const auto selectTarget = [&] {
+            const auto target = "COPY TARGET " + id;
+            const auto start = text->text(0, text->characterCount()).indexOf(target);
+            QVERIFY(start >= 0);
+            text->addSelection(start, start + target.size() - 1);
+        };
+        auto *clipboard = QApplication::clipboard();
+        QHash<QString, int> checkpoints;
+        QByteArray received;
+        const auto checkpoint = [&] {
+            const auto name = area->currentSession().id;
+            auto *currentPart = area->findChildren<KParts::ReadOnlyPart *>().last();
+            if (name == id)
+                currentPart = part;
+            const int count = ++checkpoints[name];
+            const auto records = [&] {
+                QFile file(dir.filePath(name + ".json"));
+                return file.open(QIODevice::ReadOnly)
+                           ? QJsonDocument::fromJson(file.readAll()).array()
+                           : QJsonArray{};
+            };
+            // An explicit byte after the key fences the actual PTY input, so a
+            // missing key cannot pass merely because the child was slow to read.
+            PtyProbe::send(currentPart, QString(QChar(0x1d)));
+            QTRY_COMPARE(records().size(), count);
+            received = QByteArray::fromHex(records().last().toString().toLatin1());
+        };
+        // Real Qt keyboard events carry ETX for Ctrl+C. QTest::keyClick uses
+        // the printable letter instead, which would only prove delivery of "c".
+        const auto controlC = [](QWidget *target) {
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_C, Qt::ControlModifier, QString(QChar(3)));
+            QApplication::sendEvent(target, &press);
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_C, Qt::ControlModifier,
+                              QString(QChar(3)));
+            QApplication::sendEvent(target, &release);
+        };
+        controlC(input);
+        checkpoint();
+        const auto originalControlC = received;
+        QCOMPARE(originalControlC, QByteArray(1, char(3)));
+        auto *copy = commands.add(
+            "terminal_copy", "Copy", "Terminal",
+            {QKeySequence("Ctrl+C"), QKeySequence("Ctrl+Shift+C"), QKeySequence("Ctrl+Insert")},
+            [&] { area->triggerAction("edit_copy"); }, area);
+        int otherInvocations = 0;
+        commands.add("other", "Other", "Test", {}, [&] { ++otherInvocations; });
+        area->setCommands(&commands);
+        clipboard->setText("unchanged");
+        controlC(input);
+        checkpoint();
+        QCOMPARE(received, originalControlC);
+        QCOMPARE(clipboard->text(), "unchanged");
+        selectTarget();
+        for (const auto &key : copy->shortcuts()) {
+            clipboard->setText("unchanged");
+            if (key == QKeySequence("Ctrl+C"))
+                controlC(input);
+            else
+                QTest::keySequence(input, key);
+            QTRY_COMPARE(clipboard->text().trimmed(), "COPY TARGET " + id);
+            checkpoint();
+            QVERIFY(received.isEmpty());
+        }
+        text->removeSelection(0);
+        clipboard->setText("unchanged");
+        controlC(input);
+        checkpoint();
+        QCOMPARE(received, originalControlC);
+        QCOMPARE(clipboard->text(), "unchanged");
+        selectTarget();
+        auto second = session;
+        second.id += "-second";
+        QVERIFY2(area->open(profile, second, &error), qPrintable(error));
+        QTRY_VERIFY(QFile::exists(dir.filePath(second.id + ".ready")));
+        controlC(QApplication::focusWidget());
+        checkpoint();
+        QCOMPARE(received, originalControlC); // A background selection cannot capture the key.
+        QVERIFY(area->focusSession(sessionKey(profile.id, id)));
+        controlC(input);
+        QTRY_COMPARE(clipboard->text().trimmed(), "COPY TARGET " + id);
+        checkpoint();
+        QVERIFY(received.isEmpty());
+        field->setFocus();
+        field->selectAll();
+        controlC(field);
+        QCOMPARE(clipboard->text(), field->text());
+        area->focusCurrent();
+        QVERIFY(area->triggerAction("edit_find"));
+        QTRY_VERIFY(qobject_cast<QLineEdit *>(QApplication::focusWidget()));
+        auto *search = qobject_cast<QLineEdit *>(QApplication::focusWidget());
+        search->setText("Scrollback search text");
+        search->selectAll();
+        controlC(search);
+        QCOMPARE(clipboard->text(), search->text());
+        QTest::keyClick(search, Qt::Key_Escape);
+        area->focusCurrent();
+        auto bindings = Commands::bindings(commands.collection());
+        bindings["terminal_copy"].removeAll(QKeySequence("Ctrl+C"));
+        bindings["other"] = {QKeySequence("Ctrl+C")};
+        QVERIFY2(commands.apply(bindings, &error), qPrintable(error));
+        clipboard->setText("unchanged");
+        controlC(input);
+        QCOMPARE(otherInvocations, 1);
+        QCOMPARE(clipboard->text(), "unchanged");
+        checkpoint();
+        QVERIFY(received.isEmpty());
+        bindings["other"].clear();
+        QVERIFY2(commands.apply(bindings, &error), qPrintable(error));
+        selectTarget();
+        controlC(input);
+        checkpoint();
+        QCOMPARE(received, originalControlC);
+        QCOMPARE(clipboard->text(), "unchanged");
+        area->closeBackend(profile.id);
+    }
     void pendingAndExitedViewsKeepLivePtyGeometry_data() {
         QTest::addColumn<bool>("background");
         QTest::newRow("selected-restore") << false;

@@ -1006,6 +1006,10 @@ class WindowTests : public QObject {
         auto *tabs = window.findChild<QTabBar *>();
         auto *terminal = window.findChild<TerminalArea *>();
         auto *commands = window.findChild<Commands *>();
+        const auto copyKeys = commands->collection()->action("terminal_copy")->shortcuts();
+        QVERIFY(copyKeys.contains(QKeySequence("Ctrl+C")));
+        QVERIFY(copyKeys.contains(QKeySequence("Ctrl+Shift+C")));
+        QVERIFY(copyKeys.contains(QKeySequence("Ctrl+Insert")));
         QSignalSpy focused(terminal, &TerminalArea::sessionFocused);
         QCOMPARE(commands->collection()->action("focus_projects")->shortcut(),
                  QKeySequence("Ctrl+Alt+P"));
