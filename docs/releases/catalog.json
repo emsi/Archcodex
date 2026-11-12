@@ -235,6 +235,19 @@
       "sha256": "85b686d8c857b9c0bc8d8db533d586ea160b7663b20f12161619e52ea8a743db",
       "bytes": 2408312,
       "notes": "v0.9.0.md"
+    },
+    {
+      "version": "0.10.1",
+      "tag": "v0.10.1",
+      "previous_tag": "v0.9.0",
+      "title": "Archcodex 0.10.1 \u2014 GitHub updates and session navigation",
+      "source_commit": "e399a2c8410209678ef74010240d233fb59d4a5c",
+      "source_commit_date": "2026-11-12T15:13:31Z",
+      "flatpak_commit": "fbfd1d6cf32836a43116fe20fb528a71ddce014f3c49ed422194fa707297bd0c",
+      "asset": "Archcodex-0.10.1-x86_64.flatpak",
+      "sha256": "d50cd58603447db93a411199c7500538f4f479394247bde9a4ce98fa13ed408a",
+      "bytes": 2433544,
+      "notes": "v0.10.1.md"
     }
   ]
 }
