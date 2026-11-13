@@ -248,6 +248,19 @@
       "sha256": "d50cd58603447db93a411199c7500538f4f479394247bde9a4ce98fa13ed408a",
       "bytes": 2433544,
       "notes": "v0.10.1.md"
+    },
+    {
+      "version": "0.11.0",
+      "tag": "v0.11.0",
+      "previous_tag": "v0.10.1",
+      "title": "Archcodex 0.11.0 \u2014 Copy selected terminal text with Ctrl+C",
+      "source_commit": "ffaf25825f3202ac73bd0349074dae79656b7b4d",
+      "source_commit_date": "2026-11-13T12:30:12Z",
+      "flatpak_commit": "7658f976c9fa1f4e4e2a877ba05c0c215c88486f25debc0cb6d3c9ed2a54f35c",
+      "asset": "Archcodex-0.11.0-x86_64.flatpak",
+      "sha256": "afc089ec620c32766d907e6714d7b8e556f2925d207edbfad0e1aa493959da3d",
+      "bytes": 2434128,
+      "notes": "v0.11.0.md"
     }
   ]
 }

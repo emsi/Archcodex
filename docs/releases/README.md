@@ -18,6 +18,7 @@ listing.
 
 | Version | Changes |
 | --- | --- |
+| [0.11.0](v0.11.0.md) | Copy selected terminal text with Ctrl+C while preserving cancellation without a selection |
 | [0.10.1](v0.10.1.md) | GitHub update checks and installation, stable terminal geometry and synchronized session navigation |
 | [0.9.0](v0.9.0.md) | Session attention notifications and local external-editor support |
 | [0.8.1](v0.8.1.md) | Fix New-session rename, status and restoration with real conversation IDs |
