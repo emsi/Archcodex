@@ -524,8 +524,9 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         const bool copy = entry.first == "copy";
         terminalMenu->addAction(commands->add(
             "terminal_" + entry.first, entry.second, "Terminal",
-            {QKeySequence(copy ? "Ctrl+Shift+C" : "Ctrl+Shift+V"),
-             QKeySequence(copy ? "Ctrl+Insert" : "Shift+Insert")},
+            copy ? QList<QKeySequence>{QKeySequence("Ctrl+C"), QKeySequence("Ctrl+Shift+C"),
+                                       QKeySequence("Ctrl+Insert")}
+                 : QList<QKeySequence>{QKeySequence("Ctrl+Shift+V"), QKeySequence("Shift+Insert")},
             [this, name = "edit_" + entry.first] { terminal->triggerAction(name); }, terminal));
     }
     terminalMenu->addAction(commands->add("terminal_print", "Print terminal screen…", "Terminal",

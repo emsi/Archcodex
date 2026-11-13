@@ -322,8 +322,15 @@ press/release controller. Modal dialogs and shortcut recording retain their inpu
 | Ctrl+Shift+W | Close the current terminal view. |
 | Ctrl+Shift+, | Settings. |
 | F10 | Focus the menu bar. |
-| Ctrl+Shift+C / Ctrl+Insert | Copy terminal selection (terminal context). |
+| Ctrl+C / Ctrl+Shift+C / Ctrl+Insert | Copy terminal selection (terminal context). |
 | Ctrl+Shift+V / Shift+Insert | Paste into terminal (terminal context). |
+
+Ctrl+C copies only when the terminal has selected text. Without a selection it
+reaches Codex or the foreground program unchanged, preserving cancellation and
+interrupts. Ctrl+Shift+C and Ctrl+Insert keep their existing Copy behavior. This
+uses the configurable Terminal Copy action; removing its Ctrl+C binding restores
+ordinary terminal Ctrl+C even with a selection. Text fields retain their own Copy
+handling, including the terminal's scrollback search field.
 
 Tree arrows navigate/expand/collapse, Enter opens a session or toggles a parent,
 and Menu/Shift+F10 opens the selected row's context menu without using the pointer.

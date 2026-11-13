@@ -131,8 +131,18 @@ void TerminalArea::updateShortcuts() {
         visit(visit, part);
 }
 void TerminalArea::overrideShortcut(QKeyEvent *event, bool &override) {
-    if (commands && commands->matches(event))
-        override = false;
+    if (!commands || !commands->matches(event))
+        return;
+    const auto key = QKeySequence(event->keyCombination());
+    const auto *copy = commands->collection()->action("terminal_copy");
+    if (key == QKeySequence(Qt::CTRL | Qt::Key_C) && copy && copy->shortcuts().contains(key)) {
+        // Keep the original key in the PTY when there is nothing to copy. Use
+        // Konsole's selection state, just as the actual Copy operation does.
+        const auto *selection = terminalAction("edit_copy");
+        if (!selection || !selection->isEnabled())
+            return;
+    }
+    override = false;
 }
 void TerminalArea::focusCurrent() {
     if (auto *widget = viewWidget(currentKey()))
@@ -141,10 +151,10 @@ void TerminalArea::focusCurrent() {
 Session TerminalArea::currentSession() const {
     return clients.value(currentKey());
 }
-bool TerminalArea::triggerAction(const QString &name) {
+QAction *TerminalArea::terminalAction(const QString &name) const {
     auto *part = parts.value(currentKey()).data();
     if (!part)
-        return false;
+        return nullptr;
     const auto find = [&](auto &&self, KXMLGUIClient *client) -> QAction * {
         if (auto *action = client->actionCollection()->action(name))
             return action;
@@ -153,7 +163,10 @@ bool TerminalArea::triggerAction(const QString &name) {
                 return action;
         return nullptr;
     };
-    if (auto *action = find(find, part); action && action->isEnabled()) {
+    return find(find, part);
+}
+bool TerminalArea::triggerAction(const QString &name) {
+    if (auto *action = terminalAction(name); action && action->isEnabled()) {
         action->trigger();
         return true;
     }

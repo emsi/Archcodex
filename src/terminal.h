@@ -10,6 +10,7 @@ class QLabel;
 class QKeyEvent;
 class QFrame;
 class QListWidget;
+class QAction;
 namespace Archcodex {
 class Commands;
 class TerminalArea : public QWidget {
@@ -90,6 +91,7 @@ class TerminalArea : public QWidget {
     QLabel *switcherTitle = nullptr;
     QPointer<Commands> commands;
     void updateShortcuts();
+    QAction *terminalAction(const QString &name) const;
     void remember(const QString &key);
     bool showSession(const QString &key);
     void cycleSession(bool backwards, bool projects, Qt::KeyboardModifiers modifier);
