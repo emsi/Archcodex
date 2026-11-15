@@ -53,3 +53,26 @@ before either #23 or #24. Raw runs are in `search-baseline.jsonl`.
 The 24 error messages consumed 637 pixels above a 68-pixel tree viewport.
 Further measurements below distinguish the layout-only change, removal of the
 duplicate expansion pass, and the final performance implementation.
+
+## Layout fix (#23)
+
+The feedback area is now 41 pixels high and the tree viewport 664 pixels.
+The details dialog is non-modal, read-only plain text and scrollable; repeated
+diagnostics are deduplicated per backend ID. It closes when leaving All, clearing
+or resubmitting. Narrow-pane tests at 10 pt and 20 pt check viewport height,
+keyboard access, focus and selection preservation, completeness and stale errors.
+
+Median of three per-run p95 values (milliseconds); raw records retain maxima
+and sample counts:
+
+| Stage | Replies | GUI p95 | PTY echo p95 | Search duration |
+|---|---|---:|---:|---:|
+| Baseline | Rapid | 432.1 | 908.5 | 1457 |
+| Baseline | One delayed source | 180.3 | 618.7 | 1975 |
+| Layout only | Rapid | 363.0 | 848.2 | 1463 |
+| Layout only | One delayed source | 133.3 | 486.9 | 1972 |
+
+The layout fix does not meet the responsiveness budget; #24 remains necessary.
+The complete Window suite passed after staging its required notification
+configuration (the first invocation omitted that resource and its notification
+test failed; that test passed on rerun). Real desktop acceptance remains separate.

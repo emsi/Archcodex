@@ -207,18 +207,21 @@ inline void runSearchBenchmark(int delay) {
         visible += source->item(i)->data(CountRole).toInt();
     QCOMPARE(visible, 5760);
     QVERIFY(!echoes.isEmpty());
-    QJsonObject result{{"version", ARCHCODEX_VERSION},
-                       {"delay_ms", delay},
-                       {"elapsed_ms", duration},
-                       {"delivered", delivered},
-                       {"visible", visible},
-                       {"gui_delay", searchDistribution(delays)},
-                       {"terminal_echo", searchDistribution(echoes)},
-                       {"unobserved_echoes", sent.size()},
-                       {"tree_height", tree->viewport()->height()},
-                       {"feedback_height", feedback->height()},
-                       {"window_height", window.height()},
-                       {"font_points", window.font().pointSizeF()}};
+    QJsonObject result{
+        {"version", ARCHCODEX_VERSION},
+        {"delay_ms", delay},
+        {"elapsed_ms", duration},
+        {"delivered", delivered},
+        {"visible", visible},
+        {"gui_delay", searchDistribution(delays)},
+        {"terminal_echo", searchDistribution(echoes)},
+        {"unobserved_echoes", sent.size()},
+        {"tree_height", tree->viewport()->height()},
+        {"feedback_height", window.findChild<QWidget *>("searchFeedbackArea")
+                                ? window.findChild<QWidget *>("searchFeedbackArea")->height()
+                                : feedback->height()},
+        {"window_height", window.height()},
+        {"font_points", window.font().pointSizeF()}};
     QFile log(output);
     QVERIFY(log.open(QIODevice::WriteOnly | QIODevice::Append));
     log.write(QJsonDocument(result).toJson(QJsonDocument::Compact) + '\n');

@@ -10,9 +10,9 @@
 #include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
+#include "terminal.h"
 #include "updatedialog.h"
 #include "updater.h"
-#include "terminal.h"
 #include <KCommandBar>
 #include <KSqueezedTextLabel>
 #include <QApplication>
@@ -38,9 +38,11 @@
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QMouseEvent>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QScopedValueRollback>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSignalBlocker>
 #include <QSplitter>
@@ -278,12 +280,30 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         else
             updateSearchControls();
     });
-    searchNotice = new QLabel;
+    searchFeedback = new QWidget;
+    searchFeedback->setObjectName("searchFeedbackArea");
+    auto *feedbackLayout = new QVBoxLayout(searchFeedback);
+    feedbackLayout->setContentsMargins(0, 0, 0, 0);
+    searchNotice = new KSqueezedTextLabel;
     searchNotice->setObjectName("searchFeedback");
     searchNotice->hide();
     searchNotice->setTextFormat(Qt::PlainText);
-    searchNotice->setWordWrap(true);
-    left->addWidget(searchNotice);
+    feedbackLayout->addWidget(searchNotice);
+    auto *progressRow = new QHBoxLayout;
+    searchProgress = new KSqueezedTextLabel;
+    searchProgress->setObjectName("searchProgress");
+    searchProgress->setTextFormat(Qt::PlainText);
+    progressRow->addWidget(searchProgress, 1);
+    searchDetailsButton = new QToolButton;
+    searchDetailsButton->setObjectName("searchDetailsButton");
+    searchDetailsButton->setText("Details…");
+    searchDetailsButton->setAccessibleName("Search coverage details");
+    searchDetailsButton->setToolTip("View full search counts, progress and connection errors.");
+    connect(searchDetailsButton, &QToolButton::clicked, this, &Window::showSearchDetails);
+    progressRow->addWidget(searchDetailsButton);
+    feedbackLayout->addLayout(progressRow);
+    searchFeedback->hide();
+    left->addWidget(searchFeedback);
     auto *sessionTree = new SessionTree;
     tree = sessionTree;
     tree->setModel(filter);
@@ -816,8 +836,7 @@ void Window::attach(const BackendProfile &p, bool start) {
                     model->upsertMany(updates);
                     results->upsertMany(matches);
                     if (globalSearchActive && searching.remove(id)) {
-                        searchErrors
-                            << profiles.value(id).name + ": Search interrupted by disconnection.";
+                        recordSearchError(id, "Search interrupted by disconnection.");
                         updateSearchSummary();
                     }
                 }
@@ -881,7 +900,7 @@ void Window::attach(const BackendProfile &p, bool start) {
                 }
                 results->upsertMany(updates);
                 if (!error.isEmpty())
-                    searchErrors << profiles.value(id).name + ": " + error;
+                    recordSearchError(id, error);
                 if (complete)
                     searching.remove(id);
                 updateSearchSummary();
@@ -2108,7 +2127,12 @@ void Window::updateSearchControls() {
     scope->setToolTip(state.scopeLabel.isEmpty()
                           ? "Choose all servers or select a row to set the search scope."
                           : "Selected scope: " + state.scopeLabel);
+    searchFeedback->setVisible(showingSearch() || (!all && state.filtering));
     searchNotice->setVisible(showingSearch() || (!all && state.filtering));
+    searchProgress->setVisible(showingSearch());
+    searchDetailsButton->setVisible(showingSearch());
+    if (!showingSearch())
+        closeSearchDetails();
     if (!all && state.filtering) {
         int count = 0;
         for (int i = 0; i < filter->rowCount(); ++i)
@@ -2119,7 +2143,9 @@ void Window::updateSearchControls() {
                   "again."
                 : QString("%1 matching sessions — cached titles, paths and IDs%2")
                       .arg(count)
-                      .arg(state.selection.scoped ? "\nScope: " + state.scopeLabel : QString()));
+                      .arg(state.selection.scoped ? " · Scope: " + state.scopeLabel : QString()));
+        searchNotice->setAccessibleName(searchNotice->fullText());
+        searchNotice->setToolTip("<p>" + searchNotice->fullText().toHtmlEscaped() + "</p>");
     }
 }
 void Window::search() {
@@ -2145,6 +2171,8 @@ void Window::search() {
     scopeBackends = selection.backends;
     scopePath = selection.path;
     beginFiltering();
+    closeSearchDetails();
+    submittedQuery = query;
     ++searchToken;
     globalSearchActive = true;
     searchSessions.clear();
@@ -2169,6 +2197,8 @@ void Window::clearSearch() {
     for (auto *b : backends)
         b->search({}, searchToken);
     globalSearchActive = false;
+    closeSearchDetails();
+    searchErrors.clear();
     searching.clear();
     searchSessions.clear();
     results->resetResults();
@@ -2181,19 +2211,83 @@ void Window::clearSearch() {
 void Window::updateSearchSummary() {
     if (!showingSearch())
         return;
-    searchNotice->setVisible(true);
+    searchFeedback->setVisible(true);
     int visible = 0;
     for (int i = 0; i < results->rowCount(); ++i)
         visible += results->item(i)->data(CountRole).toInt();
     const auto hidden = searchSessions.size() - visible;
-    searchNotice->setText(
-        QString("%1 results%2%3%4")
-            .arg(visible)
-            .arg(hidden ? QString(" (%1 hidden by visibility settings)").arg(hidden) : QString())
-            .arg(searching.isEmpty()
-                     ? QString()
-                     : QString(" — searching %1 connection(s)…").arg(searching.size()))
-            .arg(searchErrors.isEmpty() ? QString() : "\n" + searchErrors.join('\n')));
+    searchNotice->setText(QString("%1 results%2")
+                              .arg(visible)
+                              .arg(hidden ? QString(" · %1 hidden").arg(hidden) : QString()));
+    searchProgress->setText(
+        (searching.isEmpty() ? QString("Search complete")
+                             : QString("Searching %1 connection(s)…").arg(searching.size())) +
+        (searchErrors.isEmpty() ? QString()
+                                : QString(" · %1 incomplete").arg(searchErrors.size())));
+    for (auto *label : {searchNotice, searchProgress}) {
+        label->setAccessibleName(label->fullText());
+        label->setToolTip("<p>" + label->fullText().toHtmlEscaped() + "</p>");
+    }
+    updateSearchDetails();
+}
+void Window::recordSearchError(const QString &backend, const QString &message) {
+    auto &messages = searchErrors[backend];
+    if (!messages.contains(message))
+        messages << message;
+}
+void Window::closeSearchDetails() {
+    if (searchDetails) {
+        searchDetails->close();
+        searchDetails.clear();
+    }
+}
+void Window::showSearchDetails() {
+    if (!showingSearch())
+        return;
+    if (!searchDetails) {
+        searchDetails = new QDialog(this);
+        searchDetails->setObjectName("searchDetails");
+        searchDetails->setWindowTitle("Search details");
+        searchDetails->setAttribute(Qt::WA_DeleteOnClose);
+        searchDetails->resize(640, 400);
+        auto *layout = new QVBoxLayout(searchDetails);
+        auto *text = new QPlainTextEdit;
+        text->setReadOnly(true);
+        text->setAccessibleName("Search report");
+        layout->addWidget(text, 1);
+        auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
+        connect(buttons, &QDialogButtonBox::rejected, searchDetails, &QDialog::close);
+        layout->addWidget(buttons);
+    }
+    updateSearchDetails();
+    searchDetails->show(); // Non-modal; only an explicit user action opens it.
+    searchDetails->raise();
+    searchDetails->activateWindow();
+}
+void Window::updateSearchDetails() {
+    if (!searchDetails)
+        return;
+    QString report = "Query: " + submittedQuery +
+                     "\nScope: " + (scopedSearch ? explorer[0].scopeLabel : "All servers") +
+                     "\n\n" + searchNotice->fullText() + "\n" + searchProgress->fullText();
+    if (searchSessions.size())
+        report += "\nHidden matches are excluded by the current visibility settings.";
+    for (auto it = searchErrors.cbegin(); it != searchErrors.cend(); ++it)
+        report += "\n\n" + profiles.value(it.key()).name + " [" + it.key() + "]\n" +
+                  it.value().join('\n');
+    auto *text = searchDetails->findChild<QPlainTextEdit *>();
+    if (text->toPlainText() == report)
+        return;
+    const auto anchor = text->textCursor().anchor();
+    const auto position = text->textCursor().position();
+    const auto scroll = text->verticalScrollBar()->value();
+    text->setPlainText(report);
+    auto restored = text->textCursor();
+    const auto last = text->document()->characterCount() - 1;
+    restored.setPosition(qMin(anchor, last));
+    restored.setPosition(qMin(position, last), QTextCursor::KeepAnchor);
+    text->setTextCursor(restored);
+    text->verticalScrollBar()->setValue(scroll);
 }
 bool Window::smokeTest(QString *error) {
     return terminal->smokeTest(error);

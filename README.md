@@ -132,7 +132,8 @@ trying again. Archcodex never automatically repeats a creation request.
 
 Each view keeps its own query and scope. In **All**, choose all servers or a
 selected server/folder to scope conversation search. **Load more history**
-retrieves older session entries.
+retrieves older session entries. Search counts and progress stay above the tree;
+**Details…** opens a scrollable report of any connections with incomplete coverage.
 
 In **Active**, **Running**, **Waiting** and **Opened**, typing filters cached
 titles, working-directory paths and session IDs without making server search
