@@ -20,6 +20,8 @@ class QLabel;
 class QPushButton;
 class QSplitter;
 class QToolButton;
+class QDialog;
+class KSqueezedTextLabel;
 namespace Archcodex {
 class TerminalArea;
 class DiscoveryDialog;
@@ -50,7 +52,8 @@ class Window : public QMainWindow {
     QHash<QString, QString> connectionStates;
     QHash<QString, bool> connectionReady, more;
     QSet<QString> searching;
-    QStringList searchErrors;
+    QMap<QString, QStringList> searchErrors; // Backend identity -> distinct diagnostics.
+    QString submittedQuery;
     quint64 searchToken = 0;
     QSet<QString> scopeBackends;
     bool scopedSearch = false;
@@ -89,7 +92,15 @@ class Window : public QMainWindow {
     QTabBar *tabs;
     QLineEdit *searchBox;
     QComboBox *scope;
-    QLabel *searchNotice, *connections;
+    QLabel *connections;
+    KSqueezedTextLabel *searchNotice, *searchProgress;
+    QWidget *searchFeedback;
+    QToolButton *searchDetailsButton;
+    QPointer<QDialog> searchDetails;
+    void recordSearchError(const QString &backend, const QString &message);
+    void showSearchDetails();
+    void updateSearchDetails();
+    void closeSearchDetails();
     QPushButton *loadMore;
     QSplitter *splitter;
     TerminalArea *terminal = nullptr;

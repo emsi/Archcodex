@@ -6,11 +6,12 @@
 #include "notifications.h"
 #include "opening.h"
 #include "ptyprobe.h"
+#include "searchbenchmark.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
-#include "updater.h"
 #include "testenvironment.h"
+#include "updater.h"
 #include "window.h"
 #include "worker.h"
 #include <KCommandBar>
@@ -151,6 +152,15 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void largeSearchPerformance_data() {
+        QTest::addColumn<int>("delay");
+        QTest::newRow("rapid") << 0;
+        QTest::newRow("delayed") << 40;
+    }
+    void largeSearchPerformance() {
+        QFETCH(int, delay);
+        runSearchBenchmark(delay);
+    }
     void singleClickOpensOnce_data() {
         QTest::addColumn<bool>("singleClickStyle");
         QTest::newRow("desktop-double-click") << false;
@@ -1230,7 +1240,7 @@ class WindowTests : public QObject {
         auto *tabs = window.findChild<QTabBar *>();
         auto *query = window.findChild<QLineEdit *>("sessionSearch");
         auto *scope = window.findChild<QComboBox *>();
-        auto *feedback = window.findChild<QLabel *>("searchFeedback");
+        auto *feedback = window.findChild<KSqueezedTextLabel *>("searchFeedback");
         auto *terminal = window.findChild<TerminalArea *>();
         QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
         QTRY_VERIFY(backend->ready());
@@ -1263,7 +1273,7 @@ class WindowTests : public QObject {
         query->setText("NEEDLE");
         QCOMPARE(visibleThreads(tree), (QStringList{"remote", "running", "sibling", "waiting"}));
         QVERIFY(query->toolTip().contains("conversation bodies are not searched"));
-        QVERIFY(feedback->text().contains("4 matching sessions"));
+        QVERIFY(feedback->fullText().contains("4 matching sessions"));
         QTest::keyClick(query, Qt::Key_Return);
         QVERIFY(tabs->isEnabled());
         tabs->setCurrentIndex(2);
@@ -1283,7 +1293,7 @@ class WindowTests : public QObject {
         QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
         QCOMPARE(serverNode(tree).parent().data(KindRole).toInt(), int(NodeKind::Group));
         QCOMPARE(waitingNode().parent().data().toString(), "deep");
-        QVERIFY(feedback->text().contains(waiting.cwd));
+        QVERIFY(feedback->fullText().contains(waiting.cwd));
         query->setText("no match");
         QCOMPARE(visibleThreads(tree).size(), 0);
         query->setText("needle"); // Scope must survive an empty result tree.
@@ -1358,6 +1368,115 @@ class WindowTests : public QObject {
         QCOMPARE(fixture.methods, requests);
         window.close();
     }
+    void searchFeedbackStaysBounded_data() {
+        QTest::addColumn<int>("fontSize");
+        QTest::addColumn<int>("paneWidth");
+        QTest::newRow("narrow") << 10 << 240;
+        QTest::newRow("large-font") << 20 << 340;
+    }
+    void searchFeedbackStaysBounded() {
+        QFETCH(int, fontSize);
+        QFETCH(int, paneWidth);
+        Fixture fixture;
+        fixture.delaySearch = true;
+        QTemporaryDir data;
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(fixture.profile());
+            for (int i = 0; i < 24; ++i) {
+                auto p = fixture.profile();
+                p.id = QString("offline-%1").arg(i);
+                p.name = "<b>Long identical connection names</b> with host and container details";
+                p.socketPath = data.filePath(p.id);
+                store.save(p);
+            }
+        }
+        Window window(data.path(), false);
+        auto font = window.font();
+        font.setPointSize(fontSize);
+        window.setFont(font);
+        window.resize(1300, 1100);
+        window.show();
+        window.activateWindow();
+        window.findChild<QSplitter *>()->setSizes({paneWidth, 1300 - paneWidth});
+        QTRY_COMPARE(window.findChildren<Backend *>().size(), 25);
+        Backend *online = nullptr, *offline = nullptr;
+        for (auto *b : window.findChildren<Backend *>())
+            if (b->profile.id == fixture.profile().id)
+                online = b;
+            else
+                offline = b;
+        QVERIFY(online && offline);
+        online->connectServer();
+        QTRY_VERIFY(online->ready());
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
+        auto *tree = window.findChild<QTreeView *>();
+        auto *summary = window.findChild<KSqueezedTextLabel *>("searchFeedback");
+        auto *progress = window.findChild<KSqueezedTextLabel *>("searchProgress");
+        auto *area = window.findChild<QWidget *>("searchFeedbackArea");
+        auto *button = window.findChild<QToolButton *>("searchDetailsButton");
+        query->setFocus();
+        query->setText("needle");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(fixture.searchIds.size(), 1);
+        QTRY_VERIFY(progress->fullText().contains("24 incomplete"));
+        QVERIFY(progress->fullText().contains("Searching 1"));
+        QCOMPARE(summary->fullText(), "0 results");
+        QCOMPARE(QApplication::focusWidget(), query);
+        QVERIFY(tree->viewport()->height() > 350);
+        QVERIFY(area->height() <= 4 * summary->fontMetrics().height() + 20);
+        const auto height = tree->viewport()->height();
+        button->setFocus();
+        QTest::keyClick(button, Qt::Key_Space);
+        QTRY_VERIFY(window.findChild<QDialog *>("searchDetails"));
+        QPointer<QDialog> dialog = window.findChild<QDialog *>("searchDetails");
+        QVERIFY(!dialog->isModal());
+        auto *report = dialog->findChild<QPlainTextEdit *>();
+        QVERIFY(report->toPlainText().contains("<b>Long identical connection names</b>"));
+        for (int i = 0; i < 24; ++i)
+            QVERIFY(report->toPlainText().contains(QString("[offline-%1]").arg(i)));
+        QTRY_VERIFY(dialog->isActiveWindow());
+        report->setFocus();
+        auto cursor = report->textCursor();
+        cursor.setPosition(0);
+        cursor.setPosition(5, QTextCursor::KeepAnchor);
+        report->setTextCursor(cursor);
+        const auto text = report->toPlainText();
+        offline->searchResults(1, {}, "Disconnected — search coverage incomplete.", true);
+        QCOMPARE(report->toPlainText(), text); // Repeated diagnostics are one entry per backend.
+        auto visible = Session::fromThread(online->profile.id, fixture.thread("visible"));
+        auto hidden = visible;
+        hidden.id = "hidden";
+        hidden.ephemeral = true;
+        online->searchResults(1, {visible, hidden}, {}, false);
+        QCOMPARE(summary->fullText(), "1 results · 1 hidden");
+        QCOMPARE(tree->viewport()->height(), height);
+        QCOMPARE(QApplication::focusWidget(), report);
+        QCOMPARE(report->textCursor().selectedText(), "Query");
+        fixture.reply(fixture.searchIds.first(),
+                      {{"data", QJsonArray{}}, {"nextCursor", QJsonValue::Null}});
+        QTRY_VERIFY(progress->fullText().contains("Search complete"));
+        QVERIFY(progress->fullText().contains("24 incomplete"));
+        window.findChild<QTabBar *>()->setCurrentIndex(3);
+        QVERIFY(!dialog || !dialog->isVisible());
+        QVERIFY(!area->isVisible());
+        window.findChild<QTabBar *>()->setCurrentIndex(0);
+        query->clear();
+        QVERIFY(!area->isVisible());
+        query->setText("fresh");
+        QTest::keyClick(query, Qt::Key_Return);
+        button->click();
+        dialog = window.findChild<QDialog *>("searchDetails");
+        // A closed dialog is deleteLater'd; the visible dialog belongs to this query.
+        for (auto *d : window.findChildren<QDialog *>("searchDetails"))
+            if (d->isVisible())
+                dialog = d;
+        QVERIFY(dialog && dialog->isVisible());
+        offline->searchResults(1, {}, "obsolete diagnostic", true);
+        QVERIFY(!dialog->findChild<QPlainTextEdit *>()->toPlainText().contains("obsolete"));
+        QVERIFY(dialog->findChild<QPlainTextEdit *>()->toPlainText().startsWith("Query: fresh"));
+        window.close();
+    }
     void allSearchFinishesInBackgroundAndRejectsStaleResults() {
         Fixture fixture;
         fixture.delaySearch = true;
@@ -1374,7 +1493,7 @@ class WindowTests : public QObject {
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();
         auto *query = window.findChild<QLineEdit *>("sessionSearch");
-        auto *feedback = window.findChild<QLabel *>("searchFeedback");
+        auto *feedback = window.findChild<KSqueezedTextLabel *>("searchFeedback");
         QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
         query->setText("conversation text");
         QTest::keyClick(query, Qt::Key_Return);
@@ -1389,11 +1508,11 @@ class WindowTests : public QObject {
         QTest::qWait(50);
         QCOMPARE(query->text(), "example");
         QCOMPARE(visibleThreads(tree), QStringList{"thread-1"});
-        QVERIFY(feedback->text().contains("cached titles"));
+        QVERIFY(feedback->fullText().contains("cached titles"));
         tabs->setCurrentIndex(0);
         QCOMPARE(query->text(), "conversation text");
         QTRY_COMPARE(visibleThreads(tree), QStringList{"found"});
-        QVERIFY(!feedback->text().contains("searching"));
+        QVERIFY(!feedback->fullText().contains("searching"));
         query->clear();
         QCOMPARE(visibleThreads(tree), QStringList{"thread-1"});
         query->setText("old request");
@@ -1413,7 +1532,7 @@ class WindowTests : public QObject {
             1, {Session::fromThread(backend->profile.id, fixture.thread("stale-signal"))},
             "old error", true);
         QCOMPARE(visibleThreads(tree), QStringList{"fresh"});
-        QVERIFY(!feedback->text().contains("old error"));
+        QVERIFY(!feedback->fullText().contains("old error"));
         query->setText("interrupted search");
         QTest::keyClick(query, Qt::Key_Return);
         QTRY_COMPARE(fixture.searchIds.size(), 4);
@@ -1421,9 +1540,14 @@ class WindowTests : public QObject {
         fixture.peer->close();
         QTRY_VERIFY(!backend->ready());
         QCOMPARE(query->text(), "example");
-        QVERIFY(!feedback->text().contains("interrupted"));
+        QVERIFY(!feedback->fullText().contains("interrupted"));
         tabs->setCurrentIndex(0);
-        QVERIFY(feedback->text().contains("interrupted", Qt::CaseInsensitive));
+        auto *progress = window.findChild<KSqueezedTextLabel *>("searchProgress");
+        QVERIFY(progress->fullText().contains("1 incomplete"));
+        window.findChild<QToolButton *>("searchDetailsButton")->click();
+        auto *details = window.findChild<QDialog *>("searchDetails");
+        QVERIFY(details);
+        QVERIFY(details->findChild<QPlainTextEdit *>()->toPlainText().contains("interrupted"));
         query->clear();
         window.close();
     }
@@ -1853,7 +1977,7 @@ class WindowTests : public QObject {
         Window window(data.path(), false);
         window.show();
         auto *discovery = window.findChild<HostDiscovery *>();
-        auto *feedback = window.findChild<QLabel *>("searchFeedback");
+        auto *feedback = window.findChild<KSqueezedTextLabel *>("searchFeedback");
         auto *status = window.findChild<QToolButton *>("discoveryStatus");
         QVERIFY(feedback && feedback->isHidden());
         QVERIFY(status && status->isHidden());
