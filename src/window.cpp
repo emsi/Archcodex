@@ -179,24 +179,43 @@ void walkTree(QAbstractItemModel *model, const QModelIndex &parent,
         walkTree(model, child, visit);
     }
 }
-QStringList expandedKeys(QTreeView *tree) {
+void walkContainers(QAbstractItemModel *model, const QModelIndex &parent,
+                    const std::function<void(const QModelIndex &)> &visit) {
+    for (int i = 0; i < model->rowCount(parent); ++i) {
+        const auto child = model->index(i, 0, parent);
+        if (child.data(KindRole).toInt() == int(NodeKind::Session))
+            continue;
+        visit(child);
+        walkContainers(model, child, visit);
+    }
+}
+QStringList expandedKeys(QTreeView *tree, const QModelIndex &root = {}) {
     QStringList keys;
-    walkTree(tree->model(), {}, [&](const QModelIndex &index) {
+    const auto capture = [&](const QModelIndex &index) {
         if (tree->isExpanded(index))
             keys << index.data(KeyRole).toString();
-    });
+    };
+    if (root.isValid())
+        capture(root);
+    walkContainers(tree->model(), root, capture);
     return keys;
 }
 void restoreTree(QTreeView *tree, const QStringList &keys, const QString &selected) {
-    walkTree(tree->model(), {}, [&](const QModelIndex &index) {
-        if (keys.contains(index.data(KeyRole).toString()))
+    auto *proxy = qobject_cast<QSortFilterProxyModel *>(tree->model());
+    auto *source = qobject_cast<SessionModel *>(proxy->sourceModel());
+    // Resolve stable keys directly instead of traversing every session and
+    // performing a linear list lookup for each row.
+    for (const auto &key : keys) {
+        const auto index = proxy->mapFromSource(source->nodeIndex(key));
+        if (index.isValid())
             tree->expand(index);
-        if (!selected.isEmpty() && index.data(KeyRole).toString() == selected) {
-            tree->setCurrentIndex(index);
-            for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
-                tree->expand(parent);
-        }
-    });
+    }
+    const auto index = proxy->mapFromSource(source->nodeIndex(selected));
+    if (index.isValid()) {
+        tree->setCurrentIndex(index);
+        for (auto parent = index.parent(); parent.isValid(); parent = parent.parent())
+            tree->expand(parent);
+    }
 }
 bool expandsByDefault(int index) {
     return index == int(SessionView::Running) || index == int(SessionView::Waiting) ||
@@ -326,6 +345,29 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         explorer[tabs->currentIndex()].navigation.collapsed.remove(index.data(KeyRole).toString());
     });
     for (auto *source : {model, results}) {
+        connect(source, &SessionModel::branchAboutToMove, this,
+                [this, source](const QModelIndex &index) {
+                    movingExpanded.clear();
+                    movingSelected.clear();
+                    if (changingExplorer || filter->sourceModel() != source)
+                        return;
+                    const auto branch = filter->mapFromSource(index);
+                    if (!branch.isValid())
+                        return;
+                    movingExpanded = expandedKeys(tree, branch);
+                    for (auto selected = tree->currentIndex(); selected.isValid();
+                         selected = selected.parent())
+                        if (selected == branch) {
+                            movingSelected = tree->currentIndex().data(KeyRole).toString();
+                            break;
+                        }
+                });
+        connect(source, &SessionModel::branchMoved, this, [this, source] {
+            if (!changingExplorer && filter->sourceModel() == source) {
+                const QSignalBlocker block(tree);
+                restoreTree(tree, movingExpanded, movingSelected);
+            }
+        });
         connect(source, &SessionModel::topologyAboutToChange, this, [this, source] {
             if (!changingExplorer && filter->sourceModel() == source) {
                 topologyExpanded = expandedKeys(tree);
@@ -337,7 +379,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 return;
             const QSignalBlocker block(tree);
             restoreTree(tree, topologyExpanded, topologySelected);
-            walkTree(filter, {}, [&](const QModelIndex &root) {
+            walkContainers(filter, {}, [&](const QModelIndex &root) {
                 const auto kind = static_cast<NodeKind>(root.data(KindRole).toInt());
                 if (kind != NodeKind::Group && kind != NodeKind::Server)
                     return;
@@ -348,9 +390,39 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 }
             });
             expandActivityViews();
-            syncCurrentSession();
+            if (source != results)
+                syncCurrentSession(); // Search pages preserve browsing/scroll position.
         });
     }
+    connect(filter, &QAbstractItemModel::rowsInserted, this,
+            [this](const QModelIndex &parent, int first, int last) {
+                if (changingExplorer)
+                    return;
+                const QSignalBlocker block(tree);
+                const auto &state = explorer[tabs->currentIndex()];
+                const auto expand = [&](const QModelIndex &index) {
+                    const auto kind = static_cast<NodeKind>(index.data(KindRole).toInt());
+                    const auto key = index.data(KeyRole).toString();
+                    if (kind == NodeKind::Session)
+                        return;
+                    const bool root = kind == NodeKind::Group || kind == NodeKind::Server;
+                    if ((root && !seenRoots.contains(key)) ||
+                        ((state.filtering || expandsByDefault(tabs->currentIndex())) &&
+                         !state.navigation.collapsed.contains(key)))
+                        tree->expand(index);
+                    if (root)
+                        seenRoots.insert(key);
+                };
+                for (int row = first; row <= last; ++row) {
+                    const auto index = filter->index(row, 0, parent);
+                    if (index.data(KindRole).toInt() == int(NodeKind::Session))
+                        continue;
+                    expand(index);
+                    // A previously filtered-out root can expose an already
+                    // populated branch in a single insertion notification.
+                    walkContainers(filter, index, expand);
+                }
+            });
     loadMore = new QPushButton("Load more history");
     loadMore->setEnabled(false);
     left->addWidget(loadMore);
@@ -358,6 +430,19 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         if (!changingExplorer)
             updateSearchControls();
     });
+    connect(model, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex &first, const QModelIndex &, const QList<int> &roles) {
+                // Incremental membership changes update top-level aggregates
+                // without regrouping. Cached-filter counts must follow them too.
+                if (!changingExplorer && !first.parent().isValid() &&
+                    (roles.isEmpty() || roles.contains(CountRole))) {
+                    updateSearchControls();
+                    // A displayed conversation may have just re-entered a local
+                    // filter. Restore its missing selection without disturbing browsing.
+                    if (filter->sourceModel() == model && !tree->currentIndex().isValid())
+                        syncCurrentSession();
+                }
+            });
     connect(loadMore, &QPushButton::clicked, this, [this] {
         for (auto *b : backends)
             b->loadMore();
@@ -899,13 +984,19 @@ void Window::attach(const BackendProfile &p, bool start) {
                     updates << s;
                 }
                 results->upsertMany(updates);
+                // Select a displayed conversation when it first arrives, without
+                // repeatedly revealing it over the user's subsequent navigation.
+                if (showingSearch() && !tree->currentIndex().isValid()) {
+                    const auto index =
+                        filter->mapFromSource(results->sessionIndex(terminal->currentKey()));
+                    if (index.isValid())
+                        tree->setCurrentIndex(index);
+                }
                 if (!error.isEmpty())
                     recordSearchError(id, error);
                 if (complete)
                     searching.remove(id);
                 updateSearchSummary();
-                if (showingSearch())
-                    expandActivityViews();
             });
     connect(b, &Backend::identityReceived, this, [this, id = p.id](const QJsonObject &identity) {
         if (!profiles.contains(id))
@@ -1033,7 +1124,7 @@ void Window::expandActivityViews() {
         return;
     const QSignalBlocker block(tree);
     const auto &closed = state.navigation.collapsed;
-    walkTree(filter, {}, [&](const QModelIndex &index) {
+    walkContainers(filter, {}, [&](const QModelIndex &index) {
         if (filter->rowCount(index))
             tree->setExpanded(index, !closed.contains(index.data(KeyRole).toString()));
     });
@@ -1676,13 +1767,15 @@ void Window::updateUpdateStatus() {
     const auto state = updater->state();
     const auto version = updater->release()["version"].toString();
     const auto skipped = QSettings(dataDirectory + "/window.ini", QSettings::IniFormat)
-                             .value("updates/skippedVersion").toString();
+                             .value("updates/skippedVersion")
+                             .toString();
     updateStatus->setVisible((state == State::Available && version != skipped) ||
-                            state == State::Installed || state == State::Downloading ||
-                            state == State::Installing || state == State::Error);
-    updateStatus->setText(state == State::Installed ? "Update installed — restart…" :
-                          state == State::Available ? "Update available: " + version + "…" :
-                          state == State::Error ? "Update check / install failed…" : "Updating…");
+                             state == State::Installed || state == State::Downloading ||
+                             state == State::Installing || state == State::Error);
+    updateStatus->setText(state == State::Installed   ? "Update installed — restart…"
+                          : state == State::Available ? "Update available: " + version + "…"
+                          : state == State::Error     ? "Update check / install failed…"
+                                                      : "Updating…");
     updateStatus->setToolTip(state == State::Error ? updater->error() : "Archcodex updates");
 }
 void Window::showDiscoveryDetails() {
@@ -2170,13 +2263,23 @@ void Window::search() {
     scopedSearch = selection.scoped;
     scopeBackends = selection.backends;
     scopePath = selection.path;
-    beginFiltering();
+    if (!explorer[0].filtering)
+        beginFiltering();
+    else {
+        // Filtered expansion follows the explicit collapse set. Retain the
+        // current selection without walking the previous result tree again.
+        explorer[0].navigation.selected = tree->currentIndex().data(KeyRole).toString();
+        explorer[0].navigation.saved = true;
+    }
     closeSearchDetails();
     submittedQuery = query;
     ++searchToken;
     globalSearchActive = true;
     searchSessions.clear();
-    results->resetResults();
+    {
+        const QScopedValueRollback changing(changingExplorer, true);
+        results->resetResults(); // This is a replacement, not a branch to restore.
+    }
     searchErrors.clear();
     searching.clear();
     showExplorer();
@@ -2201,7 +2304,10 @@ void Window::clearSearch() {
     searchErrors.clear();
     searching.clear();
     searchSessions.clear();
-    results->resetResults();
+    {
+        const QScopedValueRollback changing(changingExplorer, true);
+        results->resetResults();
+    }
     // This can also be called when a connection is removed from another tab.
     auto &all = explorer[int(SessionView::All)];
     all.navigation = all.unfiltered;

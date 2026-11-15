@@ -61,6 +61,8 @@ CodexBackend::~CodexBackend() {
 }
 void CodexBackend::shutdownProcess() {
     ++generation;
+    ++searchGeneration;
+    searchContinuation = {};
     liveTurns.clear();
     unclassifiedAttention.clear();
     attentionMetadataOverflow = false;
@@ -748,6 +750,7 @@ void CodexBackend::forkSession(const QString &id, const QString &priorExecutionE
 }
 void CodexBackend::search(const QString &query, quint64 token) {
     const auto sid = ++searchGeneration;
+    searchContinuation = {};
     if (query.isEmpty())
         return;
     if (!initialized) {
@@ -755,6 +758,12 @@ void CodexBackend::search(const QString &query, quint64 token) {
         return;
     }
     searchPage(query, {}, token, sid, 0);
+}
+void CodexBackend::advanceSearch(quint64 token) {
+    if (token == continuationToken && searchContinuation) {
+        auto next = std::exchange(searchContinuation, {});
+        next();
+    }
 }
 void CodexBackend::searchPage(const QString &query, const QString &cursor, quint64 token,
                               quint64 sid, int pages) {
@@ -788,12 +797,19 @@ void CodexBackend::searchPage(const QString &query, const QString &cursor, quint
                 }
                 const auto next = r["nextCursor"].toString();
                 const bool done = next.isEmpty() || next == cursor || pages >= 99;
+                if (!done) {
+                    continuationToken = token;
+                    searchContinuation = [this, query, next, token, sid, pages] {
+                        if (sid == searchGeneration && initialized)
+                            searchPage(query, next, token, sid, pages + 1);
+                    };
+                }
                 emit searchResults(
                     token, matches,
                     pages >= 99 ? "Search stopped at 10,000 results; narrow the query." : QString(),
                     done);
-                if (!done)
-                    searchPage(query, next, token, sid, pages + 1);
+                if (!searchPaced)
+                    advanceSearch(token);
             });
 }
 } // namespace Archcodex

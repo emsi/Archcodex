@@ -162,7 +162,8 @@ class Window : public QMainWindow {
     bool showingSearch() const;
     void expandActivityViews();
     int previousTab = 0;
-    QStringList topologyExpanded;
+    QStringList topologyExpanded, movingExpanded;
+    QString movingSelected;
     QString topologySelected;
     QSet<QString> seenRoots;
     void refreshNames();

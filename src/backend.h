@@ -61,6 +61,11 @@ class CodexBackend : public Backend {
     }
     void loadMore() override;
     void search(const QString &query, quint64 token) override;
+    // AsyncBackend acknowledges consumption before requesting another page.
+    void setSearchPaced(bool enabled) {
+        searchPaced = enabled;
+    }
+    void advanceSearch(quint64 token);
     void verifySession(const QString &id, quint64 token = 0) override;
     void startSession(const QString &cwd, quint64 token) override;
     void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) override;
@@ -106,6 +111,9 @@ class CodexBackend : public Backend {
     bool initialized = false, wanted = false, listing = false;
     int retry = 0;
     quint64 generation = 0, searchGeneration = 0;
+    bool searchPaced = false;
+    quint64 continuationToken = 0;
+    std::function<void()> searchContinuation;
     qint64 nextId = 1;
     void request(const QString &method, const QJsonObject &params, Reply reply);
     void send(const QJsonObject &message);

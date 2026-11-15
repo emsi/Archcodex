@@ -60,10 +60,13 @@ class SessionModel : public QStandardItemModel {
     void setMyCodexWorkdirOnly(bool enabled);
     void setView(SessionView view, const SessionQuery &query = {});
     QModelIndex sessionIndex(const QString &key) const;
+    QModelIndex nodeIndex(const QString &key) const;
     SessionView currentView() const {
         return view;
     }
   signals:
+    void branchAboutToMove(const QModelIndex &index);
+    void branchMoved(const QModelIndex &index);
     void topologyAboutToChange();
     void topologyChanged();
 
@@ -79,10 +82,20 @@ class SessionModel : public QStandardItemModel {
     QHash<QString, int> groupOrders;
     QHash<QString, QStandardItem *> groups;
     QHash<QString, Session> records;
+    QHash<QString, QSet<QString>> backendRecords;
+    // Actual visible working directories, ordered for nearest-path insertion.
+    QHash<QString, QMap<QString, bool>> directoryPaths;
+    QStandardItem *ensureDirectory(const QString &backend, const QString &path, qint64 recency);
+    QStandardItem *createDirectory(const QString &backend, const QString &path, qint64 recency = 0);
+    void moveItem(QStandardItem *item, QStandardItem *parent);
+    void updateFolder(QStandardItem *item);
+    void addAggregates(QStandardItem *parent, const QList<const Session *> &added);
     bool visible(const Session &s) const;
-    void rebuild(const QString &backend);
+    void rebuild(const QString &backend, const QSet<QString> *changed = nullptr);
+    QStandardItem *sessionParent(const Session &session) const;
     void updateSession(QStandardItem *item, const Session &s);
     void aggregate(QStandardItem *parent);
+    void publishAggregate(QStandardItem *parent, QMap<int, QVariant> values);
     void aggregateAncestors(QStandardItem *item);
     void placeRoot(const QString &backend);
     void pruneGroups();

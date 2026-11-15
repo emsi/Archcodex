@@ -36,6 +36,7 @@
 #include <QProxyStyle>
 #include <QPushButton>
 #include <QScopeGuard>
+#include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
 #include <QStatusBar>
@@ -160,6 +161,18 @@ class WindowTests : public QObject {
     void largeSearchPerformance() {
         QFETCH(int, delay);
         runSearchBenchmark(delay);
+    }
+    void searchWorkloads_data() {
+        QTest::addColumn<QString>("shape");
+        QTest::addColumn<int>("delay");
+        for (const auto &shape : {"idle", "clustered", "distinct", "nested", "single"})
+            QTest::newRow(shape) << QString(shape) << 0;
+        QTest::newRow("distinct-delayed") << QString("distinct") << 40;
+    }
+    void searchWorkloads() {
+        QFETCH(QString, shape);
+        QFETCH(int, delay);
+        runSearchBenchmark(delay, shape);
     }
     void singleClickOpensOnce_data() {
         QTest::addColumn<bool>("singleClickStyle");
@@ -363,11 +376,17 @@ class WindowTests : public QObject {
         query->setFocus();
         query->setText("late title");
         QVERIFY(!tree->currentIndex().isValid());
+        auto neighbour = a;
+        neighbour.id = "matching-neighbour";
+        neighbour.title = "Late title neighbour";
+        backends[first.id]->sessionChanged(neighbour);
+        QVERIFY(!tree->currentIndex().isValid());
         a.title = "Late title";
         backends[first.id]->sessionChanged(a);
         revealed(aKey);
         QCOMPARE(QApplication::focusWidget(), query);
         QCOMPARE(query->text(), "late title");
+        backends[first.id]->sessionRemoved(neighbour.id);
         a.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
         backends[first.id]->sessionChanged(a);
         QVERIFY(!tree->currentIndex().isValid());
@@ -1315,6 +1334,11 @@ class WindowTests : public QObject {
         waiting.title = "Needle waiting";
         backend->sessionChanged(waiting);
         QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
+        put(backend, "incremental", waiting.cwd, "idle");
+        QCOMPARE(visibleThreads(tree), (QStringList{"incremental", "waiting"}));
+        QVERIFY(feedback->fullText().startsWith("2 matching sessions"));
+        backend->sessionRemoved("incremental");
+        QVERIFY(feedback->fullText().startsWith("1 matching sessions"));
         tabs->setCurrentIndex(4);
         query->setText("waiting");
         QCOMPARE(visibleThreads(tree).size(), 0);
@@ -1366,6 +1390,71 @@ class WindowTests : public QObject {
         QTest::keyClick(query, Qt::Key_Return);
         QTest::qWait(50);
         QCOMPARE(fixture.methods, requests);
+        window.close();
+    }
+    void searchPagesPreserveBrowsingAndTerminalFocus() {
+        Fixture fixture;
+        fixture.delaySearch = true;
+        PtyProbe child;
+        QVERIFY(child.install());
+        auto profile = fixture.profile();
+        profile.executable = child.executable();
+        QTemporaryDir data;
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(profile);
+        }
+        Window window(data.path(), false);
+        window.resize(1300, 900);
+        window.show();
+        window.activateWindow();
+        QTRY_VERIFY(window.findChild<Backend *>());
+        auto *backend = window.findChild<Backend *>();
+        backend->connectServer();
+        QTRY_VERIFY(backend->ready());
+        auto *area = window.findChild<TerminalArea *>();
+        const auto current = Session::fromThread(profile.id, fixture.thread());
+        QString error;
+        QVERIFY2(area->open(profile, current, &error), qPrintable(error));
+        auto *query = window.findChild<QLineEdit *>("sessionSearch");
+        auto *tree = window.findChild<QTreeView *>();
+        query->setText("needle");
+        QTest::keyClick(query, Qt::Key_Return);
+        QTRY_COMPARE(fixture.searchIds.size(), 1);
+        QJsonArray first{QJsonObject{{"thread", fixture.thread()}}};
+        for (int i = 0; i < 90; ++i) {
+            auto t = fixture.thread(QString("match-%1").arg(i));
+            t["updatedAt"] = 200 - i;
+            first << QJsonObject{{"thread", t}};
+        }
+        fixture.reply(fixture.searchIds[0], {{"data", first}, {"nextCursor", "second"}});
+        QTRY_COMPARE(fixture.searchIds.size(), 2); // First page consumed before the next request.
+        const auto browsedKey = sessionKey(profile.id, "match-89");
+        tree->setCurrentIndex(nodeWithKey(tree, browsedKey));
+        tree->scrollTo(tree->currentIndex());
+        const auto scroll = tree->verticalScrollBar()->value();
+        area->focusCurrent();
+        QTRY_VERIFY(area->isAncestorOf(QApplication::focusWidget()));
+        auto *focus = QApplication::focusWidget();
+        fixture.reply(fixture.searchIds[1],
+                      {{"data", QJsonArray{QJsonObject{{"thread", fixture.thread("later")}}}},
+                       {"nextCursor", "third"}});
+        QTRY_COMPARE(fixture.searchIds.size(), 3);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), browsedKey);
+        QCOMPARE(tree->verticalScrollBar()->value(), scroll);
+        const auto folderKey = tree->currentIndex().parent().data(KeyRole).toString();
+        tree->collapse(tree->currentIndex().parent());
+        const auto selected = tree->currentIndex().data(KeyRole).toString();
+        auto branch = fixture.thread("new-branch");
+        branch["cwd"] = "/other/path/to/worktree";
+        fixture.reply(fixture.searchIds[2], {{"data", QJsonArray{QJsonObject{{"thread", branch}}}},
+                                             {"nextCursor", QJsonValue::Null}});
+        auto *progress = window.findChild<KSqueezedTextLabel *>("searchProgress");
+        QTRY_VERIFY(progress->fullText().contains("Search complete"));
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), selected);
+        QVERIFY(!tree->isExpanded(nodeWithKey(tree, folderKey)));
+        QCOMPARE(QApplication::focusWidget(), focus);
+        QCOMPARE(area->currentKey(), sessionKey(profile.id, current.id));
         window.close();
     }
     void searchFeedbackStaysBounded_data() {

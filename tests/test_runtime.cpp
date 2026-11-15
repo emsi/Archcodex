@@ -56,6 +56,135 @@ class RuntimeTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void pacedSearchWaitsForConsumptionAndRetainsTheResultLimit() {
+        Fixture fixture;
+        fixture.searchMatches = 10007;
+        LocalBackend backend(fixture.profile(), BRIDGE_PATH);
+        backend.setSearchPaced(true);
+        QSignalSpy pages(&backend, &Backend::searchResults);
+        backend.connectServer();
+        QTRY_VERIFY(backend.ready());
+        backend.search("needle", 42);
+        QTRY_COMPARE(pages.size(), 1);
+        QTest::qWait(30);
+        QCOMPARE(fixture.searchIds.size(), 1); // Producer cannot run ahead of consumption.
+        backend.advanceSearch(41);
+        QTest::qWait(20);
+        QCOMPARE(fixture.searchIds.size(), 1);
+        for (int i = 1; i < 100; ++i) {
+            QVERIFY(!pages.last()[3].toBool());
+            backend.advanceSearch(42);
+            QTRY_COMPARE(pages.size(), i + 1);
+        }
+        int count = 0;
+        QSet<QString> ids;
+        for (const auto &page : pages) {
+            QCOMPARE(page[0].toULongLong(), 42);
+            const auto items = qvariant_cast<QList<Session>>(page[1]);
+            count += items.size();
+            for (const auto &s : items)
+                ids.insert(s.id);
+        }
+        QCOMPARE(count, 10000);
+        QCOMPARE(ids.size(), 10000);
+        QVERIFY(pages.last()[3].toBool());
+        QVERIFY(pages.last()[2].toString().contains("10,000"));
+        backend.advanceSearch(42);
+        QTest::qWait(30);
+        QCOMPARE(fixture.searchIds.size(), 100);
+        backend.search("replacement", 43);
+        QTRY_COMPARE(pages.size(), 101);
+        backend.advanceSearch(42);
+        QTest::qWait(20);
+        QCOMPARE(fixture.searchIds.size(), 101);
+        backend.search({}, 44);
+        backend.advanceSearch(43);
+        QTest::qWait(30);
+        QCOMPARE(fixture.searchIds.size(), 101);
+    }
+    void asyncSearchSlicesAreCompleteAndIndependent() {
+        Fixture fast, stalled;
+        fast.searchMatches = 301;
+        stalled.delaySearch = true;
+        auto second = stalled.profile();
+        second.id = "stalled";
+        AsyncBackend a(fast.profile(), BRIDGE_PATH), b(second, BRIDGE_PATH);
+        QSignalSpy delivered(&a, &Backend::searchResults), other(&b, &Backend::searchResults);
+        a.connectServer();
+        b.connectServer();
+        QTRY_VERIFY(a.ready() && b.ready());
+        a.search("needle", 10);
+        b.search("needle", 10);
+        QTRY_VERIFY(!delivered.isEmpty() && delivered.last()[3].toBool());
+        QVERIFY(other.isEmpty()); // A source that never replies does not hold the others.
+        QCOMPARE(stalled.searchIds.size(), 1);
+        int count = 0;
+        QSet<QString> ids;
+        for (int i = 0; i < delivered.size(); ++i) {
+            const auto &batch = delivered[i];
+            const auto items = qvariant_cast<QList<Session>>(batch[1]);
+            QVERIFY(items.size() <= 32);
+            QCOMPARE(batch[0].toULongLong(), 10);
+            QCOMPARE(batch[3].toBool(), i == delivered.size() - 1);
+            QVERIFY(batch[2].toString().isEmpty());
+            count += items.size();
+            for (const auto &s : items) {
+                QCOMPARE(s.backendId, a.profile.id);
+                ids.insert(s.id);
+            }
+        }
+        QCOMPARE(count, 301);
+        QCOMPARE(ids.size(), count);
+        QCOMPARE(fast.searchIds.size(), 4);
+    }
+    void queuedSearchCancellation_data() {
+        QTest::addColumn<QString>("action");
+        for (const auto &name : {"clear", "replace", "disconnect", "remove"})
+            QTest::newRow(name) << QString(name);
+    }
+    void queuedSearchCancellation() {
+        QFETCH(QString, action);
+        Fixture fixture;
+        fixture.searchMatches = 301;
+        auto backend = std::make_unique<AsyncBackend>(fixture.profile(), BRIDGE_PATH);
+        int original = 0, replacement = 0;
+        bool complete = false;
+        connect(backend.get(), &Backend::searchResults, this,
+                [&](quint64 token, const QList<Session> &items, const QString &, bool done) {
+                    if (token == 1) {
+                        ++original;
+                        if (original != 1)
+                            return;
+                        QVERIFY(!done && !items.isEmpty() && items.size() <= 32);
+                        if (action == "clear")
+                            backend->search({}, 2);
+                        else if (action == "replace")
+                            backend->search("replacement", 2);
+                        else if (action == "disconnect")
+                            backend->disconnectServer();
+                        else
+                            backend.reset(); // Safe even inside result delivery.
+                    } else {
+                        QCOMPARE(token, 2);
+                        replacement += items.size();
+                        complete = done;
+                    }
+                });
+        backend->connectServer();
+        QTRY_VERIFY(backend->ready());
+        backend->search("needle", 1);
+        QTRY_COMPARE(original, 1);
+        if (action == "replace") {
+            QTRY_VERIFY(complete);
+            QCOMPARE(replacement, 301);
+        }
+        QTest::qWait(100);
+        QCOMPARE(original, 1);
+        if (action != "replace") {
+            QCOMPARE(replacement, 0);
+            QCOMPARE(fixture.searchIds.size(), 1);
+        }
+    }
     void waitingNotificationsOnlyFollowLiveRunningTransitions() {
         Fixture f;
         LocalBackend b(f.profile(), BRIDGE_PATH);
