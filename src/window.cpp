@@ -904,8 +904,6 @@ void Window::attach(const BackendProfile &p, bool start) {
                 if (complete)
                     searching.remove(id);
                 updateSearchSummary();
-                if (showingSearch())
-                    expandActivityViews();
             });
     connect(b, &Backend::identityReceived, this, [this, id = p.id](const QJsonObject &identity) {
         if (!profiles.contains(id))
