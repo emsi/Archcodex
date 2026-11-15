@@ -210,3 +210,40 @@ acceptance check. The new synthetic comparison targets p95 GUI delay ≤10 ms,
 terminal echo ≤30 ms, and paint observation ≤50 ms; maxima ≤125 ms including
 repeated query replacement. These are test-workload targets, not production
 hard-real-time guarantees.
+
+### Measured result
+
+Application changes: `3066190` (0.11.1-rc.3). Final runs are recorded in
+`search-distribution-after.jsonl`: three runs per case, 1,932 native input echoes
+and matching paint observations, 75 completed searches with all 7,200 records
+per search. Every case's final visible count was 5,760. All per-run p95 values
+and maxima met the stronger fixture targets above.
+
+Before values are the single stronger-baseline run for each workload; after
+values are the median of three per-run p95s, in milliseconds:
+
+| Workload | GUI before → after | PTY echo before → after | Paint observation before → after |
+| --- | ---: | ---: | ---: |
+| Idle control | 0.03 → 0.03 | 5.9 → 6.0 | 13.0 → 12.9 |
+| Clustered folders | 7.3 → 3.3 | 19.0 → 12.7 | 41.7 → 25.0 |
+| Distinct projects | 125.7 → 5.3 | 447.5 → 24.6 | 852.6 → 42.9 |
+| Nested projects | 81.4 → 5.9 | 266.9 → 25.6 | 541.2 → 45.0 |
+| One folder per server | 5.0 → 3.1 | 23.8 → 13.3 | 46.1 → 24.9 |
+| Distinct, one delayed server | 132.7 → 5.8 | 437.9 → 25.2 | 834.8 → 40.1 |
+
+Average search duration within each run, taking the median of those averages,
+was 2.5 seconds for distinct projects (baseline 20.3 seconds), 3.8 seconds for
+nested projects (15.6 seconds), and 3.0 seconds with the delayed server
+(21.0 seconds). The maximum across all final runs was 59.5 ms for GUI delay,
+72.3 ms for echo, and 91.4 ms for paint observation. Synchronous submission,
+including replacement of the previous full tree, reached 64.3 ms. These occasional
+replacement costs remain visible in the distributions; the adaptive target is
+not a guarantee that every GUI operation fits four milliseconds.
+
+The final model suite passed 31 cases, including randomized path insertion and
+batched comparisons against full regrouping, populated/batched row insertion,
+visibility, aggregates and index behavior. The Window suite passed 35 ordinary
+cases; eight opt-in benchmark rows are skipped in that suite, with the six native
+workload rows executed separately three times above. Existing search cancellation,
+page acknowledgement and stale-generation tests also pass. Candidate-wide runtime,
+package and desktop boundaries are recorded in the versioned testing receipt.
