@@ -20,6 +20,12 @@ class OpeningCoordinator : public QObject {
     int pendingCount() const {
         return attempts.size();
     }
+    bool referencesBackend(const QString &id) const {
+        for (const auto &attempt : attempts)
+            if (attempt.view.backendId == id)
+                return true;
+        return false;
+    }
   signals:
     void stateChanged(const QString &viewId, const QString &text, bool needsAttention);
     void launchRequested(const QString &viewId, const Archcodex::BackendProfile &profile,

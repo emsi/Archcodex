@@ -63,7 +63,8 @@ elif args[0] == 'exec':
 import os,json
 def fixture_snapshot(default=None,aliases=()):
  data=json.load(open(os.environ['ARCHCODEX_TRANSPORT_FIXTURE']+'/state.json'))
- return data['endpoints'][os.environ['ARCHCODEX_FIXTURE_CONTAINER']],[]
+ cid=os.environ['ARCHCODEX_FIXTURE_CONTAINER']
+ return data['endpoints'][cid],data.get('issues',{}).get(cid,[])
 sys.modules['discover'].snapshot=fixture_snapshot
 sys.modules['transport'].main()
 '''

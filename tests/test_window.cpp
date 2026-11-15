@@ -39,6 +39,8 @@
 #include <QScrollBar>
 #include <QSettings>
 #include <QSplitter>
+#include <QSqlDatabase>
+#include <QSqlQuery>
 #include <QStatusBar>
 #include <QTabBar>
 #include <QToolButton>
@@ -2059,6 +2061,350 @@ class WindowTests : public QObject {
         });
         reopened.findChild<QAction *>("configureArchcodex")->trigger();
         reopened.close();
+    }
+    void refreshRetiresPersistedConnectionsAndPreservesReferencedViews() {
+        TestHome home;
+        QTemporaryDir data;
+        const auto path = data.filePath("metadata.sqlite");
+        {
+            Store store(path);
+            for (int i = 0; i < 28; ++i) {
+                BackendProfile p{QString::number(i), "Automatic"};
+                p.socketPath = data.filePath("missing-" + p.id);
+                p.discovered = i != 23;
+                p.autoConnect = i != 24;
+                store.save(p);
+                auto session = Session::fromThread(p.id, {{"id", "history"},
+                                                          {"cwd", "/outside/workdir"},
+                                                          {"path", "/real/codex/rollout"},
+                                                          {"name", "Saved"}});
+                store.save(session);
+                if (i == 25) {
+                    WorkspaceView view;
+                    view.id = "remembered";
+                    view.backendId = p.id;
+                    view.threadId = session.id;
+                    view.title = session.title;
+                    view.cwd = session.cwd;
+                    view.sourceIdentity = workspaceSourceIdentity(p);
+                    store.save(WorkspaceSnapshot{1, {view}, {view.id}, view.id});
+                }
+            }
+        }
+        QSettings settings(data.filePath("window.ini"), QSettings::IniFormat);
+        settings.setValue("application/restoreOpenedTerminals", false);
+        settings.sync();
+        {
+            Window window(data.path(), false);
+            window.show();
+            QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+            QCOMPARE(window.profiles.size(), 28);
+            auto view = window.terminal->prepare(
+                window.profiles["26"], window.sessions[sessionKey("26", "history")], true);
+            QVERIFY(!view.id.isEmpty()); // Retained/pending terminal protects its source.
+            window.pendingStarts[100] = window.backends["27"];
+            // Capture saved-workspace protection before the new view's async save replaces it.
+            window.refreshRevision = "refresh-one";
+            window.refreshScopes = {"local", "slow-remote"};
+            window.applyDiscovery({}, {}, "older-refresh");
+            QCOMPARE(window.profiles.size(), 28);
+            window.applyDiscovery({}, {QJsonObject{{"summary", "Permission denied"}}},
+                                  "refresh-one");
+            QVERIFY(window.retirements.isEmpty());
+            window.refreshScopes.insert("local");
+            window.applyDiscovery({QJsonObject{{"path", "relative-invalid"}}}, {}, "refresh-one");
+            QVERIFY(window.retirements.isEmpty());
+            window.refreshScopes.insert("local");
+            window.discoveryReport.refreshIssues = {};
+            window.applyDiscovery({}, {}, "refresh-one");
+            QTRY_COMPARE(window.profiles.size(), 5);
+            QVERIFY(window.profiles.contains("23"));
+            QVERIFY(window.profiles.contains("24"));
+            QVERIFY(window.profiles.contains("25"));
+            QVERIFY(window.profiles.contains("26"));
+            QVERIFY(window.profiles.contains("27"));
+            QCOMPARE(window.terminal->workspace().selected, view.id);
+            QCOMPARE(window.refreshRemoved, 23);
+            QVERIFY(window.refreshScopes.contains("slow-remote"));
+            QVERIFY(window.ignoredSockets.isEmpty());
+            QTRY_COMPARE(Store(path).backends().size(), 5);
+            QCOMPARE(Store(path).sessions().size(), 5);
+            window.refreshScopeFinished("slow-remote", {"SSH timed out"});
+            QVERIFY(window.refreshRevision.isEmpty());
+            QVERIFY(window.discoveryReport.refreshSummary.contains("23 removed"));
+            QCOMPARE(window.discoveryReport.refreshIssues.size(), 1);
+            const auto *button = window.findChild<QPushButton *>("refreshConnections");
+            QCOMPARE(button->text(), "Refresh");
+            QVERIFY(button->toolTip().contains("local project/history cache"));
+            QCOMPARE(window.findChild<Commands *>()->collection()->action("discover")->text(),
+                     "Refresh connections");
+            window.close();
+        }
+        QVERIFY(Worker::finishPending());
+        Window reopened(data.path(), false);
+        QTRY_VERIFY(reopened.workspaceLoaded && reopened.cachePending.isEmpty());
+        QCOMPARE(reopened.profiles.size(), 5);
+        // A returning local endpoint is a normal discovery, with no ignore marker.
+        Fixture fixture;
+        reopened.applyDiscovery({QJsonObject{{"path", fixture.path()}}}, {});
+        QCOMPARE(reopened.profiles.size(), 6);
+        reopened.close();
+    }
+    void containerRefreshRequiresFreshCompleteEndpointScopes() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        const auto make = [&](const QString &id, QChar cid) {
+            BackendProfile p{id, id};
+            p.kind = "mycodex";
+            p.discovered = true;
+            p.containerId = QString(64, cid);
+            p.containerEpoch = "epoch";
+            p.dockerContext = "fixture";
+            p.runtimeUser = "user";
+            p.runtimeHome = "/home/user";
+            p.socketPath = "/tmp/" + id;
+            p.discoveryHost = "local-mycodex";
+            p.environmentId = "env";
+            p.identity = {{"dockerEngine", "engine"}, {"containerWorkdir", "/work"}};
+            window.profiles[id] = p;
+            window.store->save(p);
+            window.attach(p, false);
+            window.model->setContainerWorkdir(id, "/work");
+            window.results->setContainerWorkdir(id, "/work");
+            window.applySessions({Session::fromThread(
+                id,
+                {{"id", "hidden-cache"}, {"cwd", "/outside/workdir"}, {"path", "/real/rollout"}})});
+            return p;
+        };
+        for (int i = 0; i < 23; ++i)
+            make(i ? "healthy-" + QString::number(i) : QString("healthy"), 'a');
+        make("failed", 'b');
+        make("paused", 'c');
+        make("initial", 'd');
+        make("gone", 'e');
+        make("other-engine", 'f');
+        window.profiles["other-engine"].identity["dockerEngine"] = "unavailable-engine";
+        window.store->save(window.profiles["other-engine"]);
+        QTRY_COMPARE(Store(data.filePath("metadata.sqlite")).sessions().size(), 28);
+        QVERIFY(visibleThreads(window.tree).isEmpty());
+        window.refreshRevision = "fresh";
+        window.refreshScopes = {"local-mycodex"};
+        QJsonArray containers, ids;
+        for (const auto letter : {'a', 'b', 'c', 'd'}) {
+            ids.append(QString(64, letter));
+            containers.append(QJsonObject{{"containerId", QString(64, letter)},
+                                          {"engine", "engine"},
+                                          {"containerName", QString(letter)},
+                                          {"containerEpoch", "epoch"},
+                                          {"endpoints", QJsonArray{}},
+                                          {"issues", QJsonArray{}},
+                                          {"endpointRevision", "fresh"},
+                                          {"endpointComplete", true}});
+        }
+        auto failed = containers[1].toObject();
+        failed["issues"] = QJsonArray{QJsonObject{{"summary", "Permission denied"}}};
+        containers[1] = failed;
+        auto paused = containers[2].toObject();
+        paused["paused"] = true;
+        containers[2] = paused;
+        auto initial = containers[3].toObject();
+        initial.remove("endpointComplete");
+        containers[3] = initial;
+        QJsonObject report{
+            {"revision", "fresh"},
+            {"complete", true},
+            {"containers", containers},
+            {"issues", QJsonArray{}},
+            {"engines",
+             QJsonObject{{"engine", QJsonObject{{"revision", "old"}, {"containerIds", ids}}}}}};
+        window.applyContainers("local-mycodex", report);
+        QVERIFY(window.retirements.isEmpty()); // Fresh host envelope, stale Docker scan.
+        report["engines"] =
+            QJsonObject{{"engine", QJsonObject{{"revision", "fresh"}, {"containerIds", ids}}}};
+        auto truncatedContainers = containers;
+        auto truncated = truncatedContainers[0].toObject();
+        QJsonArray excessive;
+        for (int i = 0; i < 4097; ++i)
+            excessive.append(QJsonObject{});
+        truncated["endpoints"] = excessive;
+        truncatedContainers[0] = truncated;
+        report["containers"] = truncatedContainers;
+        window.applyContainers("local-mycodex", report);
+        QTRY_COMPARE(window.profiles.size(), 27); // Only the confirmed gone container.
+        QVERIFY(window.profiles.contains("healthy"));
+        report["containers"] = containers;
+        window.applyContainers("local-mycodex", report);
+        QTRY_COMPARE(window.profiles.size(), 4);
+        QVERIFY(window.profiles.contains("failed"));
+        QVERIFY(window.profiles.contains("paused"));
+        QVERIFY(window.profiles.contains("initial"));
+        QVERIFY(window.profiles.contains("other-engine"));
+        QCOMPARE(window.refreshRemoved, 24);
+        QCOMPARE(Store(data.filePath("metadata.sqlite")).sessions().size(), 4);
+        window.refreshScopeFinished("local-mycodex", {"Some container scopes unavailable"});
+        window.close();
+    }
+    void returningContainerEndpointIsPersistedWithTheSameIdentity() {
+        TestHome home;
+        QTemporaryDir data;
+        Fixture fixture;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        const QString cid(64, 'a');
+        QJsonObject container{{"containerId", cid},
+                              {"engine", "engine"},
+                              {"containerName", "fixture"},
+                              {"containerEpoch", "epoch"},
+                              {"dockerContext", "fixture"},
+                              {"runtimeUser", "user"},
+                              {"runtimeHome", "/home/user"},
+                              {"environment", "mounts"},
+                              {"cwd", "/workspace"},
+                              {"endpointRevision", "fresh"},
+                              {"endpointComplete", true},
+                              {"issues", QJsonArray{}},
+                              {"endpoints", QJsonArray{QJsonObject{{"path", fixture.path()},
+                                                                   {"localSocket", fixture.path()},
+                                                                   {"executable", "codex"}}}}};
+        QJsonObject inventory{
+            {"revision", "fresh"},
+            {"containers", QJsonArray{container}},
+            {"complete", true},
+            {"issues", QJsonArray{}},
+            {"engines", QJsonObject{{"engine", QJsonObject{{"revision", "fresh"},
+                                                           {"containerIds", QJsonArray{cid}}}}}}};
+        window.applyContainers("local-mycodex", inventory);
+        QCOMPARE(window.profiles.size(), 1);
+        const auto id = window.profiles.cbegin()->id;
+        window.refreshRevision = "fresh";
+        window.refreshScopes = {"local-mycodex"};
+        auto absent = container;
+        absent["endpoints"] = QJsonArray{};
+        inventory["containers"] = QJsonArray{absent};
+        window.applyContainers("local-mycodex", inventory);
+        QTRY_VERIFY(window.profiles.isEmpty());
+        QVERIFY(Store(data.filePath("metadata.sqlite")).backends().isEmpty());
+        QVERIFY(window.ignoredSockets.isEmpty());
+        inventory["containers"] = QJsonArray{container};
+        window.applyContainers("local-mycodex", inventory);
+        QCOMPARE(window.profiles.size(), 1);
+        QCOMPARE(window.profiles.cbegin()->id, id);
+        QTRY_COMPARE(Store(data.filePath("metadata.sqlite")).backends().size(), 1);
+        window.refreshScopeFinished("local-mycodex");
+        window.close();
+    }
+    void refreshKeepsTerminalInputWorkingWhileRemoteScopeIsPending() {
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        Fixture fixture;
+        QTemporaryDir data;
+        auto profile = fixture.profile();
+        profile.executable = probe.executable();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(profile);
+        }
+        Window window(data.path(), false);
+        window.show();
+        window.activateWindow();
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        auto *backend = window.backends[profile.id];
+        backend->connectServer();
+        QTRY_VERIFY(backend->ready());
+        window.openSession(profile.id, Session::fromThread(profile.id, fixture.thread()));
+        QTRY_VERIFY(!probe.records("thread-1").isEmpty());
+        const auto key = window.terminal->currentKey();
+        const auto before = probe.records("thread-1").size();
+        QVERIFY(window.terminal->focusSession(key));
+        auto *focus = QApplication::focusWidget();
+        QVERIFY(focus && window.terminal->isAncestorOf(focus));
+        window.refreshRevision = "fresh";
+        window.refreshScopes = {"local", "remote"};
+        window.applyDiscovery({}, {}, "fresh");
+        QVERIFY(window.refreshScopes.contains("remote"));
+        QTest::keyClicks(focus, "s");
+        QTRY_VERIFY_WITH_TIMEOUT(probe.records("thread-1").size() > before, 1000);
+        QCOMPARE(QApplication::focusWidget(), focus);
+        QCOMPARE(window.terminal->currentKey(), key);
+        QVERIFY(backend->ready());
+        window.refreshScopeFinished("remote", {"SSH unavailable"});
+        window.close();
+    }
+    void retirementFailureIsVisibleAndDoesNotRemoveRows() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        BackendProfile p{"automatic", "Automatic"};
+        p.socketPath = data.filePath("absent");
+        p.discovered = true;
+        window.profiles[p.id] = p;
+        window.attach(p, false);
+        window.store->save(p);
+        QTRY_COMPARE(Store(data.filePath("metadata.sqlite")).backends().size(), 1);
+        const auto name = QUuid::createUuid().toString();
+        {
+            auto db = QSqlDatabase::addDatabase("QSQLITE", name);
+            db.setDatabaseName(data.filePath("metadata.sqlite"));
+            QVERIFY(db.open());
+            QSqlQuery query(db);
+            QVERIFY(query.exec("CREATE TRIGGER deny_delete BEFORE DELETE ON backends BEGIN "
+                               "SELECT RAISE(FAIL, 'fixture deletion denied'); END"));
+        }
+        QSqlDatabase::removeDatabase(name);
+        window.refreshRevision = "fresh";
+        window.refreshScopes = {"local"};
+        window.applyDiscovery({}, {}, "fresh");
+        QTRY_VERIFY(window.retirements.isEmpty());
+        QCOMPARE(window.profiles.size(), 1);
+        QCOMPARE(Store(data.filePath("metadata.sqlite")).backends().size(), 1);
+        QCOMPARE(window.refreshRemoved, 0);
+        QCOMPARE(window.discoveryReport.refreshIssues.size(), 1);
+        QVERIFY(window.discoveryReport.refreshIssues.first()
+                    .toObject()["details"]
+                    .toArray()
+                    .first()
+                    .toString()
+                    .contains("fixture deletion denied"));
+        QVERIFY(!QApplication::activeModalWidget());
+        window.close();
+    }
+    void retirementCancellationAndFailureKeepProfiles() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        BackendProfile p{"retired", "retired"};
+        p.discovered = true;
+        p.socketPath = data.filePath("missing");
+        window.profiles[p.id] = p;
+        window.attach(p, false);
+        window.store->save(p);
+        auto session = Session::fromThread(
+            p.id, {{"id", "saved"}, {"cwd", "/work"}, {"path", "/real/rollout"}});
+        window.applySessions({session});
+        window.refreshRevision = "first";
+        window.refreshScopes = {"remote"};
+        window.retireConnection(p.id);
+        QVERIFY(window.retirements.contains(p.id));
+        window.refreshScopeFinished("remote");
+        QVERIFY(!window.refreshRevision.isEmpty());
+        window.openSession(p.id, session); // Cancels even if the database already deleted it.
+        QVERIFY(window.retirements.isEmpty());
+        QTRY_COMPARE(Store(data.filePath("metadata.sqlite")).sessions().size(), 1);
+        QTRY_VERIFY(window.refreshRevision.isEmpty());
+        QVERIFY(window.profiles.contains(p.id));
+        QVERIFY(!window.terminal->view(sessionKey(p.id, session.id)).id.isEmpty());
+        window.refreshRevision = "second";
+        window.refreshScopes = {"remote"};
+        window.discover();
+        window.discover();
+        QVERIFY(window.refreshQueued); // Repeated requests coalesce, without starting helpers.
+        window.refreshQueued = false;
+        window.refreshScopeFinished("remote", {"Unavailable"});
+        window.close();
     }
     void discoveryFeedbackIsActionableAndDoesNotInterrupt() {
         Fixture fixture;

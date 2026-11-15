@@ -54,7 +54,7 @@ DiscoveryDialog::DiscoveryDialog(QWidget *parent) : QDialog(parent) {
     scroll->setWidget(content);
     layout->addWidget(scroll, 1);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close);
-    retry = buttons->addButton("Retry discovery", QDialogButtonBox::ActionRole);
+    retry = buttons->addButton("Refresh connections", QDialogButtonBox::ActionRole);
     retry->setObjectName("retryDiscovery");
     auto *add = buttons->addButton("Add connection…", QDialogButtonBox::ActionRole);
     auto *copy = buttons->addButton("Copy report", QDialogButtonBox::ActionRole);
@@ -68,6 +68,8 @@ DiscoveryDialog::DiscoveryDialog(QWidget *parent) : QDialog(parent) {
 }
 void DiscoveryDialog::setReport(const DiscoveryReport &report) {
     auto issues = report.issues;
+    for (const auto &issue : report.refreshIssues)
+        issues.append(issue);
     if (!report.failure.isEmpty())
         issues.prepend(QJsonObject{
             {"code", "helper-failure"},
@@ -75,20 +77,23 @@ void DiscoveryDialog::setReport(const DiscoveryReport &report) {
             {"explanation", "Automatic discovery is unavailable. Existing connections and saved "
                             "sessions are retained."},
             {"action",
-             "Retry discovery. You can also add an existing server's Unix socket manually."},
+             "Refresh connections. You can also add an existing server's Unix socket manually."},
             {"details", QJsonArray{report.failure}}});
     const auto title =
-        report.inProgress   ? "Checking local servers…"
-        : !issues.isEmpty() ? "Local discovery needs attention"
+        !report.refreshSummary.isEmpty() ? QString("Connection refresh")
+        : report.inProgress              ? "Checking local servers…"
+        : !issues.isEmpty()              ? "Local discovery needs attention"
         : report.checked.isValid()
             ? (report.endpoints ? "Local discovery is up to date" : "No local servers found")
             : "Local discovery has not run yet";
     heading->setText(title);
-    context->setText("Discovery checks Codex servers visible to your user on this host.");
+    context->setText(report.refreshSummary.isEmpty()
+                         ? "Discovery checks Codex servers visible to your user on this host."
+                         : report.refreshSummary);
     checked->setText(report.checked.isValid()
                          ? "Last check: " + QLocale().toString(report.checked.toLocalTime(),
                                                                QLocale::ShortFormat)
-                         : "Choose Retry discovery to check this host.");
+                         : "Choose Refresh connections to check this host.");
     retry->setEnabled(!report.inProgress);
     copyText = "Archcodex " + QString(ARCHCODEX_VERSION) + " — " + title + "\n" + checked->text() +
                "\n" + context->text();

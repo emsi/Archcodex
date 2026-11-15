@@ -201,6 +201,44 @@ class WorkspaceTests : public QObject {
         Store reopened(path);
         QVERIFY_EXCEPTION_THROWN(reopened.workspace(), std::runtime_error);
     }
+    void retirementOrdersWritesAndReportsDatabaseFailure() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("metadata.sqlite");
+        const auto p = profile();
+        const auto record = session(p);
+        AsyncStore db(path);
+        QSignalSpy loaded(&db, &AsyncStore::loaded), retired(&db, &AsyncStore::backendRetired);
+        QTRY_COMPARE(loaded.size(), 1);
+        db.save(p);
+        db.save(record);
+        db.retireBackend(p.id, 1);
+        db.save(p); // Queued metadata after retirement cannot resurrect a profile.
+        db.save(record);
+        QTRY_COMPARE(retired.size(), 1);
+        QVERIFY(retired.last()[2].toString().isEmpty());
+        {
+            Store reader(path);
+            QVERIFY(reader.backends().isEmpty());
+            QVERIFY(reader.sessions().isEmpty());
+        }
+        db.allowBackend(p.id);
+        db.save(p);
+        db.save(record);
+        db.retireBackend(p.id, 2);
+        // Rediscovery while the deletion acknowledgement is queued is ordered after it.
+        db.allowBackend(p.id);
+        db.save(p);
+        db.save(record);
+        QTRY_COMPARE(retired.size(), 2);
+        QTRY_COMPARE(Store(path).sessions().size(), 1);
+        sql(path, "CREATE TRIGGER reject_removal BEFORE DELETE ON backends BEGIN "
+                  "SELECT RAISE(FAIL, 'fixture deletion denied'); END");
+        db.retireBackend(p.id, 3);
+        QTRY_COMPARE(retired.size(), 3);
+        QVERIFY(retired.last()[2].toString().contains("fixture deletion denied"));
+        QCOMPARE(Store(path).backends().size(), 1);
+        QCOMPARE(Store(path).sessions().size(), 1);
+    }
     void coalescedWriterFlushesLastIntent() {
         QTemporaryDir d;
         const auto path = d.filePath("metadata.sqlite");

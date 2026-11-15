@@ -214,6 +214,8 @@ class Inventory:
         self.engines = set()
         self.engine_dirty = {}
         self.pending = set()
+        self.revision = ''
+        self.engine_scans = {}
         self.changed = asyncio.Event()
         self.semaphore = asyncio.Semaphore(8)
         self.host = socket.gethostname()
@@ -315,6 +317,7 @@ class Inventory:
                     await asyncio.gather(waiter, return_exceptions=True)
                     await events_task
                 dirty.clear()
+                revision = self.revision
                 ids = (await run(prefix + ["ps", "--no-trunc", "--filter", "label=" + LABEL, "--format", "{{.ID}}"])).decode().splitlines()
                 if len(ids) > MAX_CONTAINERS or any(not CID.fullmatch(cid) for cid in ids):
                     raise ValueError("Invalid or excessive container inventory")
@@ -345,11 +348,13 @@ class Inventory:
                         self.records[engine + ":" + cid] = {"containerId": cid, "containerName": info.get("Name", cid[:12]).lstrip("/"),
                             "engine": engine, "dockerContext": context, "endpoints": [], "issues": [issue(str(error))]}
                 self.ready.add(engine)
+                self.engine_scans[engine] = {'revision': revision, 'containerIds': ids}
                 self.errors.pop(engine, None)
                 self.publish()
         finally:
             self.engine_dirty.pop(engine, None)
             self.ready.discard(engine)
+            self.engine_scans.pop(engine, None)
             for task in [events_task, stderr_task, *children.values()]:
                 if task:
                     task.cancel()

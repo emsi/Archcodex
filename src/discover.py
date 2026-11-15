@@ -78,7 +78,7 @@ def snapshot(proc=Path("/proc"), uid=None, default=None, aliases=()):
     except OSError as error:
         return [], [issue("procfs", "Host process information is unavailable",
                           "Automatic discovery could not take a host snapshot. Existing connections are retained.",
-                          "Retry discovery. If you know the app-server socket, add it as a connection.",
+                          "Use Refresh. If you know the app-server socket, add it as a connection.",
                           [error_detail(probe, operation, error)])]
     denied = {"ownership": {}, "unidentified": {}, "codex": {}}
     for process in processes:
@@ -249,7 +249,7 @@ class Watcher:
         return [issue("directory-watches", f"Automatic discovery updates unavailable for {len(errors)} socket directories",
                       "New or removed servers in these locations may not appear automatically. "
                       "Connected sessions still receive their normal server events.",
-                      "Use Discover to refresh after starting or stopping a server. Check the directory error below.",
+                      "Use Refresh after starting or stopping a server. Check the directory error below.",
                       sorted(errors))]
 
     def changed(self):
@@ -283,6 +283,7 @@ def main():
     default = os.path.join(home, "app-server-control", "app-server-control.sock")
     roots = [f"/tmp/codex-daemon-{uid}"]
     paths, known, buffer, last = [default], [], b"", None
+    revision = ''
     watcher = Watcher()
     selector = selectors.DefaultSelector()
     selector.register(watcher.fd, selectors.EVENT_READ)
@@ -297,7 +298,7 @@ def main():
                 endpoints, issues = snapshot(default=default, aliases=paths)
                 known = sorted(set(known + [item["path"] for item in endpoints]))[-LIMIT:]
                 issues += watcher.configure(roots, paths + known)
-                message = {"endpoints": endpoints, "issues": issues}
+                message = {"endpoints": endpoints, "issues": issues, "revision": revision}
                 if message != last:
                     print(json.dumps(message, ensure_ascii=True, separators=(",", ":")), flush=True)
                     last = message
@@ -317,6 +318,9 @@ def main():
                         request = json.loads(line)
                         if not isinstance(request, dict):
                             raise ValueError("Invalid discovery request")
+                        revision = request.get('revision', '')
+                        if not isinstance(revision, str) or len(revision) > 128:
+                            raise ValueError('Invalid discovery revision')
                         requested = request.get("paths", [])
                         if not isinstance(requested, list) or len(requested) > LIMIT:
                             raise ValueError("Invalid discovery request")

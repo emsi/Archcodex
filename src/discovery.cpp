@@ -2,14 +2,19 @@
 #include "discovery.h"
 #include "jsonprocess.h"
 #include "launch.h"
+#include <QUuid>
 namespace Archcodex {
 HostDiscovery::HostDiscovery(QObject *parent)
     : QObject(parent), worker(Worker::forHost("discovery:local")),
       runner(new JsonProcess(worker->context)) {
     runner->moveToThread(worker->context->thread());
     connect(runner, &JsonProcess::message, this, [this](const QJsonObject &data) {
+        if (data["revision"].toString() != revision) {
+            worker->post([r = runner] { r->acknowledge(); });
+            return;
+        }
         if (data["endpoints"].isArray() && data["issues"].isArray())
-            emit snapshot(data["endpoints"].toArray(), data["issues"].toArray());
+            emit snapshot(data["endpoints"].toArray(), data["issues"].toArray(), revision);
         else
             emit failed("Invalid host discovery response.");
         worker->post([r = runner] { r->acknowledge(); });
@@ -23,11 +28,13 @@ HostDiscovery::~HostDiscovery() {
     worker->post([r = runner] { delete r; });
 }
 void HostDiscovery::stop() {
+    revision.clear();
     started = false;
     worker->post([r = runner] { r->stop(); });
 }
-void HostDiscovery::refresh(const QStringList &paths) {
-    QJsonObject request{{"paths", QJsonArray::fromStringList(paths)}};
+void HostDiscovery::refresh(const QStringList &paths, const QString &token) {
+    revision = token.isEmpty() ? QUuid::createUuid().toString(QUuid::Id128) : token;
+    QJsonObject request{{"paths", QJsonArray::fromStringList(paths)}, {"revision", revision}};
     if (started)
         worker->post([r = runner, request] { r->request(request); });
     else {

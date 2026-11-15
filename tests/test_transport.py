@@ -306,6 +306,35 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
             writer.close()
             await writer.wait_closed()
 
+    async def test_refresh_has_fresh_engine_and_endpoint_evidence_without_restarting_clients(self):
+        report = await self.start(True)
+        socket_path = report['containers'][0]['endpoints'][0]['localSocket']
+        reader, writer = await asyncio.open_unix_connection(socket_path)
+        state_path = self.root / 'state.json'
+        state = json.loads(state_path.read_text())
+        state['endpoints']['2' * 64] = []
+        state['issues'] = {'2' * 64: [{'summary': 'Permission denied'}]}
+        state_path.write_text(json.dumps(state))
+        before = self.commands()
+        for revision in ('one', 'two', 'latest'):
+            self.proc.stdin.write(mux.encoded({'hosts': [{'id': 'host', 'sshHost': 'fixture-host',
+                                                       'revision': revision}]}) + b'\n')
+        await self.proc.stdin.drain()
+        report = await self.inventory(lambda r: r.get('revision') == 'latest' and r.get('settled'))
+        self.assertTrue(report['complete'])  # Docker enumeration succeeded despite one failed scope.
+        self.assertEqual(report['engines']['fixture-engine']['revision'], 'latest')
+        scopes = {c['containerId']: c for c in report['containers']}
+        self.assertEqual(scopes['1' * 64]['endpointRevision'], 'latest')
+        self.assertTrue(scopes['1' * 64]['endpointComplete'])
+        self.assertFalse(scopes['2' * 64]['endpointComplete'])
+        writer.write(b'refresh-preserves-client')
+        await writer.drain()
+        self.assertEqual(await asyncio.wait_for(reader.readexactly(24), 2), b'refresh-preserves-client')
+        writer.close()
+        after = self.commands()
+        for role in ('ssh', 'docker:exec'):
+            self.assertEqual(sum(c['role'] == role for c in before), sum(c['role'] == role for c in after))
+
     async def test_remote_forty_clients_use_one_ssh_and_one_exec_per_container(self):
         report = await self.start()
         endpoints = [c['endpoints'][0]['localSocket'] for c in report['containers']]

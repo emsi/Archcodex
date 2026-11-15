@@ -25,7 +25,8 @@ class ContainerTransport : public QObject {
             delay = 1000;
             const auto inventories = message["hosts"].toObject();
             for (auto it = inventories.begin(); it != inventories.end(); ++it)
-                if (hosts.contains(it.key()))
+                if (hosts.contains(it.key()) &&
+                    it.value().toObject()["revision"] == hosts[it.key()]["revision"])
                     emit snapshot(it.key(), it.value().toObject());
             worker->post([r = runner] { r->acknowledge(); });
         });
@@ -42,8 +43,7 @@ class ContainerTransport : public QObject {
     ~ContainerTransport() override {
         worker->post([r = runner] { delete r; });
     }
-    void set(const QString &id, const QString &host) {
-        const auto revision = hosts.value(id)["revision"].toInt() + 1;
+    void set(const QString &id, const QString &host, const QString &revision) {
         hosts[id] = {{"id", id}, {"sshHost", host}, {"revision", revision}};
         update();
     }
@@ -105,13 +105,14 @@ void ContainerDiscovery::stop() {
     wanted = false;
     transport->remove(id);
 }
-void ContainerDiscovery::refresh() {
+void ContainerDiscovery::refresh(const QString &revision) {
     if (!sshHost.isEmpty() && !validSshHost(sshHost)) {
         emit failed("Enter an SSH host alias or user@host, without command options.");
         return;
     }
     wanted = true;
-    transport->set(id, sshHost);
+    transport->set(id, sshHost,
+                   revision.isEmpty() ? QUuid::createUuid().toString(QUuid::Id128) : revision);
 }
 } // namespace Archcodex
 #include "containerdiscovery.moc"
