@@ -33,6 +33,7 @@ class Fixture : public QObject {
     bool delayRead = false;
     bool delaySearch = false;
     int searchMatches = 0, searchDelayMs = 0;
+    QString searchShape;
     QList<QJsonValue> searchIds;
     QJsonValue readId = QJsonValue::Undefined;
     bool failLoadedInventory = false;
@@ -150,6 +151,16 @@ class Fixture : public QObject {
                                     "/work/large-search/group-%1/project-%2/long/path/to/worktree")
                                     .arg(i / 600)
                                     .arg(i % 12);
+                            if (searchShape == "distinct")
+                                t["cwd"] = QString("/work/group-%1/project-%2/deep/worktree")
+                                               .arg(i % 17)
+                                               .arg(i);
+                            else if (searchShape == "nested")
+                                t["cwd"] = QString("/work/group-%1").arg(i % 17) +
+                                           QString("/nested").repeated(1 + i % 12) +
+                                           QString("/project-%1").arg(i);
+                            else if (searchShape == "single")
+                                t["cwd"] = "/work/one-project";
                             t["name"] =
                                 QString("Conversation needle %1 with a long descriptive title")
                                     .arg(i);

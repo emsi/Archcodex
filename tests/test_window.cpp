@@ -162,6 +162,18 @@ class WindowTests : public QObject {
         QFETCH(int, delay);
         runSearchBenchmark(delay);
     }
+    void searchWorkloads_data() {
+        QTest::addColumn<QString>("shape");
+        QTest::addColumn<int>("delay");
+        for (const auto &shape : {"idle", "clustered", "distinct", "nested", "single"})
+            QTest::newRow(shape) << QString(shape) << 0;
+        QTest::newRow("distinct-delayed") << QString("distinct") << 40;
+    }
+    void searchWorkloads() {
+        QFETCH(QString, shape);
+        QFETCH(int, delay);
+        runSearchBenchmark(delay, shape);
+    }
     void singleClickOpensOnce_data() {
         QTest::addColumn<bool>("singleClickStyle");
         QTest::newRow("desktop-double-click") << false;
@@ -1435,9 +1447,8 @@ class WindowTests : public QObject {
         const auto selected = tree->currentIndex().data(KeyRole).toString();
         auto branch = fixture.thread("new-branch");
         branch["cwd"] = "/other/path/to/worktree";
-        fixture.reply(fixture.searchIds[2],
-                      {{"data", QJsonArray{QJsonObject{{"thread", branch}}}},
-                       {"nextCursor", QJsonValue::Null}});
+        fixture.reply(fixture.searchIds[2], {{"data", QJsonArray{QJsonObject{{"thread", branch}}}},
+                                             {"nextCursor", QJsonValue::Null}});
         auto *progress = window.findChild<KSqueezedTextLabel *>("searchProgress");
         QTRY_VERIFY(progress->fullText().contains("Search complete"));
         QCOMPARE(tree->currentIndex().data(KeyRole).toString(), selected);
