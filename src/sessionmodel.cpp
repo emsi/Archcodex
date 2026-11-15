@@ -281,7 +281,14 @@ void SessionModel::aggregateAncestors(QStandardItem *item) {
     for (; item; item = item->parent())
         aggregate(item);
 }
-void SessionModel::rebuild(const QString &backend) {
+QStandardItem *SessionModel::sessionParent(const Session &s) const {
+    auto *root = roots.value(s.backendId);
+    const auto path = normalized(s.cwd);
+    return root && root->data(PathRole).toString() == path
+               ? root
+               : folders.value(folderKey(s.backendId, path));
+}
+void SessionModel::rebuild(const QString &backend, const QSet<QString> *changed) {
     // Membership/path changes come here. Other status/title updates retain every index.
     emit topologyAboutToChange();
     auto *root = roots.value(backend);
@@ -299,11 +306,13 @@ void SessionModel::rebuild(const QString &backend) {
     root->setData(environment(backend), EnvironmentRole);
     QSet<QString> paths;
     QList<Session> sessions;
-    for (const auto &s : records)
-        if (s.backendId == backend && visible(s)) {
+    for (const auto &key : backendRecords.value(backend)) {
+        const auto &s = records[key];
+        if (visible(s)) {
             sessions << s;
             paths.insert(normalized(s.cwd));
         }
+    }
     QStringList absolutePaths = paths.values();
     absolutePaths.removeAll(QString());
     absolutePaths.sort();
@@ -365,6 +374,7 @@ void SessionModel::rebuild(const QString &backend) {
         const auto path = normalized(s.cwd);
         auto *parent = path == common ? root : folders.value(folderKey(backend, path));
         auto *item = threads.value(key);
+        const bool inserted = !item;
         if (!item) {
             item = new QStandardItem;
             item->setEditable(false);
@@ -372,7 +382,8 @@ void SessionModel::rebuild(const QString &backend) {
             threads[key] = item;
         } else if (item->parent() != parent)
             parent->appendRow(item->parent()->takeRow(item->row()));
-        updateSession(item, s);
+        if (inserted || !changed || changed->contains(key))
+            updateSession(item, s);
     }
     // Move retained descendants first, then remove obsolete leaves/branches.
     for (const auto &key : threads.keys()) {
@@ -400,47 +411,52 @@ void SessionModel::rebuild(const QString &backend) {
     emit topologyChanged();
 }
 void SessionModel::upsert(const Session &s) {
-    const auto key = sessionKey(s.backendId, s.id);
-    const auto old = records.value(key);
-    const bool structural = !records.contains(key) || normalized(old.cwd) != normalized(s.cwd) ||
-                            visible(old) != visible(s);
-    records[key] = s;
-    if (!backendNames.contains(s.backendId))
-        backendNames[s.backendId] = s.backendId;
-    if (structural)
-        rebuild(s.backendId);
-    else if (auto *item = threads.value(key)) {
-        updateSession(item, s);
-        for (auto *parent = item->parent(); parent; parent = parent->parent())
-            aggregate(parent);
-    }
+    upsertMany({s});
 }
 void SessionModel::remove(const QString &backend, const QString &id) {
-    if (records.remove(sessionKey(backend, id)))
+    const auto key = sessionKey(backend, id);
+    if (records.remove(key)) {
+        backendRecords[backend].remove(key);
         rebuild(backend);
+    }
 }
 void SessionModel::upsertMany(const QList<Session> &items) {
-    QSet<QString> structural;
+    QSet<QString> structural, changed;
     for (const auto &s : items) {
         const auto key = sessionKey(s.backendId, s.id);
         const auto old = records.value(key);
-        if (!records.contains(key) || normalized(old.cwd) != normalized(s.cwd) ||
-            visible(old) != visible(s))
+        const bool wasVisible = records.contains(key) && visible(old);
+        const bool isVisible = visible(s);
+        // Existing folders can accept rows without regrouping or invalidating
+        // navigation. Removing/moving a visible row may compact its old path.
+        if (!roots.contains(s.backendId) ||
+            (wasVisible && (!isVisible || normalized(old.cwd) != normalized(s.cwd))) ||
+            (isVisible && !sessionParent(s)))
             structural.insert(s.backendId);
         records[key] = s;
+        backendRecords[s.backendId].insert(key);
+        changed.insert(key);
         if (!backendNames.contains(s.backendId))
             backendNames[s.backendId] = s.backendId;
     }
     for (const auto &backend : structural)
-        rebuild(backend);
+        rebuild(backend, &changed);
     QSet<QStandardItem *> parents;
-    for (const auto &s : items)
-        if (!structural.contains(s.backendId))
-            if (auto *item = threads.value(sessionKey(s.backendId, s.id))) {
-                updateSession(item, s);
-                for (auto *p = item->parent(); p; p = p->parent())
-                    parents.insert(p);
-            }
+    for (const auto &key : changed) {
+        const auto &s = records[key];
+        if (structural.contains(s.backendId) || !visible(s))
+            continue;
+        auto *item = threads.value(key);
+        if (!item) {
+            item = new QStandardItem;
+            item->setEditable(false);
+            sessionParent(s)->appendRow(item);
+            threads[key] = item;
+        }
+        updateSession(item, s);
+        for (auto *p = item->parent(); p; p = p->parent())
+            parents.insert(p);
+    }
     auto ordered = parents.values();
     auto depth = [](QStandardItem *item) {
         int d = 0;
@@ -455,9 +471,8 @@ void SessionModel::upsertMany(const QList<Session> &items) {
 }
 void SessionModel::removeBackend(const QString &backend) {
     emit topologyAboutToChange();
-    for (const auto &key : records.keys())
-        if (records[key].backendId == backend)
-            records.remove(key);
+    for (const auto &key : backendRecords.take(backend))
+        records.remove(key);
     for (const auto &key : threads.keys())
         if (threads[key]->data(BackendRole) == backend)
             threads.remove(key);
@@ -482,6 +497,7 @@ void SessionModel::removeBackend(const QString &backend) {
 void SessionModel::resetResults() {
     emit topologyAboutToChange();
     records.clear();
+    backendRecords.clear();
     roots.clear();
     groups.clear();
     folders.clear();

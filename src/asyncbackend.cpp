@@ -1,7 +1,44 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "asyncbackend.h"
+#include <QCoreApplication>
+#include <QPointer>
 
 namespace Archcodex {
+// One GUI scheduler for all backends: at most one page per backend, one slice
+// per turn. Round-robin delivery prevents a fast source from monopolizing input.
+class SearchDelivery : public QObject {
+    QQueue<QPointer<AsyncBackend>> ready;
+    bool scheduled = false;
+    void schedule() {
+        if (scheduled || ready.isEmpty())
+            return;
+        scheduled = true;
+        QTimer::singleShot(1, this, [this] {
+            scheduled = false;
+            if (!ready.isEmpty())
+                if (auto backend = ready.dequeue())
+                    backend->deliverSearch();
+            schedule();
+        });
+    }
+
+  public:
+    using QObject::QObject;
+    static SearchDelivery *instance() {
+        static QPointer<SearchDelivery> shared;
+        if (!shared)
+            shared = new SearchDelivery(QCoreApplication::instance());
+        return shared;
+    }
+    void enqueue(AsyncBackend *backend) {
+        if (!ready.contains(backend))
+            ready.enqueue(backend);
+        schedule();
+    }
+    void cancel(AsyncBackend *backend) {
+        ready.removeAll(backend);
+    }
+};
 class BackendPump : public QObject {
     Q_OBJECT
   public:
@@ -15,6 +52,7 @@ class BackendPump : public QObject {
     BackendPump(const BackendProfile &p, const QString &bridge, AsyncBackend *target,
                 std::shared_ptr<std::atomic<quint64>> generation, QObject *parent)
         : QObject(parent), core(new LocalBackend(p, bridge, this)), epoch(std::move(generation)) {
+        core->setSearchPaced(true);
         connect(core, &Backend::attentionRequested, this, [this](const SessionAttention &event) {
             // A stalled GUI cannot create an unbounded Qt queued-signal backlog.
             if (attention.size() == 256) {
@@ -91,7 +129,17 @@ class BackendPump : public QObject {
         connect(core, &Backend::loadedInventoryFailed, target, &Backend::loadedInventoryFailed);
         connect(core, &Backend::identityReceived, target, &Backend::identityReceived);
         connect(core, &Backend::moreAvailable, target, &Backend::moreAvailable);
-        connect(core, &Backend::searchResults, target, &Backend::searchResults);
+        connect(core, &Backend::searchResults, target,
+                [target](quint64 revision, const QList<Session> &items, const QString &error,
+                         bool complete) {
+                    if (revision != target->searchRevision)
+                        return;
+                    // Pagination waits for the last slice's acknowledgement, so
+                    // another page of this generation cannot overwrite this one.
+                    Q_ASSERT(!target->searchPage);
+                    target->searchPage = AsyncBackend::SearchPage{items, error, 0, complete};
+                    target->searchDelivery->enqueue(target);
+                });
     }
     void schedule() {
         if (inFlight || scheduled || (pending.isEmpty() && attention.isEmpty()))
@@ -134,27 +182,34 @@ AsyncBackend::AsyncBackend(BackendProfile p, const QString &bridge, QObject *par
     : Backend(std::move(p), parent), state(std::make_shared<State>()),
       worker(Worker::forHost("backend:" + profile.sshHost)),
       attentionEpoch(std::make_shared<std::atomic<quint64>>(0)) {
+    searchDelivery = SearchDelivery::instance();
     qRegisterMetaType<Session>();
     qRegisterMetaType<QList<Session>>();
     qRegisterMetaType<SessionAttention>();
     qRegisterMetaType<QList<SessionAttention>>();
-    connect(this, &Backend::connectionChanged, this,
-            [this](const QString &, bool ready) { connected = ready; });
+    connect(this, &Backend::connectionChanged, this, [this](const QString &, bool ready) {
+        connected = ready;
+        if (!ready)
+            cancelSearchDelivery();
+    });
     state->pump = new BackendPump(profile, bridge, this, attentionEpoch, nullptr);
     state->pump->moveToThread(worker->context->thread());
 }
 AsyncBackend::~AsyncBackend() {
+    cancelSearchDelivery();
     worker->post([s = state] {
         delete s->pump;
         s->pump = nullptr;
     });
 }
 void AsyncBackend::connectServer() {
+    cancelSearchDelivery();
     ++*attentionEpoch;
     connected = false;
     worker->post([s = state] { s->pump->core->connectServer(); });
 }
 void AsyncBackend::disconnectServer() {
+    cancelSearchDelivery();
     ++*attentionEpoch;
     connected = false;
     worker->post([s = state] { s->pump->core->disconnectServer(); });
@@ -163,7 +218,36 @@ void AsyncBackend::loadMore() {
     worker->post([s = state] { s->pump->core->loadMore(); });
 }
 void AsyncBackend::search(const QString &q, quint64 token) {
-    worker->post([s = state, q, token] { s->pump->core->search(q, token); });
+    cancelSearchDelivery();
+    searchToken = token;
+    worker->post([s = state, q, revision = searchRevision] { s->pump->core->search(q, revision); });
+}
+void AsyncBackend::cancelSearchDelivery() {
+    ++searchRevision;
+    searchPage.reset();
+    searchDelivery->cancel(this);
+}
+void AsyncBackend::deliverSearch() {
+    if (!searchPage)
+        return;
+    constexpr qsizetype sliceSize = 32;
+    const auto revision = searchRevision;
+    const auto items = searchPage->items.mid(searchPage->offset, sliceSize);
+    searchPage->offset += items.size();
+    const bool last = searchPage->offset == searchPage->items.size();
+    const auto error = last ? searchPage->error : QString();
+    const bool complete = last && searchPage->complete;
+    if (last)
+        searchPage.reset();
+    QPointer<AsyncBackend> guard(this);
+    emit searchResults(searchToken, items, error, complete);
+    // Consumers may replace/cancel the query or remove this backend synchronously.
+    if (!guard || revision != searchRevision)
+        return;
+    if (last)
+        worker->post([s = state, revision] { s->pump->core->advanceSearch(revision); });
+    else
+        searchDelivery->enqueue(this);
 }
 void AsyncBackend::verifySession(const QString &id, quint64 token) {
     worker->post([s = state, id, token] { s->pump->core->verifySession(id, token); });

@@ -8,6 +8,81 @@ using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
+    void pagesAppendToExistingFoldersAndRegroupOnlyNewPaths() {
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        QAbstractItemModelTester tester(&filter,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        auto make = [](const QString &backend, const QString &id, const QString &path) {
+            return Session::fromThread(backend, {{"id", id},
+                                                 {"cwd", path},
+                                                 {"name", id},
+                                                 {"path", "/saved/" + id},
+                                                 {"status", QJsonObject{{"type", "idle"}}}});
+        };
+        QList<Session> records{make("a", "first", "/work/project/deep"),
+                               make("b", "first", "/elsewhere")};
+        model.upsertMany(records);
+        const QPersistentModelIndex first(model.sessionIndex(sessionKey("a", "first")));
+        const QPersistentModelIndex folder(first.parent());
+        QSignalSpy regrouped(&model, &SessionModel::topologyChanged);
+        QList<Session> page;
+        for (int i = 0; i < 100; ++i)
+            page << make("a", QString("page-%1").arg(i), "/work/project/deep");
+        auto hidden = make("a", "hidden", "/outside/hidden");
+        hidden.ephemeral = true;
+        page << hidden;
+        records.append(page);
+        model.upsertMany(page);
+        QCOMPARE(regrouped.size(), 0);
+        QVERIFY(first.isValid() && folder.isValid());
+        QCOMPARE(first.parent(), folder);
+        QCOMPARE(folder.data(CountRole).toInt(), 101);
+        QVERIFY(!model.sessionIndex(sessionKey("a", "hidden")).isValid());
+        // Compare complete compact topology/aggregates with a fresh model, not
+        // insertion order (the proxy provides ordering independently).
+        auto snapshot = [](SessionModel &source) {
+            QMap<QString, QVariantList> entries;
+            const auto visit = [&](auto &&self, const QModelIndex &parent) -> void {
+                for (int i = 0; i < source.rowCount(parent); ++i) {
+                    const auto index = source.index(i, 0, parent);
+                    QVariantList fields{parent.data(KeyRole)};
+                    for (int role : {int(Qt::DisplayRole), int(KindRole), int(BackendRole),
+                                     int(PathRole), int(CountRole), int(WaitingCountRole),
+                                     int(RecencyRole), int(EnvironmentRole)})
+                        fields << index.data(role);
+                    entries[index.data(KeyRole).toString()] = fields;
+                    self(self, index);
+                }
+            };
+            visit(visit, {});
+            return entries;
+        };
+        auto compare = [&] {
+            SessionModel reference;
+            reference.upsertMany(records);
+            QCOMPARE(snapshot(model), snapshot(reference));
+        };
+        compare();
+        auto branching = make("a", "branch", "/work/other/deep/path");
+        records << branching;
+        model.upsert(branching);
+        QCOMPARE(regrouped.size(), 1);
+        compare();
+        records[0].cwd = "/new/common/root";
+        model.upsert(records[0]);
+        compare();
+        model.remove("a", "first");
+        records.removeFirst();
+        compare();
+        model.resetResults();
+        model.upsertMany(records);
+        compare();
+        model.removeBackend("a");
+        records.removeIf([](const Session &s) { return s.backendId == "a"; });
+        compare();
+    }
     void cachedFiltersIntersectMembershipScopeAndVisibility() {
         SessionModel model;
         SessionFilter filter;

@@ -348,7 +348,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 }
             });
             expandActivityViews();
-            syncCurrentSession();
+            if (source != results)
+                syncCurrentSession(); // Search pages preserve browsing/scroll position.
         });
     }
     loadMore = new QPushButton("Load more history");
@@ -899,6 +900,14 @@ void Window::attach(const BackendProfile &p, bool start) {
                     updates << s;
                 }
                 results->upsertMany(updates);
+                // Select a displayed conversation when it first arrives, without
+                // repeatedly revealing it over the user's subsequent navigation.
+                if (showingSearch() && !tree->currentIndex().isValid()) {
+                    const auto index = filter->mapFromSource(
+                        results->sessionIndex(terminal->currentKey()));
+                    if (index.isValid())
+                        tree->setCurrentIndex(index);
+                }
                 if (!error.isEmpty())
                     recordSearchError(id, error);
                 if (complete)

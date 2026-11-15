@@ -79,8 +79,10 @@ class SessionModel : public QStandardItemModel {
     QHash<QString, int> groupOrders;
     QHash<QString, QStandardItem *> groups;
     QHash<QString, Session> records;
+    QHash<QString, QSet<QString>> backendRecords;
     bool visible(const Session &s) const;
-    void rebuild(const QString &backend);
+    void rebuild(const QString &backend, const QSet<QString> *changed = nullptr);
+    QStandardItem *sessionParent(const Session &session) const;
     void updateSession(QStandardItem *item, const Session &s);
     void aggregate(QStandardItem *parent);
     void aggregateAncestors(QStandardItem *item);

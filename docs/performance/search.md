@@ -76,3 +76,55 @@ The layout fix does not meet the responsiveness budget; #24 remains necessary.
 The complete Window suite passed after staging its required notification
 configuration (the first invocation omitted that resource and its notification
 test failed; that test passed on rerun). Real desktop acceptance remains separate.
+
+## Performance fix (#24)
+
+The duplicate expansion pass was removed and measured first at `4298f3f`.
+It helped, but did not meet the budget. The subsequent changes are:
+
+- AsyncBackend acknowledges a page only after the GUI consumes its final slice.
+  Each backend retains at most one outstanding page, normally 100 records.
+- A shared GUI queue delivers up to 32 records per turn, round-robin across
+  ready backends. A one-shot 1 ms timer yields between slices and is armed only
+  when work is queued. Slow servers do not hold other servers back. Error and
+  completion messages follow their page's final slice.
+- Internal request revisions invalidate queued slices on replacement, clear,
+  disconnect and backend removal, independently of caller-supplied search tokens.
+- Existing folders receive rows directly, with affected ancestor aggregates
+  updated once per batch. Hidden additions do not regroup the tree. New paths,
+  moved/removed visible rows and visibility changes retain the existing compact
+  grouping algorithm. Regrouping scans only that backend's indexed records and
+  leaves unchanged session metadata alone.
+- Result pages preserve browsing selection, manual collapse and scroll position;
+  the displayed conversation is selected once when it first becomes available.
+
+The 32-record slice and 1 ms yield were selected from the measured workload.
+Folder topology can still need a whole-backend regroup when paths change;
+there is no hard real-time guarantee for arbitrary project counts or hardware.
+Qt models remain on the GUI thread. The existing 10,000-result per-backend limit
+and its coverage diagnostic remain in force.
+
+| Stage | Replies | GUI p95 | PTY echo p95 | Search duration |
+|---|---|---:|---:|---:|
+| One expansion pass | Rapid | 319.5 | 805.0 | 1424 |
+| One expansion pass | One delayed source | 146.2 | 514.5 | 1983 |
+| Paced + incremental | Rapid | 9.0 | 56.4 | 1924 |
+| Paced + incremental | One delayed source | 7.6 | 23.5 | 2749 |
+
+Across the six final runs, the largest GUI queue delay was 20.1 ms and the
+largest observed PTY round trip 57.6 ms. Every run delivered 7,200 matches,
+5,760 visible rows, and every offered terminal input echo. The tradeoff is
+roughly 0.5–0.8 seconds longer total search duration in this fixture while
+input and painting can proceed. All three responsiveness targets are met.
+
+Regression coverage includes explicit page acknowledgements, wrong/stale
+acknowledgements, the result cap, a stalled source, complete sliced delivery,
+and clear/replacement/disconnect/removal from inside a result callback. Model
+tests compare incremental grouping and aggregates with a fresh model and check
+index stability, removal and reset. Window tests exercise live search browsing,
+scroll position, manual collapse, terminal focus and existing per-tab semantics.
+The performance implementation passed 35 Window cases (two opt-in benchmark
+cases skipped in that ordinary run), 29 model cases and the eight focused
+search-runtime cases, plus six explicit benchmark runs. Counts include QtTest
+initialization/cleanup. Candidate-wide checks and desktop verification belong
+in the RC testing receipt.
