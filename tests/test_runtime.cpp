@@ -155,7 +155,7 @@ class RuntimeTests : public QObject {
                         ++original;
                         if (original != 1)
                             return;
-                        QVERIFY(!done && items.size() == 32);
+                        QVERIFY(!done && !items.isEmpty() && items.size() <= 32);
                         if (action == "clear")
                             backend->search({}, 2);
                         else if (action == "replace")

@@ -139,3 +139,74 @@ top-level aggregate changes for those updates, retaining browsing selection when
 one exists. This uses the model's existing dataChanged signal and does not restore
 the expensive search regrouping/expansion passes. The completed rc.1 identity is
 retained; 0.11.1-rc.2 supersedes it for desktop testing.
+
+## Diverse working directories and native input (rc.3)
+
+Desktop testing of rc.2 still found perceptible typing delay during result delivery.
+The stronger fixture at `7058831` keeps the 7,200 matches, 24 disconnected sources
+and hidden-record ratio, but adds clustered, distinct, deeply nested and single-folder
+workloads, plus a delayed distinct source and an idle control. Distinct/nested cases
+have 2,400 different working directories per server before visibility filtering.
+The viewed conversation is among the results. Searches repeat for at least ten
+seconds, completing the final search; measurements include replacing the preceding
+result set. The original clustered fixture introduces directories in only four of
+96 delivery slices per server.
+
+The opt-in `searchWorkloads` QtTest cases require X11 and runtime `libXtst`. They
+inject keys through XTest into the focused terminal and run a normal `QEventLoop`
+during measurement instead of QtTest's wait/sleep loop. Input offers still originate
+from an independent thread. The synthetic child redraws its acknowledgement text;
+all acknowledgements remain visible so a delayed observer cannot lose earlier keys
+to scrollback. A paint observer records echoes present before a terminal paint and
+timestamps a queued callback after that paint returns. This includes callback
+scheduling delay: it is a conservative paint-completion observation, not physical
+screen scanout or a measurement of the real Codex TUI. The idle control uses the
+same child and input path. The final harness also records synchronous submission
+cost separately; the latency distributions continue to include it.
+
+Run with the same staged SDK/packaged Konsole environment described above:
+
+```sh
+ARCHCODEX_SEARCH_BENCHMARK="$PWD/search-workloads.jsonl" \
+  dbus-run-session -- build/test-window searchWorkloads
+```
+
+`search-distribution-before.jsonl` records the unchanged rc.2 application with the
+stronger harness, one run per case. In the distinct-project case, p95 GUI delay was
+125.7 ms, terminal echo 447.5 ms and paint observation 852.6 ms. Nested projects
+also reproduced substantial delays. The result count was therefore insufficient
+as the earlier benchmark's principal scale dimension.
+
+The follow-up implementation keeps the existing Qt model and compact grouping:
+
+- An ordered index of visible working directories finds the adjacent branch when
+  a new directory arrives. Only that branch is split or reparented. A common-root
+  change retains existing session objects. General regrouping remains the path for
+  removals, moved sessions and changes to visibility rules; randomized insertion
+  orders and batches are compared with that independent reference algorithm.
+- New rows carry their metadata before insertion, same-parent session additions
+  are inserted together, and new folders have their initial recency before entering
+  the sort order. Recursive proxy filtering is unnecessary because the source
+  model already determines membership and ancestor counts.
+- Appending history adds counts and maxima to affected ancestors once per batch.
+  Changes to existing rows and removals retain full aggregate calculation so a
+  decreasing maximum is handled correctly.
+- Branch moves preserve navigation only within the moved branch. Restoring saved
+  keys uses indexed lookups, and newly visible branches receive default expansion
+  locally. Query replacement uses a model reset and avoids preserving navigation
+  for rows being discarded.
+- Delivery estimates synchronous work per record and targets 4 ms of application
+  work, within 1–32 records per slice. Separately, elapsed time until the next turn
+  includes deferred Qt work and determines a 1–8 ms one-shot yield. Charging fixed
+  layout cost per record would shrink batches towards one row and repeat layout
+  unnecessarily. One outstanding page per backend and generation cancellation
+  remain the bounds on queued work.
+
+The 4 ms target is adaptive, not preemption: a Qt layout, branch move, explicit
+filter rebuild or large model reset can still exceed it. Widget/model operations
+remain on the GUI thread. Validation must report maxima and query replacement
+costs as well as p95; the desktop's actual Codex workload remains a separate
+acceptance check. The new synthetic comparison targets p95 GUI delay ≤10 ms,
+terminal echo ≤30 ms, and paint observation ≤50 ms; maxima ≤125 ms including
+repeated query replacement. These are test-workload targets, not production
+hard-real-time guarantees.

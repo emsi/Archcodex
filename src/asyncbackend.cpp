@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "asyncbackend.h"
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QPointer>
+#include <algorithm>
+#include <cmath>
 
 namespace Archcodex {
 // One GUI scheduler for all backends: at most one page per backend, one slice
@@ -9,15 +12,34 @@ namespace Archcodex {
 class SearchDelivery : public QObject {
     QQueue<QPointer<AsyncBackend>> ready;
     bool scheduled = false;
+    QElapsedTimer previousTurn;
+    qsizetype previousCount = 0;
+    double millisecondsPerItem = 0.125, lastGuiCost = 1.0;
     void schedule() {
         if (scheduled || ready.isEmpty())
             return;
         scheduled = true;
-        QTimer::singleShot(1, this, [this] {
-            scheduled = false;
+        // Leave room for input, PTY I/O and painting. Deferred layout is a
+        // per-turn cost: use it to pace turns, not to shrink every batch towards
+        // one row (which would repeat that layout thousands of extra times).
+        const int delay = int(std::clamp(std::ceil(lastGuiCost), 1.0, 8.0));
+        QTimer::singleShot(delay, this, [this, delay] {
+            if (previousCount && previousTurn.isValid()) {
+                lastGuiCost = std::max(0.0, previousTurn.nsecsElapsed() / 1e6 - delay);
+            }
+            const auto limit = std::clamp(qsizetype(4.0 / std::max(0.01, millisecondsPerItem)),
+                                          qsizetype(1), qsizetype(32));
+            previousTurn.start();
+            previousCount = 0;
             if (!ready.isEmpty())
                 if (auto backend = ready.dequeue())
-                    backend->deliverSearch();
+                    previousCount = backend->deliverSearch(limit);
+            if (previousCount)
+                millisecondsPerItem = 0.5 * millisecondsPerItem +
+                                      0.5 * (previousTurn.nsecsElapsed() / 1e6) / previousCount;
+            scheduled = false;
+            if (ready.isEmpty())
+                previousTurn.invalidate(); // Server wait time is not GUI work.
             schedule();
         });
     }
@@ -227,12 +249,11 @@ void AsyncBackend::cancelSearchDelivery() {
     searchPage.reset();
     searchDelivery->cancel(this);
 }
-void AsyncBackend::deliverSearch() {
+qsizetype AsyncBackend::deliverSearch(qsizetype limit) {
     if (!searchPage)
-        return;
-    constexpr qsizetype sliceSize = 32;
+        return 0;
     const auto revision = searchRevision;
-    const auto items = searchPage->items.mid(searchPage->offset, sliceSize);
+    const auto items = searchPage->items.mid(searchPage->offset, limit);
     searchPage->offset += items.size();
     const bool last = searchPage->offset == searchPage->items.size();
     const auto error = last ? searchPage->error : QString();
@@ -243,11 +264,12 @@ void AsyncBackend::deliverSearch() {
     emit searchResults(searchToken, items, error, complete);
     // Consumers may replace/cancel the query or remove this backend synchronously.
     if (!guard || revision != searchRevision)
-        return;
+        return items.size();
     if (last)
         worker->post([s = state, revision] { s->pump->core->advanceSearch(revision); });
     else
         searchDelivery->enqueue(this);
+    return items.size();
 }
 void AsyncBackend::verifySession(const QString &id, quint64 token) {
     worker->post([s = state, id, token] { s->pump->core->verifySession(id, token); });

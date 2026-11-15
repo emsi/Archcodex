@@ -2,13 +2,14 @@
 #include "sessionmodel.h"
 #include <QAbstractItemModelTester>
 #include <QJsonArray>
+#include <QRandomGenerator>
 #include <QTemporaryDir>
 #include <QtTest>
 using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
-    void pagesAppendToExistingFoldersAndRegroupOnlyNewPaths() {
+    void pagesAppendWithoutRegrouping() {
         SessionModel model;
         SessionFilter filter;
         filter.setSourceModel(&model);
@@ -68,7 +69,7 @@ class ModelTests : public QObject {
         auto branching = make("a", "branch", "/work/other/deep/path");
         records << branching;
         model.upsert(branching);
-        QCOMPARE(regrouped.size(), 1);
+        QCOMPARE(regrouped.size(), 0);
         compare();
         records[0].cwd = "/new/common/root";
         model.upsert(records[0]);
@@ -82,6 +83,113 @@ class ModelTests : public QObject {
         model.removeBackend("a");
         records.removeIf([](const Session &s) { return s.backendId == "a"; });
         compare();
+    }
+    void incrementalDirectoriesMatchRegrouping() {
+        const QStringList paths{"/",      "",     "/a",     "/a/b", "/a/b/c", "/a/b/d",    "/a-b/c",
+                                "/a/c/d", "/a/c", "/x/y/z", "/x/y", "/x",     "/unrelated"};
+        auto snapshot = [](SessionModel &model) {
+            QMap<QString, QVariantList> result;
+            const auto walk = [&](auto &&self, const QModelIndex &parent) -> void {
+                for (int i = 0; i < model.rowCount(parent); ++i) {
+                    const auto index = model.index(i, 0, parent);
+                    QVariantList values{parent.data(KeyRole)};
+                    for (int role :
+                         {int(Qt::DisplayRole), int(KindRole), int(PathRole), int(CountRole),
+                          int(WaitingCountRole), int(ActiveCountRole), int(UnknownCountRole),
+                          int(RecencyRole), int(AttentionRole), int(BackendsRole)})
+                        values << index.data(role);
+                    result[index.data(KeyRole).toString()] = values;
+                    self(self, index);
+                }
+            };
+            walk(walk, {});
+            return result;
+        };
+        for (int seed = 0; seed < 20; ++seed) {
+            SessionModel model;
+            SessionFilter filter;
+            filter.setSourceModel(&model);
+            QAbstractItemModelTester tester(&filter,
+                                            QAbstractItemModelTester::FailureReportingMode::QtTest);
+            QRandomGenerator random(seed);
+            auto order = paths;
+            std::shuffle(order.begin(), order.end(), random);
+            QList<Session> all;
+            for (const auto &path : order) {
+                auto s = Session::fromThread(
+                    "a",
+                    {{"id", QString::number(all.size())},
+                     {"cwd", path},
+                     {"name", path},
+                     {"path", "/saved/rollout"},
+                     {"updatedAt", random.bounded(1000)},
+                     {"status", QJsonObject{{"type", all.size() % 2 ? "idle" : "notLoaded"}}}});
+                all << s;
+                model.upsert(s);
+                SessionModel reference;
+                reference.upsertMany(all); // Empty model uses the independent regroup algorithm.
+                const auto actual = snapshot(model), expected = snapshot(reference);
+                QCOMPARE(actual.keys(), expected.keys());
+                for (auto it = expected.cbegin(); it != expected.cend(); ++it)
+                    QVERIFY2(
+                        actual.value(it.key()) == it.value(),
+                        qPrintable(
+                            QString("seed %1, path %2, node %3").arg(seed).arg(path, it.key())));
+            }
+            // An existing session moving and disappearing must also reset the path index.
+            all[0].cwd = "/new/top/project";
+            model.upsert(all[0]);
+            model.remove("a", all[1].id);
+            all.removeAt(1);
+            auto s = all.last();
+            s.id = "after-removal";
+            s.cwd = "/new/top/project/child";
+            all << s;
+            model.upsert(s);
+            SessionModel reference;
+            reference.upsertMany(all);
+            QCOMPARE(snapshot(model), snapshot(reference));
+            SessionModel batched;
+            for (int offset = 0; offset < all.size(); offset += 3) {
+                batched.upsertMany(all.mid(offset, 3));
+                SessionModel prefix;
+                prefix.upsertMany(all.mid(0, qMin(offset + 3, int(all.size()))));
+                QCOMPARE(snapshot(batched), snapshot(prefix));
+            }
+        }
+    }
+    void newRowsArePopulatedAndInsertedTogether() {
+        SessionModel model;
+        auto make = [](int id) {
+            return Session::fromThread("a", {{"id", QString::number(id)},
+                                             {"cwd", "/work"},
+                                             {"name", "Session"},
+                                             {"path", "/saved/rollout"},
+                                             {"updatedAt", 100 - id}});
+        };
+        model.upsert(make(0));
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        int insertions = 0;
+        connect(&model, &QAbstractItemModel::rowsInserted, &model,
+                [&](const QModelIndex &parent, int first, int last) {
+                    ++insertions;
+                    for (int row = first; row <= last; ++row) {
+                        const auto index = model.index(row, 0, parent);
+                        QCOMPARE(index.data(KindRole).toInt(), int(NodeKind::Session));
+                        QVERIFY(!index.data(ThreadRole).toString().isEmpty());
+                        QCOMPARE(index.data(Qt::DisplayRole).toString(), "Session");
+                        QVERIFY(index.flags().testFlag(Qt::ItemNeverHasChildren));
+                    }
+                });
+        QSignalSpy layouts(&filter, &QAbstractItemModel::layoutChanged);
+        QList<Session> page;
+        for (int i = 1; i <= 32; ++i)
+            page << make(i);
+        model.upsertMany(page);
+        QCOMPARE(insertions, 1);
+        QCOMPARE(layouts.size(), 0);
+        QCOMPARE(model.sessionIndex(sessionKey("a", "0")).parent().data(CountRole).toInt(), 33);
     }
     void cachedFiltersIntersectMembershipScopeAndVisibility() {
         SessionModel model;

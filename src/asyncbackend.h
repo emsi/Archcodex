@@ -38,7 +38,7 @@ class AsyncBackend final : public Backend {
     quint64 searchRevision = 0, searchToken = 0;
     SearchDelivery *searchDelivery;
     void cancelSearchDelivery();
-    void deliverSearch();
+    qsizetype deliverSearch(qsizetype limit);
     struct State {
         BackendPump *pump = nullptr;
     };

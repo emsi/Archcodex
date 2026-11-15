@@ -233,7 +233,7 @@ while True:
     SearchNativeKeys native;
     if (!shape.isEmpty())
         QVERIFY2(native.initialize(window.winId()), "Native benchmark requires X11 and libXtst");
-    QList<qint64> delays, echoes, paints;
+    QList<qint64> delays, echoes, paints, submissions;
     QHash<int, qint64> sent, unpainted;
     QObject measurements;
     bool collecting = true;
@@ -310,9 +310,11 @@ while True:
         do {
             completed.clear();
             delivered = 0;
+            const auto submissionStart = searchClock();
             query->setText("needle");
             QTest::keyClick(query, Qt::Key_Return);
             area->focusCurrent();
+            submissions << searchClock() - submissionStart;
             deadline.start(120000);
             if (completed.size() != 27)
                 wait.exec();
@@ -353,6 +355,7 @@ while True:
         {"gui_delay", searchDistribution(delays)},
         {"terminal_echo", searchDistribution(echoes)},
         {"terminal_paint", searchDistribution(paints)},
+        {"submission", searchDistribution(submissions)},
         {"unobserved_echoes", sent.size()},
         {"tree_height", tree->viewport()->height()},
         {"feedback_height", window.findChild<QWidget *>("searchFeedbackArea")
