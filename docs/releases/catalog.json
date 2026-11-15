@@ -261,6 +261,19 @@
       "sha256": "afc089ec620c32766d907e6714d7b8e556f2925d207edbfad0e1aa493959da3d",
       "bytes": 2434128,
       "notes": "v0.11.0.md"
+    },
+    {
+      "version": "0.11.1",
+      "tag": "v0.11.1",
+      "previous_tag": "v0.11.0",
+      "title": "Archcodex 0.11.1 \u2014 Responsive search and connection refresh",
+      "source_commit": "73f50e1e14a9c839b406a3758bf33167eef1c52e",
+      "source_commit_date": "2026-11-15T20:36:46Z",
+      "flatpak_commit": "74318078a83817bd86f7628a7d8b810788b802316a16344345ee788f37cf963a",
+      "asset": "Archcodex-0.11.1-x86_64.flatpak",
+      "sha256": "5bf7f098d6d5f4a2525fd2df2359337f4e8cfe7712be0a814dfedd1d860755cf",
+      "bytes": 2475904,
+      "notes": "v0.11.1.md"
     }
   ]
 }
