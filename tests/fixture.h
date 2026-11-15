@@ -32,6 +32,7 @@ class Fixture : public QObject {
     bool delaySnapshot = false;
     bool delayRead = false;
     bool delaySearch = false;
+    int searchMatches = 0, searchDelayMs = 0;
     QList<QJsonValue> searchIds;
     QJsonValue readId = QJsonValue::Undefined;
     bool failLoadedInventory = false;
@@ -139,6 +140,35 @@ class Fixture : public QObject {
                     searchIds << m["id"];
                     if (delaySearch)
                         return;
+                    if (searchMatches) {
+                        const int offset = m["params"].toObject()["cursor"].toString().toInt();
+                        QJsonArray page;
+                        for (int i = offset; i < qMin(offset + 100, searchMatches); ++i) {
+                            auto t = thread(QString("match-%1").arg(i));
+                            t["cwd"] =
+                                QString(
+                                    "/work/large-search/group-%1/project-%2/long/path/to/worktree")
+                                    .arg(i / 600)
+                                    .arg(i % 12);
+                            t["name"] =
+                                QString("Conversation needle %1 with a long descriptive title")
+                                    .arg(i);
+                            t["updatedAt"] = 20000 - i;
+                            if (i % 5 == 0) {
+                                t["ephemeral"] = true;
+                                t["path"] = QJsonValue::Null;
+                            }
+                            page.append(QJsonObject{{"thread", t}});
+                        }
+                        const QJsonObject result{
+                            {"data", page},
+                            {"nextCursor", offset + 100 < searchMatches
+                                               ? QJsonValue(QString::number(offset + 100))
+                                               : QJsonValue(QJsonValue::Null)}};
+                        QTimer::singleShot(searchDelayMs, this,
+                                           [this, id = m["id"], result] { reply(id, result); });
+                        return;
+                    }
                     const bool second = m["params"].toObject().contains("cursor");
                     reply(m["id"],
                           {{"data",

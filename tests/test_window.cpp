@@ -6,11 +6,12 @@
 #include "notifications.h"
 #include "opening.h"
 #include "ptyprobe.h"
+#include "searchbenchmark.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
 #include "terminal.h"
-#include "updater.h"
 #include "testenvironment.h"
+#include "updater.h"
 #include "window.h"
 #include "worker.h"
 #include <KCommandBar>
@@ -151,6 +152,15 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void largeSearchPerformance_data() {
+        QTest::addColumn<int>("delay");
+        QTest::newRow("rapid") << 0;
+        QTest::newRow("delayed") << 40;
+    }
+    void largeSearchPerformance() {
+        QFETCH(int, delay);
+        runSearchBenchmark(delay);
+    }
     void singleClickOpensOnce_data() {
         QTest::addColumn<bool>("singleClickStyle");
         QTest::newRow("desktop-double-click") << false;
