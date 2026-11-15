@@ -128,3 +128,14 @@ cases skipped in that ordinary run), 29 model cases and the eight focused
 search-runtime cases, plus six explicit benchmark runs. Counts include QtTest
 initialization/cleanup. Candidate-wide checks and desktop verification belong
 in the RC testing receipt.
+
+## Candidate review follow-up
+
+Final review after building 0.11.1-rc.1 added two stronger local-filter
+regressions: adding a match to an existing folder left the summary count stale,
+and the viewed conversation could re-enter that folder's filter without regaining
+its missing selection. Both were reproduced. The Window now observes the model's
+top-level aggregate changes for those updates, retaining browsing selection when
+one exists. This uses the model's existing dataChanged signal and does not restore
+the expensive search regrouping/expansion passes. The completed rc.1 identity is
+retained; 0.11.1-rc.2 supersedes it for desktop testing.

@@ -359,6 +359,19 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         if (!changingExplorer)
             updateSearchControls();
     });
+    connect(model, &QAbstractItemModel::dataChanged, this,
+            [this](const QModelIndex &first, const QModelIndex &, const QList<int> &roles) {
+                // Incremental membership changes update top-level aggregates
+                // without regrouping. Cached-filter counts must follow them too.
+                if (!changingExplorer && !first.parent().isValid() &&
+                    (roles.isEmpty() || roles.contains(CountRole))) {
+                    updateSearchControls();
+                    // A displayed conversation may have just re-entered a local
+                    // filter. Restore its missing selection without disturbing browsing.
+                    if (filter->sourceModel() == model && !tree->currentIndex().isValid())
+                        syncCurrentSession();
+                }
+            });
     connect(loadMore, &QPushButton::clicked, this, [this] {
         for (auto *b : backends)
             b->loadMore();
