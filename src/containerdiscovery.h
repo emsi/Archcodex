@@ -12,7 +12,7 @@ class ContainerDiscovery : public QObject {
     ContainerDiscovery(const QString &id, const QString &sshHost = {}, QObject *parent = nullptr);
     ~ContainerDiscovery() override;
     const QString id, sshHost;
-    void refresh();
+    void refresh(const QString &revision = {});
     void stop();
   signals:
     void snapshot(const QJsonObject &inventory);

@@ -105,7 +105,10 @@ Projects are groups of existing working directories; no project setup is needed.
 Local Codex, local myCodex and remote myCodex hosts have separate roots, and
 identical paths on different servers remain separate.
 
-Use **Discover** to refresh local discovery explicitly, or
+Use **Refresh** to discover connections and forget confirmed missing automatic connections
+that have no open, pending or remembered terminal views. Their local project/history cache
+is removed; Codex conversation files are kept. Incomplete discovery retains unverified
+connections. You can also use
 **Connections → Manage connections → Add** for a custom local socket.
 An empty socket path selects Codex's default endpoint.
 

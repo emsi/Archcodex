@@ -22,6 +22,7 @@ class QSplitter;
 class QToolButton;
 class QDialog;
 class KSqueezedTextLabel;
+class WindowTests;
 namespace Archcodex {
 class TerminalArea;
 class DiscoveryDialog;
@@ -32,6 +33,8 @@ class Updater;
 class UpdateDialog;
 class Window : public QMainWindow {
     Q_OBJECT
+    friend class ::WindowTests;
+
   public:
     explicit Window(const QString &dataDirectory, bool connectOnStart = true);
     ~Window() override;
@@ -83,6 +86,19 @@ class Window : public QMainWindow {
     void showDiscoveryDetails();
     QSet<QString> paused, ignoredSockets, discoveredPresent;
     QHash<QString, QString> discoveredPaths;
+    QString refreshRevision;
+    QSet<QString> refreshScopes, refreshAdded, refreshUpdated, savedWorkspaceBackends;
+    QHash<QString, quint64> retirements;
+    quint64 nextRetirement = 0;
+    int refreshRemoved = 0;
+    bool refreshQueued = false;
+    QTimer refreshDeadline;
+    bool protectsConnection(const QString &id) const;
+    void retireConnection(const QString &id);
+    void cancelRetirement(const QString &id);
+    void forgetConnection(const QString &id);
+    void refreshScopeFinished(const QString &id, const QStringList &issues = {});
+    void updateRefreshSummary();
     // A submitted All search may continue while a different tab is visible.
     bool globalSearchActive = false, storageFailed = false;
     bool changingExplorer = false;
@@ -178,8 +194,9 @@ class Window : public QMainWindow {
     void attach(const BackendProfile &profile, bool start);
     void connectionsDialog();
     void editConnection(const QString &id = {});
-    void discover();
-    void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues);
+    void discover(bool reconcile = true);
+    void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues,
+                        const QString &revision = {});
     void activate(const QModelIndex &index);
     void activateSession(const QString &backend, const QString &thread,
                          bool requireConnected = false);

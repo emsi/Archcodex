@@ -20,15 +20,21 @@ class AsyncStore : public QObject {
     void save(const Session &session);
     void save(const WorkspaceSnapshot &snapshot);
     void removeBackend(const QString &id);
+    // A retirement blocks later metadata saves until explicit rediscovery/cancellation.
+    void retireBackend(const QString &id, quint64 token);
+    void allowBackend(const QString &id);
     void removeSession(const QString &backend, const QString &id);
   signals:
     void loaded(const Archcodex::StoreSnapshot &snapshot);
     void failed(const QString &error);
     void workspaceFailed(const QString &error);
+    void workspaceSaved(const Archcodex::WorkspaceSnapshot &snapshot);
+    void backendRetired(const QString &id, quint64 token, const QString &error);
 
   private:
     std::shared_ptr<Worker> worker;
     StoreWriter *writer;
+    QSet<QString> retired;
 };
 } // namespace Archcodex
 Q_DECLARE_METATYPE(Archcodex::StoreSnapshot)

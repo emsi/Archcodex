@@ -109,6 +109,7 @@ class ContainerAgent:
         self.dirty = asyncio.Event()
         self.inventory_open = False
         self.connection = None
+        self.revision = ''
 
     async def scan(self):
         uid = os.getuid()
@@ -127,6 +128,7 @@ class ContainerAgent:
             while True:
                 await dirty.wait()
                 dirty.clear()
+                revision = self.revision
                 paths = [default] + [v['path'] for v in self.endpoints.values()]
                 watcher.configure(roots, paths)
                 endpoints, issues = discover.snapshot(default=default, aliases=paths)
@@ -135,19 +137,21 @@ class ContainerAgent:
                     try:
                         info = os.stat(ep['path'], follow_symlinks=False)
                         if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid:
+                            issues.append(containers.issue('Socket ownership or type changed during endpoint inspection'))
                             continue
                         signature = (ep['path'], info.st_dev, info.st_ino, ep.get('pid'))
                         token = next((k for k, v in self.endpoints.items()
                                       if v['_signature'] == signature), None) or secrets.token_hex(16)
                         registered[token] = dict(ep, endpointToken=token, _signature=signature)
                     except OSError:
+                        issues.append(containers.issue('Socket changed during endpoint inspection'))
                         continue
                 self.endpoints = registered
                 public = [{k: v for k, v in ep.items() if not k.startswith('_')}
                           for ep in registered.values()]
                 issues += watcher.configure(roots, [default] + [ep['path'] for ep in public])
                 self.snapshot = {'runtimeUser': pwd.getpwuid(uid).pw_name,
-                                 'endpoints': public, 'issues': issues}
+                                 'endpoints': public, 'issues': issues, 'revision': revision}
                 self.changed.set()
         finally:
             loop.remove_reader(watcher.fd)
@@ -155,12 +159,15 @@ class ContainerAgent:
 
     async def accept(self, stream, request):
         if request.get('kind') == 'refresh':
+            self.revision = request.get('revision', '')
             self.dirty.set()
             stream.mux.accepted(stream)
         elif request.get('kind') == 'inventory':
             if self.inventory_open:
                 raise ValueError('Inventory already attached')
             self.inventory_open = True
+            self.revision = request.get('revision', '')
+            self.dirty.set()
             stream.mux.accepted(stream)
             async def output():
                 while not stream.closed:
@@ -213,14 +220,16 @@ class SharedInventory(containers.Inventory):
         self.attachments = {}
         self.consumer = None
         self.contexts_changed = asyncio.Event()
+        self.context_revision = None
 
-    async def refresh(self):
+    async def refresh(self, revision):
+        self.revision = revision
         self.contexts_changed.set()
         for dirty in self.engine_dirty.values():
             dirty.set()
         async def refresh_container(connection):
             try:
-                stream = await connection.open({'kind': 'refresh'})
+                stream = await connection.open({'kind': 'refresh', 'revision': revision})
                 stream.close()
             except (OSError, ValueError, asyncio.TimeoutError):
                 pass  # Failed attachments already have their own recovery path.
@@ -231,13 +240,21 @@ class SharedInventory(containers.Inventory):
         while True:
             await self.changed.wait()
             self.changed.clear()
+            settled = self.context_revision == self.revision and not self.pending
+            settled &= all(self.engine_scans.get(engine, {}).get('revision') == self.revision
+                           or engine in self.errors for engine in self.engines)
+            settled &= all(desc.get('issues') or desc.get('paused') or
+                           desc.get('endpointRevision') == self.revision
+                           for desc in self.records.values())
             await mux.report(self.consumer, {'host': self.host, 'user': self.user,
                 'containers': list(self.records.values()), 'issues': list(self.errors.values()),
+                'revision': self.revision, 'engines': self.engine_scans,
+                'settled': bool(settled),
                 'complete': bool(self.engines) and self.ready == self.engines and not self.errors and not self.pending})
 
     async def container(self, context, engine, desc):
         key = engine + ':' + desc['containerId']
-        desc.update(dockerContext=context, engine=engine, endpoints=[], issues=[])
+        desc.update(dockerContext=context, engine=engine, endpoints=[], issues=[], endpointComplete=False)
         self.records[key] = desc
         self.publish()
         if desc['paused']:
@@ -262,7 +279,7 @@ class SharedInventory(containers.Inventory):
                         current['containerEpoch'] != desc['containerEpoch'] or not current['running'] or current['paused']:
                     raise ValueError('Container execution context changed; rediscover before reconnecting')
                 connection = await child.start()
-                stream = await connection.open({'kind': 'inventory'})
+                stream = await connection.open({'kind': 'inventory', 'revision': self.revision})
                 messages = mux.messages(stream)
                 first = await asyncio.wait_for(anext(messages), 20)
             generation = secrets.token_hex(16)
@@ -276,10 +293,13 @@ class SharedInventory(containers.Inventory):
                 desc['runtimeUser'] = user
                 desc['endpoints'] = [dict(ep, attachment=generation) for ep in first['endpoints']]
                 desc['issues'] = first['issues']
+                desc['endpointRevision'] = first.get('revision', '')
+                desc['endpointComplete'] = not first['issues']
                 self.publish()
                 first = await anext(messages)
         except (OSError, ValueError, asyncio.TimeoutError, StopAsyncIteration) as error:
             desc['endpoints'] = []
+            desc['endpointComplete'] = False
             desc['issues'] = [containers.issue(str(error) or 'Container helper disconnected',
                                                child.tail.decode(errors='replace'))]
             self.publish()
@@ -314,8 +334,11 @@ class SharedInventory(containers.Inventory):
             while True:
                 await self.contexts_changed.wait()
                 self.contexts_changed.clear()
+                revision = self.revision
                 lines = (await containers.run(['docker', 'context', 'ls', '--format', '{{json .}}'])).decode().splitlines()
-                for line in lines[:64]:
+                if len(lines) > 64:
+                    raise ValueError('Docker context inventory exceeds its limit')
+                for line in lines:
                     context = json.loads(line)
                     if context.get('DockerEndpoint', '').startswith('unix://'):
                         name = context.get('Name', '')
@@ -328,6 +351,7 @@ class SharedInventory(containers.Inventory):
                     self.errors['docker'] = containers.issue('No accessible local Unix Docker engines')
                 else:
                     self.errors.pop('docker', None)
+                self.context_revision = revision
                 self.publish()
         context_task = asyncio.create_task(contexts())
         output = asyncio.create_task(self.output())
@@ -346,12 +370,13 @@ class HostAgent:
 
     async def accept(self, stream, request):
         if request.get('kind') == 'refresh':
-            await self.inventory.refresh()
+            await self.inventory.refresh(request.get('revision', ''))
             stream.mux.accepted(stream)
         elif request.get('kind') == 'inventory':
             if self.inventory_open:
                 raise ValueError('Inventory already attached')
             self.inventory_open = True
+            self.inventory.revision = request.get('revision', '')
             stream.mux.accepted(stream)
             try:
                 await mux.produce(stream, self.inventory.run(stream))
@@ -450,8 +475,9 @@ class LocalEndpoint:
 
 
 class DesktopHost:
-    def __init__(self, desktop, ident, host):
+    def __init__(self, desktop, ident, host, revision=0):
         self.desktop, self.ident, self.host = desktop, ident, host
+        self.revision = revision
         self.endpoints = {}
         self.delay = 1
         self.active = None
@@ -504,7 +530,7 @@ class DesktopHost:
         try:
             connection = await child.start()
             self.active = connection
-            inventory = await connection.open({'kind': 'inventory'})
+            inventory = await connection.open({'kind': 'inventory', 'revision': self.revision})
             async for report in mux.messages(inventory):
                 await self.apply(report, connection.open)
             raise mux.Closed('Host inventory disconnected')
@@ -529,7 +555,7 @@ class DesktopHost:
         try:
             await connection.start()
             self.active = connection
-            inventory = await connection.open({'kind': 'inventory'})
+            inventory = await connection.open({'kind': 'inventory', 'revision': self.revision})
             async for report in mux.messages(inventory):
                 await self.apply(report, connection.open)
             raise mux.Closed('Local container inventory disconnected')
@@ -546,6 +572,7 @@ class DesktopHost:
                 await (self.remote() if self.host else self.local())
             except (OSError, ValueError, asyncio.TimeoutError) as error:
                 self.desktop.reports[self.ident] = {'containers': [], 'complete': False,
+                    'revision': self.revision,
                     'issues': [containers.issue('Container transport disconnected', str(error)[:4096])]}
                 self.desktop.changed.set()
             await asyncio.sleep(self.delay)  # Failed-connection retry, never session polling.
@@ -555,15 +582,20 @@ class DesktopHost:
         await cancel(self.refresh_task, self.task)
         await self.clear()
 
-    def request_refresh(self):
+    def request_refresh(self, revision):
+        self.revision = revision
         if not self.refresh_task or self.refresh_task.done():
             self.refresh_task = asyncio.create_task(self.refresh())
 
     async def refresh(self):
         if self.active and not self.active.closed:
             try:
-                stream = await self.active.open({'kind': 'refresh'})
-                stream.close()
+                while True:
+                    revision = self.revision
+                    stream = await self.active.open({'kind': 'refresh', 'revision': revision})
+                    stream.close()
+                    if revision == self.revision:
+                        break
                 return
             except (OSError, ValueError, asyncio.TimeoutError):
                 pass
@@ -596,14 +628,14 @@ class Desktop:
             if replacement and replacement[0] == config[0]:
                 if replacement != config:
                     self.hosts[ident] = (replacement, host)
-                    host.request_refresh()
+                    host.request_refresh(replacement[1])
             else:
                 del self.hosts[ident]
                 await host.stop()
                 self.reports.pop(ident, None)
         for ident, config in desired.items():
             if ident not in self.hosts:
-                self.hosts[ident] = (config, DesktopHost(self, ident, config[0]))
+                self.hosts[ident] = (config, DesktopHost(self, ident, config[0], config[1]))
         self.changed.set()
 
     async def output(self, writer):

@@ -262,11 +262,15 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     label->setFont(f);
     heading->addWidget(label);
     heading->addStretch();
-    auto *discoverButton = new QPushButton("Discover");
-    discoverButton->setToolTip("Discover existing local Codex servers and sessions");
+    auto *discoverButton = new QPushButton("Refresh");
+    discoverButton->setObjectName("refreshConnections");
+    discoverButton->setToolTip(
+        "Refresh connections. Forget missing automatic connections and their local "
+        "project/history cache when no open, pending or remembered terminal uses them. "
+        "Codex conversation files are kept.");
     heading->addWidget(discoverButton);
     left->addLayout(heading);
-    connect(discoverButton, &QPushButton::clicked, this, &Window::discover);
+    connect(discoverButton, &QPushButton::clicked, this, [this] { discover(); });
     tabs = new QTabBar;
     tabs->addTab("All");
     tabs->addTab("Active");
@@ -542,8 +546,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     projectsMenu->addAction(
         commands->add("quit", "Quit", "Application", {}, [this] { this->close(); }));
     auto *connectionMenu = menuBar()->addMenu("&Connections");
-    connectionMenu->addAction(commands->add("discover", "Discover local sessions", "Connections",
-                                            {}, [this] { discover(); }));
+    auto *refreshAction =
+        commands->add("discover", "Refresh connections", "Connections", {}, [this] { discover(); });
+    refreshAction->setToolTip(discoverButton->toolTip());
+    refreshAction->setStatusTip(discoverButton->toolTip());
+    connectionMenu->addAction(refreshAction);
     connectionMenu->addAction(commands->add("connections", "Manage connections…", "Connections", {},
                                             [this] { connectionsDialog(); }));
     connectionMenu->addAction(commands->add("discovery_details", "Discovery details…",
@@ -685,6 +692,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     discovery = new HostDiscovery(this);
     connect(discovery, &HostDiscovery::snapshot, this, &Window::applyDiscovery);
     connect(discovery, &HostDiscovery::failed, this, [this](const QString &message) {
+        refreshScopeFinished("local", {message});
         discoveryReport.failure = message;
         discoveryReport.issues = {};
         discoveryReport.inProgress = false;
@@ -730,6 +738,39 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         workspaceWritable = false;
         updateWorkspaceStatus();
     });
+    connect(store.get(), &AsyncStore::workspaceSaved, this,
+            [this](const WorkspaceSnapshot &snapshot) {
+                savedWorkspaceBackends.clear();
+                for (const auto &view : snapshot.views)
+                    savedWorkspaceBackends.insert(view.backendId);
+            });
+    connect(store.get(), &AsyncStore::backendRetired, this,
+            [this](const QString &id, quint64 token, const QString &error) {
+                if (retirements.value(id) != token)
+                    return;
+                if (!error.isEmpty() || !profiles.value(id).discovered || protectsConnection(id)) {
+                    cancelRetirement(id);
+                    if (!error.isEmpty())
+                        discoveryReport.refreshIssues.append(QJsonObject{
+                            {"code", "retirement-" + id},
+                            {"summary", "Could not forget " + profiles.value(id).name},
+                            {"explanation", "The connection and its cache remain available."},
+                            {"action", "Check metadata storage access and refresh again."},
+                            {"details", QJsonArray{error}}});
+                } else {
+                    retirements.remove(id);
+                    forgetConnection(id);
+                    ++refreshRemoved;
+                }
+                updateRefreshSummary();
+            });
+    refreshDeadline.setSingleShot(true);
+    connect(&refreshDeadline, &QTimer::timeout, this, [this] {
+        const auto pending = refreshScopes;
+        for (const auto &id : pending)
+            refreshScopeFinished(id, {"The fresh inventory did not finish within 60 seconds; "
+                                      "connections were retained."});
+    });
     updateWorkspaceStatus();
     connect(
         store.get(), &AsyncStore::loaded, this, [this, connectOnStart](const StoreSnapshot &cache) {
@@ -750,6 +791,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             workspaceError = cache.workspaceError;
             workspaceWritable = workspaceError.isEmpty();
             workspaceRevision = cache.workspace.revision;
+            for (const auto &view : cache.workspace.views)
+                savedWorkspaceBackends.insert(view.backendId);
             const bool restore = QSettings(dataDirectory + "/window.ini", QSettings::IniFormat)
                                      .value("application/restoreOpenedTerminals", true)
                                      .toBool();
@@ -819,8 +862,11 @@ void Window::restoreCache(bool connectOnStart) {
         restoreTree(tree, settings.value("expanded").toStringList(), {});
     }
     syncCurrentSession();
-    if (connectOnStart)
+    if (refreshQueued) {
+        refreshQueued = false;
         discover();
+    } else if (connectOnStart)
+        discover(false);
 }
 Window::~Window() {
     freezeWorkspace();
@@ -876,29 +922,32 @@ void Window::attach(const BackendProfile &p, bool start) {
             else
                 ++it;
     });
-    connect(b, &Backend::loadedInventory, this, [this, id = p.id](const QSet<QString> &loaded) {
-        // Cached rows outside the first history page also need reconciliation.
-        QList<Session> updates, matches;
-        for (auto &s : sessions)
-            if (s.backendId == id && !s.id.startsWith("new-") && !s.known &&
-                !loaded.contains(s.id)) {
-                s.status = {{"type", "notLoaded"}};
-                s.known = true;
-                updates << s;
-                persist([&] { store->save(s); });
-                const auto key = sessionKey(id, s.id);
-                if (searchSessions.contains(key)) {
-                    searchSessions[key] = s;
-                    matches << s;
-                }
-            }
-        for (const auto &session : updates)
-            terminal->updateSession(session, profiles.value(session.backendId).name);
-        model->upsertMany(updates);
-        results->upsertMany(matches);
-    });
+    connect(b, &Backend::loadedInventory, this,
+            [this, b = QPointer<Backend>(b), id = p.id](const QSet<QString> &loaded) {
+                if (backends.value(id) != b)
+                    return;
+                // Cached rows outside the first history page also need reconciliation.
+                QList<Session> updates, matches;
+                for (auto &s : sessions)
+                    if (s.backendId == id && !s.id.startsWith("new-") && !s.known &&
+                        !loaded.contains(s.id)) {
+                        s.status = {{"type", "notLoaded"}};
+                        s.known = true;
+                        updates << s;
+                        persist([&] { store->save(s); });
+                        const auto key = sessionKey(id, s.id);
+                        if (searchSessions.contains(key)) {
+                            searchSessions[key] = s;
+                            matches << s;
+                        }
+                    }
+                for (const auto &session : updates)
+                    terminal->updateSession(session, profiles.value(session.backendId).name);
+                model->upsertMany(updates);
+                results->upsertMany(matches);
+            });
     connect(b, &Backend::connectionChanged, this,
-            [this, b, id = p.id](const QString &text, bool ready) {
+            [this, b = QPointer<Backend>(b), id = p.id](const QString &text, bool ready) {
                 if (backends.value(id) != b)
                     return;
                 connectionStates[id] = text;
@@ -927,91 +976,109 @@ void Window::attach(const BackendProfile &p, bool start) {
                 }
                 updateSummary();
             });
-    connect(b, &Backend::sessionChanged, this, [this](const Session &s) { applySessions({s}); });
-    connect(b, &Backend::sessionsChanged, this, &Window::applySessions);
+    connect(b, &Backend::sessionChanged, this,
+            [this, b = QPointer<Backend>(b), id = p.id](const Session &s) {
+                if (backends.value(id) == b)
+                    applySessions({s});
+            });
+    connect(b, &Backend::sessionsChanged, this,
+            [this, b = QPointer<Backend>(b), id = p.id](const QList<Session> &items) {
+                if (backends.value(id) == b)
+                    applySessions(items);
+            });
     connect(b, &Backend::attentionRequested, this,
-            [this, b, id = p.id](const SessionAttention &event) {
+            [this, b = QPointer<Backend>(b), id = p.id](const SessionAttention &event) {
                 if (!closing && backends.value(id) == b && b->ready() && profiles.contains(id)) {
                     updateViewedSession();
                     notifications->show(event, profiles[id]);
                 }
             });
-    connect(b, &Backend::sessionRemoved, this, [this, id = p.id](const QString &thread) {
-        notifications->withdrawSession(id, thread);
-        const auto key = sessionKey(id, thread);
-        if (sessions.value(key).terminalOpen) {
-            auto &s = sessions[key];
-            s.unavailable = true;
-            s.known = false;
-            terminal->updateSession(s, profiles.value(id).name);
-            model->upsert(s);
-            if (searchSessions.contains(key)) {
-                searchSessions[key] = s;
-                results->upsert(s);
-            }
-        } else {
-            sessions.remove(key);
-            model->remove(id, thread);
-            searchSessions.remove(key);
-            results->remove(id, thread);
-        }
-        if (globalSearchActive)
-            updateSearchSummary();
-        persist([&] { store->removeSession(id, thread); });
-    });
-    connect(b, &Backend::moreAvailable, this, [this, id = p.id](bool available) {
-        more[id] = available;
-        updateSearchControls();
-    });
-    connect(b, &Backend::searchResults, this,
-            [this, id = p.id](quint64 token, const QList<Session> &matches, const QString &error,
-                              bool complete) {
-                if (token != searchToken || !globalSearchActive)
+    connect(b, &Backend::sessionRemoved, this,
+            [this, b = QPointer<Backend>(b), id = p.id](const QString &thread) {
+                if (backends.value(id) != b)
                     return;
-                QList<Session> updates;
-                for (auto s : matches) {
-                    if (scopedSearch &&
-                        (!scopeBackends.contains(s.backendId) ||
-                         (!scopePath.isEmpty() && s.cwd != scopePath &&
-                          !s.cwd.startsWith(scopePath == "/" ? "/" : scopePath + "/"))))
-                        continue;
-                    const auto key = sessionKey(s.backendId, s.id);
-                    if (sessions.contains(key))
-                        s = sessions[key];
-                    else
-                        s.known = false;
-                    searchSessions[key] = s;
-                    updates << s;
+                notifications->withdrawSession(id, thread);
+                const auto key = sessionKey(id, thread);
+                if (sessions.value(key).terminalOpen) {
+                    auto &s = sessions[key];
+                    s.unavailable = true;
+                    s.known = false;
+                    terminal->updateSession(s, profiles.value(id).name);
+                    model->upsert(s);
+                    if (searchSessions.contains(key)) {
+                        searchSessions[key] = s;
+                        results->upsert(s);
+                    }
+                } else {
+                    sessions.remove(key);
+                    model->remove(id, thread);
+                    searchSessions.remove(key);
+                    results->remove(id, thread);
                 }
-                results->upsertMany(updates);
-                // Select a displayed conversation when it first arrives, without
-                // repeatedly revealing it over the user's subsequent navigation.
-                if (showingSearch() && !tree->currentIndex().isValid()) {
-                    const auto index =
-                        filter->mapFromSource(results->sessionIndex(terminal->currentKey()));
-                    if (index.isValid())
-                        tree->setCurrentIndex(index);
-                }
-                if (!error.isEmpty())
-                    recordSearchError(id, error);
-                if (complete)
-                    searching.remove(id);
-                updateSearchSummary();
+                if (globalSearchActive)
+                    updateSearchSummary();
+                persist([&] { store->removeSession(id, thread); });
             });
-    connect(b, &Backend::identityReceived, this, [this, id = p.id](const QJsonObject &identity) {
-        if (!profiles.contains(id))
-            return;
-        auto &profile = profiles[id];
-        for (auto it = identity.begin(); it != identity.end(); ++it)
-            profile.identity[it.key()] = it.value();
-        if (profile.isContainer() && identity["codexHome"].isString())
-            profile.identity["serverCodexHome"] = identity["codexHome"];
-        opening->updateProfile(profile);
-        refreshNames();
-        persist([&] { store->save(profile); });
-    });
+    connect(b, &Backend::moreAvailable, this,
+            [this, b = QPointer<Backend>(b), id = p.id](bool available) {
+                if (backends.value(id) != b)
+                    return;
+                more[id] = available;
+                updateSearchControls();
+            });
+    connect(
+        b, &Backend::searchResults, this,
+        [this, b = QPointer<Backend>(b), id = p.id](quint64 token, const QList<Session> &matches,
+                                                    const QString &error, bool complete) {
+            if (backends.value(id) != b || token != searchToken || !globalSearchActive)
+                return;
+            QList<Session> updates;
+            for (auto s : matches) {
+                if (scopedSearch && (!scopeBackends.contains(s.backendId) ||
+                                     (!scopePath.isEmpty() && s.cwd != scopePath &&
+                                      !s.cwd.startsWith(scopePath == "/" ? "/" : scopePath + "/"))))
+                    continue;
+                const auto key = sessionKey(s.backendId, s.id);
+                if (sessions.contains(key))
+                    s = sessions[key];
+                else
+                    s.known = false;
+                searchSessions[key] = s;
+                updates << s;
+            }
+            results->upsertMany(updates);
+            // Select a displayed conversation when it first arrives, without
+            // repeatedly revealing it over the user's subsequent navigation.
+            if (showingSearch() && !tree->currentIndex().isValid()) {
+                const auto index =
+                    filter->mapFromSource(results->sessionIndex(terminal->currentKey()));
+                if (index.isValid())
+                    tree->setCurrentIndex(index);
+            }
+            if (!error.isEmpty())
+                recordSearchError(id, error);
+            if (complete)
+                searching.remove(id);
+            updateSearchSummary();
+        });
+    connect(b, &Backend::identityReceived, this,
+            [this, b = QPointer<Backend>(b), id = p.id](const QJsonObject &identity) {
+                if (backends.value(id) != b || !profiles.contains(id))
+                    return;
+                auto &profile = profiles[id];
+                for (auto it = identity.begin(); it != identity.end(); ++it)
+                    profile.identity[it.key()] = it.value();
+                if (profile.isContainer() && identity["codexHome"].isString())
+                    profile.identity["serverCodexHome"] = identity["codexHome"];
+                opening->updateProfile(profile);
+                refreshNames();
+                persist([&] { store->save(profile); });
+            });
     connect(b, &Backend::sessionForked, this,
-            [this, id = p.id](const QString &source, const Session &session, const QString &issue) {
+            [this, b = QPointer<Backend>(b),
+             id = p.id](const QString &source, const Session &session, const QString &issue) {
+                if (backends.value(id) != b)
+                    return;
                 if (!pendingForks.remove(sessionKey(id, source)))
                     return;
                 if (!issue.isEmpty()) {
@@ -1022,7 +1089,8 @@ void Window::attach(const BackendProfile &p, bool start) {
                 openSession(id, sessions.value(sessionKey(id, session.id)));
             });
     connect(b, &Backend::sessionStarted, this,
-            [this, b, id = p.id](quint64 token, const Session &session, const QString &issue) {
+            [this, b = QPointer<Backend>(b), id = p.id](quint64 token, const Session &session,
+                                                        const QString &issue) {
                 if (pendingStarts.take(token) != b || backends.value(id) != b || closing)
                     return; // A replaced/removed source cannot open a terminal from a late reply.
                 if (!issue.isEmpty()) {
@@ -1039,6 +1107,7 @@ void Window::attach(const BackendProfile &p, bool start) {
         connectionStates[p.id] = "Disconnected";
 }
 void Window::newSession(const QString &backend, const QString &path) {
+    cancelRetirement(backend);
     if (!profiles.contains(backend) || !backends.value(backend) || !backends[backend]->ready()) {
         error("Connect the selected project's backend first.");
         return;
@@ -1057,6 +1126,7 @@ void Window::newSession(const QString &backend, const QString &path) {
     backends[backend]->startSession(path, token);
 }
 void Window::forkSession(const QString &backend, const QString &thread) {
+    cancelRetirement(backend);
     const auto key = sessionKey(backend, thread);
     if (pendingForks.contains(key))
         return;
@@ -1175,6 +1245,7 @@ void Window::addContainerHost(const QString &id, const QString &host, bool start
     connect(d, &ContainerDiscovery::failed, this, [this, id](const QString &error) {
         if (disabledContainerHosts.contains(id))
             return;
+        refreshScopeFinished(id, {error});
         containerFeedback[id] = error;
         containerProblems.insert(id);
         updateContainerSummary();
@@ -1280,6 +1351,7 @@ void Window::containerHostsDialog() {
         const auto id = list->currentItem()->data(Qt::UserRole).toString();
         disabledContainerHosts.insert(id);
         containerDiscovery[id]->stop();
+        refreshScopeFinished(id, {"Host disabled during refresh."});
         containerFeedback[id] = "Disabled";
         containerProblems.remove(id);
         for (const auto &p : profiles)
@@ -1297,6 +1369,7 @@ void Window::containerHostsDialog() {
             return;
         }
         delete containerDiscovery.take(id);
+        refreshScopeFinished(id, {"Host removed during refresh."});
         containerHosts.remove(id);
         containerFeedback.remove(id);
         containerProblems.remove(id);
@@ -1330,6 +1403,8 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
         }
     }
     QSet<QString> present, empty;
+    QHash<QString, QJsonObject> checkedContainers;
+    bool validInventory = inventory["containers"].isArray();
     QStringList issues;
     for (const auto &issue : inventory["issues"].toArray())
         issues << issue.toObject()["summary"].toString();
@@ -1337,14 +1412,19 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
     if (containers.size() > 512) {
         containerFeedback[hostId] = "Container inventory exceeds the 512-container limit.";
         containerProblems.insert(hostId);
+        refreshScopeFinished(hostId, {containerFeedback[hostId]});
         updateContainerSummary();
         return;
     }
     for (const auto &value : containers) {
         const auto c = value.toObject();
         const auto cid = c["containerId"].toString(), engine = c["engine"].toString();
-        if (!QRegularExpression("^[a-f0-9]{64}$").match(cid).hasMatch() || !validText(engine, 256))
+        if (!QRegularExpression("^[a-f0-9]{64}$").match(cid).hasMatch() || engine.isEmpty() ||
+            !validText(engine, 256)) {
+            validInventory = false;
+            issues << "Invalid container identity in inventory.";
             continue;
+        }
         const auto key = hostId + QChar(0x1f) + engine + QChar(0x1f) + cid;
         const auto digest = [](const QString &s) {
             return QString::fromLatin1(
@@ -1355,12 +1435,20 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
         for (const auto &i : c["issues"].toArray())
             issues << c["containerName"].toString() + ": " + i.toObject()["summary"].toString();
         bool hasServer = false;
+        bool validEndpoints = c["endpoints"].isArray();
+        QSet<QString> endpointPaths;
         if (endpoints.size() > 4096) {
             issues << "Container endpoint inventory exceeds its limit.";
             endpoints = {};
+            validEndpoints = false;
         }
         for (const auto &entry : endpoints) {
             const auto ep = entry.toObject();
+            if (endpointPaths.contains(ep["path"].toString())) {
+                validEndpoints = false;
+                issues << "Duplicate endpoint in container inventory.";
+            }
+            endpointPaths.insert(ep["path"].toString());
             BackendProfile p;
             p.id = "mc-" + digest(key + QChar(0x1f) + ep["path"].toString());
             if (ignoredSockets.contains(p.id))
@@ -1391,8 +1479,11 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             p.name = serverLabel(p);
             if (!p.validate().isEmpty()) {
                 issues << p.name + ": " + p.validate();
+                validEndpoints = false;
                 continue;
             }
+            cancelRetirement(p.id);
+            store->allowBackend(p.id);
             present.insert(p.id);
             hasServer = true;
             const auto old = profiles.value(p.id);
@@ -1420,6 +1511,12 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                             store->save(s);
                         }
             }
+            if (!refreshRevision.isEmpty()) {
+                if (!profiles.contains(p.id))
+                    refreshAdded.insert(p.id);
+                else if (old.json() != p.json() && !refreshAdded.contains(p.id))
+                    refreshUpdated.insert(p.id);
+            }
             profiles[p.id] = p;
             opening->updateProfile(p);
             store->save(p);
@@ -1434,6 +1531,16 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                 backends[p.id]->connectServer();
             discoveredPresent.insert(p.id);
         }
+        auto checked = c;
+        checked["endpointComplete"] = validEndpoints && c["endpointComplete"].toBool() &&
+                                      c["issues"].isArray() && c["issues"].toArray().isEmpty() &&
+                                      !c["paused"].toBool();
+        const auto scopeKey = engine + QChar(0x1f) + cid;
+        if (checkedContainers.contains(scopeKey)) {
+            validInventory = false;
+            issues << "Duplicate container identity in inventory.";
+        }
+        checkedContainers[scopeKey] = checked;
         if (!hasServer) {
             empty.insert(rootId);
             BackendProfile container;
@@ -1458,12 +1565,35 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
         else
             ++it;
     emptyContainers.unite(empty);
-    if (inventory["complete"].toBool())
-        for (const auto &p : profiles)
-            if (p.discoveryHost == hostId && !present.contains(p.id)) {
-                backends[p.id]->disconnectServer();
+    const bool refreshing = !refreshRevision.isEmpty() && refreshScopes.contains(hostId) &&
+                            inventory["revision"].toString() == refreshRevision;
+    const auto engines = inventory["engines"].toObject();
+    if (validInventory) {
+        for (const auto &p : std::as_const(profiles)) {
+            if (p.discoveryHost != hostId || present.contains(p.id))
+                continue;
+            const auto engine = p.identity["dockerEngine"].toString();
+            const auto scan = engines[engine].toObject();
+            if (scan["revision"] != inventory["revision"] || !scan["containerIds"].isArray())
+                continue;
+            const auto container = checkedContainers.value(engine + QChar(0x1f) + p.containerId);
+            const bool gone = !scan["containerIds"].toArray().contains(p.containerId);
+            const bool checked = container["endpointComplete"].toBool() &&
+                                 container["endpointRevision"] == inventory["revision"];
+            if (gone || checked) {
                 discoveredPresent.remove(p.id);
+                if (refreshing)
+                    retireConnection(p.id);
+                else if (auto *backend = backends.value(p.id))
+                    backend->disconnectServer();
             }
+        }
+    }
+    if (refreshing && inventory["settled"].toBool()) {
+        if (!inventory["complete"].toBool() && issues.isEmpty())
+            issues << "The container inventory is incomplete.";
+        refreshScopeFinished(hostId, issues);
+    }
     refreshNames();
     containerFeedback[hostId] =
         QString("%1 containers, %2 servers").arg(containers.size()).arg(present.size()) +
@@ -1591,6 +1721,7 @@ void Window::clientStateChanged(const Session &client) {
     }
 }
 void Window::restartTerminal(const Session &client) {
+    cancelRetirement(client.backendId);
     const auto view = profiles.contains(client.backendId)
                           ? terminal->prepare(profiles[client.backendId], client, false)
                           : terminal->view(sessionKey(client.backendId, client.id));
@@ -1599,6 +1730,7 @@ void Window::restartTerminal(const Session &client) {
 void Window::openSession(const QString &backend, const Session &session) {
     if (!profiles.contains(backend))
         return;
+    cancelRetirement(backend);
     const auto view = terminal->prepare(profiles[backend], session, true);
     if (view.id.isEmpty()) {
         statusBar()->showMessage("Close a terminal before opening more than 512 views.");
@@ -1621,19 +1753,29 @@ void Window::updateSummary() {
     connections->setToolTip(descriptions.join('\n'));
     updateSearchControls();
     const bool failed = !discoveryReport.failure.isEmpty();
-    const bool limited = !discoveryReport.issues.isEmpty();
+    const bool limited =
+        !discoveryReport.issues.isEmpty() || !discoveryReport.refreshIssues.isEmpty();
     const bool empty = discoveryReport.checked.isValid() && !discoveryReport.endpoints;
-    discoveryStatus->setVisible(discoveryReport.inProgress || failed || limited || empty);
-    discoveryStatus->setText(discoveryReport.inProgress ? "Discovering…"
-                             : failed                   ? "Discovery failed"
-                             : limited                  ? "Discovery limited"
-                                                        : "No local servers");
+    discoveryStatus->setVisible(discoveryReport.inProgress || failed || limited || empty ||
+                                !discoveryReport.refreshSummary.isEmpty());
+    discoveryStatus->setText(!discoveryReport.refreshSummary.isEmpty()
+                                 ? (!refreshScopes.isEmpty() || !retirements.isEmpty()
+                                        ? QString("Refreshing…")
+                                        : QString("Refreshed · %1 removed · %2 unchecked")
+                                              .arg(refreshRemoved)
+                                              .arg(discoveryReport.refreshIssues.size()))
+                             : discoveryReport.inProgress ? "Discovering…"
+                             : failed                     ? "Discovery failed"
+                             : limited                    ? "Discovery limited"
+                                                          : "No local servers");
     discoveryStatus->setIcon(style()->standardIcon(discoveryReport.inProgress
                                                        ? QStyle::SP_BrowserReload
                                                    : failed  ? QStyle::SP_MessageBoxCritical
                                                    : limited ? QStyle::SP_MessageBoxWarning
                                                              : QStyle::SP_MessageBoxInformation));
-    discoveryStatus->setToolTip("View discovery details and available actions");
+    discoveryStatus->setToolTip(discoveryReport.refreshSummary.isEmpty()
+                                    ? "View discovery details and available actions"
+                                    : discoveryReport.refreshSummary + "\nView refresh details");
     discoveryStatus->setAccessibleName(discoveryStatus->text() + " — view details");
     if (discoveryDialog)
         discoveryDialog->setReport(discoveryReport);
@@ -1781,7 +1923,7 @@ void Window::updateUpdateStatus() {
 void Window::showDiscoveryDetails() {
     if (!discoveryDialog) {
         discoveryDialog = new DiscoveryDialog(this);
-        connect(discoveryDialog, &DiscoveryDialog::retryRequested, this, &Window::discover);
+        connect(discoveryDialog, &DiscoveryDialog::retryRequested, this, [this] { discover(); });
         connect(discoveryDialog, &DiscoveryDialog::addConnectionRequested, this,
                 [this] { editConnection(); });
     }
@@ -1838,6 +1980,8 @@ void Window::editConnection(const QString &id) {
         return;
     // Editing a detected profile makes its executable/connection settings user-managed.
     p.discovered = false;
+    cancelRetirement(p.id);
+    store->allowBackend(p.id);
     if (profiles.contains(id) && profiles[id].socketPath != p.socketPath)
         p.environmentId.clear();
     if (!persist([&] { store->save(p); }))
@@ -1899,6 +2043,7 @@ void Window::connectionsDialog() {
         }
     });
     button("Connect", [&] {
+        cancelRetirement(selected());
         paused.remove(selected());
         auto *b = backends.value(selected());
         if (b)
@@ -1921,6 +2066,7 @@ void Window::connectionsDialog() {
                                   "Codex conversations and running work are kept.") !=
             QMessageBox::Yes)
             return;
+        cancelRetirement(id);
         if (!persist([&] { store->removeBackend(id); }))
             return;
         ignoredSockets.insert(
@@ -1952,22 +2098,162 @@ void Window::connectionsDialog() {
     dialog.resize(800, 300);
     dialog.exec();
 }
-void Window::discover() {
+void Window::discover(bool reconcile) {
+    if (!workspaceLoaded || !cachePending.isEmpty() || !refreshScopes.isEmpty() ||
+        !retirements.isEmpty()) {
+        refreshQueued |= reconcile;
+        return;
+    }
+    refreshRevision = reconcile ? QUuid::createUuid().toString(QUuid::Id128) : QString();
+    if (reconcile) {
+        refreshAdded.clear();
+        refreshUpdated.clear();
+        refreshRemoved = 0;
+        discoveryReport.refreshIssues = {};
+        refreshScopes.insert("local");
+        for (auto it = containerDiscovery.cbegin(); it != containerDiscovery.cend(); ++it)
+            if (!disabledContainerHosts.contains(it.key()))
+                refreshScopes.insert(it.key());
+        refreshDeadline.start(60000);
+    }
     QStringList paths;
     for (const auto &p : profiles)
         if (!p.isContainer() && !p.socketPath.isEmpty())
             paths << p.socketPath;
     discoveryReport.inProgress = true;
-    updateSummary();
-    discovery->refresh(paths);
+    updateRefreshSummary();
+    discovery->refresh(paths, refreshRevision);
     for (auto it = containerDiscovery.begin(); it != containerDiscovery.end(); ++it)
         if (!disabledContainerHosts.contains(it.key())) {
-            containerFeedback[it.key()] = "Discovering…";
-            it.value()->refresh();
+            containerFeedback[it.key()] = "Refreshing…";
+            it.value()->refresh(refreshRevision);
         }
     updateContainerSummary();
 }
-void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues) {
+bool Window::protectsConnection(const QString &id) const {
+    if (!workspaceLoaded || !workspaceWritable || !cachePending.isEmpty() ||
+        savedWorkspaceBackends.contains(id) || opening->referencesBackend(id) ||
+        disabledContainerHosts.contains(profiles.value(id).discoveryHost) || paused.contains(id) ||
+        !profiles.value(id).autoConnect)
+        return true;
+    for (const auto &view : terminal->workspace().views)
+        if (view.backendId == id)
+            return true;
+    for (const auto &backend : pendingStarts)
+        if (backend && backend == backends.value(id))
+            return true;
+    for (const auto &key : pendingForks)
+        if (key.startsWith(id + QChar(0x1f)))
+            return true;
+    return false;
+}
+void Window::retireConnection(const QString &id) {
+    if (!profiles.value(id).discovered || protectsConnection(id) || retirements.contains(id))
+        return;
+    const auto token = ++nextRetirement;
+    retirements[id] = token;
+    store->retireBackend(id, token);
+}
+void Window::cancelRetirement(const QString &id) {
+    if (!retirements.remove(id))
+        return;
+    // The delete may already have committed, with its acknowledgement still queued.
+    // Ordered writes restore the entire cached source before accepting new metadata.
+    store->allowBackend(id);
+    store->save(profiles[id]);
+    for (const auto &session : std::as_const(sessions))
+        if (session.backendId == id)
+            store->save(session);
+    QTimer::singleShot(0, this, &Window::updateRefreshSummary);
+}
+void Window::forgetConnection(const QString &id) {
+    notifications->withdrawBackend(id);
+    opening->removeSource(id);
+    if (auto *backend = backends.take(id)) {
+        backend->disconnect(this);
+        backend->disconnectServer();
+        backend->deleteLater();
+    }
+    profiles.remove(id);
+    connectionStates.remove(id);
+    connectionReady.remove(id);
+    more.remove(id);
+    paused.remove(id);
+    discoveredPaths.remove(id);
+    discoveredPresent.remove(id);
+    searching.remove(id);
+    searchErrors.remove(id);
+    scopeBackends.remove(id);
+    for (auto &state : explorer)
+        state.selection.backends.remove(id);
+    for (auto *items : {&sessions, &searchSessions})
+        for (auto it = items->begin(); it != items->end();)
+            if (it->backendId == id)
+                it = items->erase(it);
+            else
+                ++it;
+    model->removeBackend(id);
+    results->removeBackend(id);
+    refreshNames();
+    updateSearchSummary();
+}
+void Window::refreshScopeFinished(const QString &id, const QStringList &issues) {
+    if (!refreshScopes.remove(id))
+        return;
+    if (!issues.isEmpty())
+        discoveryReport.refreshIssues.append(QJsonObject{
+            {"code", "refresh-" + id},
+            {"summary", (id == "local"                        ? QString("Local servers")
+                         : containerHosts.value(id).isEmpty() ? QString("This computer (myCodex)")
+                                                              : containerHosts.value(id)) +
+                            ": refresh incomplete"},
+            {"explanation", "Connections in unverified scopes were retained."},
+            {"action", "Check discovery access and refresh again."},
+            {"details", QJsonArray::fromStringList(issues)}});
+    updateRefreshSummary();
+}
+void Window::updateRefreshSummary() {
+    if (refreshRevision.isEmpty()) {
+        updateSummary();
+        return;
+    }
+    const bool active = !refreshScopes.isEmpty() || !retirements.isEmpty();
+    discoveryReport.refreshSummary =
+        QString("%1 · %2 new · %3 updated · %4 removed · %5 incomplete")
+            .arg(active ? "Refreshing" : "Refresh complete")
+            .arg(refreshAdded.size())
+            .arg(refreshUpdated.size())
+            .arg(refreshRemoved)
+            .arg(discoveryReport.refreshIssues.size());
+    if (!active) {
+        refreshDeadline.stop();
+        refreshRevision.clear();
+        if (refreshQueued) {
+            refreshQueued = false;
+            QTimer::singleShot(0, this, [this] { discover(); });
+        }
+    }
+    updateSummary();
+}
+void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &reportedIssues,
+                            const QString &revision) {
+    auto issues = reportedIssues;
+    if (endpoints.size() > 4096) {
+        issues.append(QJsonObject{{"summary", "Local endpoint inventory exceeds its limit"}});
+        applyDiscovery({}, issues, revision);
+        return;
+    }
+    bool validEndpoints = endpoints.size() <= 4096;
+    QSet<QString> paths;
+    for (const auto &value : endpoints) {
+        const auto path = value.toObject()["path"].toString();
+        validEndpoints &= QDir::isAbsolutePath(path) && validText(path) && !paths.contains(path);
+        paths.insert(path);
+    }
+    if (!validEndpoints)
+        issues.append(
+            QJsonObject{{"summary", "Invalid or excessive local endpoint inventory"},
+                        {"action", "Refresh again; unverified connections were retained."}});
     discoveredLocalCodex = detectedLocalCodex(endpoints);
     terminal->setLocalCodexExecutable(configuredLocalCodex.isEmpty() ? discoveredLocalCodex
                                                                      : configuredLocalCodex);
@@ -1998,15 +2284,23 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
             p.socketPath = path;
             p.executable = item["executable"].toString("codex");
             p.environmentId = item["hostEnvironment"].toBool() ? "local-host" : p.id;
-            if (!p.validate().isEmpty() || !persist([&] { store->save(p); }))
+            if (!p.validate().isEmpty()) {
+                issues.append(QJsonObject{{"summary", "Invalid local endpoint: " + p.validate()}});
+                continue;
+            }
+            if (!persist([&] { store->save(p); }))
                 continue;
             id = p.id;
             profiles[id] = p;
+            if (!refreshRevision.isEmpty())
+                refreshAdded.insert(id);
             model->backendName(id, p.name);
             results->backendName(id, p.name);
             attach(p, false);
         }
+        cancelRetirement(id);
         auto &p = profiles[id];
+        const auto previous = p.json();
         for (const auto &field : {"user", "host", "ownerHome", "cwd", "pid", "default"})
             if (item.contains(field))
                 p.identity[field] = item[field];
@@ -2045,6 +2339,8 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
             if (s.backendId == id)
                 results->upsert(s);
         persist([&] { store->save(p); });
+        if (!refreshRevision.isEmpty() && previous != p.json() && !refreshAdded.contains(id))
+            refreshUpdated.insert(id);
         discoveredPaths[id] = path;
         present.insert(id);
         if (!backends[id]->ready() && !paused.contains(id) && p.autoConnect &&
@@ -2062,6 +2358,17 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issue
         discoveredPresent = present;
     } else
         discoveredPresent.unite(present);
+    if (!refreshRevision.isEmpty() && revision == refreshRevision &&
+        refreshScopes.contains("local")) {
+        if (issues.isEmpty())
+            for (const auto &p : std::as_const(profiles))
+                if (p.discovered && !p.isContainer() && !present.contains(p.id))
+                    retireConnection(p.id);
+        QStringList failures;
+        for (const auto &value : issues)
+            failures << value.toObject()["summary"].toString();
+        refreshScopeFinished("local", failures);
+    }
     discoveryReport.issues = issues;
     discoveryReport.failure.clear();
     discoveryReport.inProgress = false;
