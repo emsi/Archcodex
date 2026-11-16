@@ -23,7 +23,7 @@ class HostDiscovery : public QObject {
   public:
     explicit HostDiscovery(QObject *parent = nullptr);
     ~HostDiscovery() override;
-    void refresh(const QStringList &paths = {}, const QString &revision = {});
+    virtual void refresh(const QStringList &paths = {}, const QString &revision = {});
     void stop();
   signals:
     void snapshot(const QJsonArray &endpoints, const QJsonArray &issues,

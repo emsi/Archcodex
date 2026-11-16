@@ -7,20 +7,28 @@ in either the target or the User field. Identity paths refer to the local
 computer, including `~/.ssh/…`, rather than to the Flatpak filesystem. Jump hosts,
 certificates and other advanced options remain in `~/.ssh/config`.
 
-Select **Connect / retry** to authenticate. Archcodex displays OpenSSH's password,
-key-passphrase and keyboard-interactive challenges in a native, nonmodal dialog.
+Launching Archcodex automatically connects enabled hosts and displays any OpenSSH
+password, key-passphrase or keyboard-interactive challenges in a native, nonmodal
+dialog. **Connect / retry** also starts interactive authentication.
 Answers are masked by default, with an explicit Show answer checkbox. Multiple
 challenges are answered in sequence. The host stays identified in the title;
-other hosts and terminal views remain usable. A hardware-key touch notice can
+other hosts and terminal views remain usable. Prompts from different hosts are
+queued in arrival order, with one dialog visible at a time. Repeated snapshots
+preserve an answer being typed; completion, withdrawal or cancellation advances
+the queue. A hardware-key touch notice can
 also be displayed. Hardware tokens and real PAM/MFA providers require desktop
 acceptance testing.
 
-Startup and automatic recovery first try without user interaction. If OpenSSH
-needs an answer, that attempt stops and the host reports **Authentication requires
-your input. Select Connect.** Cancelling or rejected authentication stops retries
-until another explicit Connect. Network failures retain the existing bounded
-reconnection backoff, but recovery never replays permission to prompt. Healthy
-session status still comes from app-server events.
+Startup requests authentication automatically; it does not require a separate
+Connect click for each saved host. Cancelling or rejected authentication stops
+retries until another explicit Connect. Ordinary Refresh preserves a connection's
+pending authentication and does not discard an answer being typed.
+
+After a network failure, automatic recovery tries without user interaction. If
+OpenSSH then needs an answer, that recovery attempt stops and the host reports
+**Authentication requires your input. Select Connect.** Network failures retain
+the existing bounded reconnection backoff; recovery never replays permission to
+prompt. Healthy session status still comes from app-server events.
 
 Host-key checking follows OpenSSH configuration. With the normal `ask` policy,
 an unknown host's full OpenSSH confirmation is shown; enter `yes` only after
@@ -57,9 +65,12 @@ it is not a guarantee of memory zeroization or protection against a compromised
 same-user process or administrator.
 
 Connection establishment retains a ten-second network connect timeout and allows
-120 seconds for authentication and initial protocol startup. The control pipe
-acknowledges state updates immediately; waiting for a person does not consume its
-30-second request deadline. Host disable/removal/edit, cancellation, application
+a 120-second budget for SSH/protocol startup work. That budget pauses whenever
+OpenSSH is waiting for an authentication answer, including while its prompt is
+queued behind another host. This uses prompt/connection events, with no status
+polling. The SSH server can still enforce its own authentication deadline; an SSH
+exit withdraws its prompts. The control pipe acknowledges state updates immediately;
+waiting for a person does not consume its 30-second request deadline. Host disable/removal/edit, cancellation, application
 exit and expired connection attempts withdraw prompts and reap owned children.
 The existing systemd cgroup and ExecStopPost cleanup also remove this instance's
 askpass executable/socket after abnormal termination. The selected local host must
@@ -91,10 +102,12 @@ format. Existing backend/workspace compatibility limitations still apply; see
 ## Validation
 
 Standard-library tests cover repeated challenges, cancellation, stale responses,
-background authentication suppression, waits beyond the old ten-second handshake
-limit, and the existing multi-client transport routing/cleanup. Qt tests exercise
-nonmodal prompts, preserving typed answers across snapshots, clearing replies,
-host withdrawal, option validation and persistence/downgrade behavior.
+automatic launch authentication, quiet background recovery, deadline suspension
+while prompts are pending, refresh during authentication, and the existing
+multi-client transport routing/cleanup. Qt tests exercise the actual startup
+connection path, including a refresh queued during cache loading, prompt queuing,
+nonmodal terminal input, preserving typed answers across snapshots, clearing
+replies, host withdrawal, option validation and persistence/downgrade behavior.
 
 `uv run --with paramiko python -B tests/test_sshauth.py` additionally uses the real
 local OpenSSH client against temporary loopback SSH fixtures for password,

@@ -292,6 +292,41 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         self.proc.stdin.write(mux.encoded({'authReply': dict(prompt, host='host', **fields)}) + b'\n')
         await self.proc.stdin.drain()
 
+    async def test_launch_authentication_connects_without_a_manual_retry(self):
+        await self.auth_start(True)
+        for text in ('Password:', 'Verification code:'):
+            prompt = (await self.inventory(lambda r: any(p['text'] == text for p in r.get('prompts', []))))['prompts'][0]
+            self.assertEqual(prompt['text'], text)
+            await self.auth_answer(prompt, answer='fixture-answer')
+        await self.inventory(lambda r: r.get('state') == 'connected')
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+
+    async def test_refresh_preserves_pending_authentication_and_new_inventory_revision(self):
+        await self.auth_start(True)
+        prompt = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        await self.auth_connect('refresh', False)
+        snapshot = await self.inventory(lambda r: r.get('revision') == 'refresh')
+        self.assertEqual(snapshot['prompts'][0], prompt)
+        await self.auth_answer(prompt, answer='fixture-answer')
+        second = (await self.inventory(lambda r: any(p['id'] != prompt['id'] for p in r.get('prompts', []))))['prompts'][0]
+        await self.auth_answer(second, answer='fixture-answer')
+        await self.inventory(lambda r: r.get('state') == 'connected' and r.get('revision') == 'refresh')
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+
+    async def test_refreshing_connected_host_does_not_authorize_future_recovery_prompts(self):
+        await self.auth_start(True)
+        for text in ('Password:', 'Verification code:'):
+            prompt = (await self.inventory(lambda r: any(p['text'] == text for p in r.get('prompts', []))))['prompts'][0]
+            await self.auth_answer(prompt, answer='fixture-answer')
+        await self.inventory(lambda r: r.get('state') == 'connected')
+        await self.auth_connect('refresh', True)
+        await self.inventory(lambda r: r.get('state') == 'connected' and r.get('revision') == 'refresh')
+        ssh = next(c for c in self.commands() if c['role'] == 'ssh')
+        os.kill(ssh['pid'], signal.SIGTERM)
+        required = await self.inventory(lambda r: r.get('state') == 'authentication-required')
+        self.assertFalse(required['prompts'])
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 2)
+
     async def test_background_authentication_stops_until_explicit_connect(self):
         await self.auth_start()
         report = await self.inventory(lambda r: r.get('state') == 'authentication-required')

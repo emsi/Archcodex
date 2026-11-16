@@ -81,7 +81,42 @@ class Attempt:
         self.token = secrets.token_hex(16)
         self.interactive, self.publish = interactive, publish
         self.pending = {}
+        self.changed = asyncio.Event()
         self.stopped = asyncio.get_running_loop().create_future()
+
+    def notify(self):
+        self.changed.set()
+        self.publish()
+
+    async def wait(self, operation, timeout=120):
+        """Bound startup work, excluding time awaiting a human (shown or queued)."""
+        task = asyncio.ensure_future(operation)
+        loop = asyncio.get_running_loop()
+        remaining = timeout
+        try:
+            while True:
+                self.changed.clear()
+                waiting = bool(self.pending)
+                changed = asyncio.create_task(self.changed.wait())
+                start = loop.time()
+                try:
+                    done, _ = await asyncio.wait((task, self.stopped, changed),
+                        timeout=None if waiting else max(0, remaining),
+                        return_when=asyncio.FIRST_COMPLETED)
+                finally:
+                    changed.cancel()
+                    await asyncio.gather(changed, return_exceptions=True)
+                if self.stopped.done():
+                    raise self.stopped.result()
+                if task.done():
+                    return await task
+                if not done:
+                    raise asyncio.TimeoutError('SSH startup timed out while no authentication prompt was pending.')
+                if not waiting:
+                    remaining -= loop.time() - start
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
 
     def snapshot(self):
         return [{'id': ident, 'attempt': self.token, 'text': item[0], 'kind': item[1]}
@@ -167,7 +202,7 @@ class Broker:
             ident = secrets.token_hex(16)
             answer = asyncio.get_running_loop().create_future()
             attempt.pending[ident] = (text, kind, answer)
-            attempt.publish()
+            attempt.notify()
             gone = asyncio.create_task(reader.read(1))
             done, _ = await asyncio.wait([answer, gone], return_when=asyncio.FIRST_COMPLETED)
             if gone in done:  # OpenSSH withdraws e.g. its security-key touch notice.
@@ -184,7 +219,7 @@ class Broker:
                 await asyncio.gather(gone, return_exceptions=True)
             if attempt and ident:
                 attempt.pending.pop(ident, None)
-                attempt.publish()
+                attempt.notify()
             writer.close()
             self.tasks.discard(task)
 

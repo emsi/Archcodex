@@ -860,11 +860,13 @@ void Window::restoreCache(bool connectOnStart) {
         restoreTree(tree, settings.value("expanded").toStringList(), {});
     }
     syncCurrentSession();
+    // Launch is interactive even when a refresh was queued during cache restoration.
+    // Later automatic recovery must not inherit permission to reopen prompts.
     if (refreshQueued) {
         refreshQueued = false;
-        discover();
+        discover(true, connectOnStart);
     } else if (connectOnStart)
-        discover(false);
+        discover(false, true);
 }
 Window::~Window() {
     freezeWorkspace();
@@ -1294,8 +1296,10 @@ void Window::updateAuthentication(const QString &id, const QJsonArray &prompts) 
             break;
     }
     if (selected.isEmpty()) {
+        authenticationQueue.removeAll(id);
         if (auto dialog = authenticationDialogs.take(id))
             dialog->withdraw();
+        showNextAuthentication();
         return;
     }
     if (cancelledAuthentication.value(id) == selected["attempt"].toString())
@@ -1305,15 +1309,33 @@ void Window::updateAuthentication(const QString &id, const QJsonArray &prompts) 
     if (!dialog) {
         dialog = new SshPromptDialog(this);
         authenticationDialogs[id] = dialog;
+        authenticationQueue.append(id);
         connect(dialog, &SshPromptDialog::answered, this, [this, id](const QJsonObject &reply) {
-            if (reply["cancel"].toBool())
+            if (reply["cancel"].toBool()) {
                 cancelledAuthentication[id] = reply["attempt"].toString();
+                authenticationQueue.removeAll(id);
+                if (auto cancelled = authenticationDialogs.take(id))
+                    cancelled->deleteLater();
+                QTimer::singleShot(0, this, &Window::showNextAuthentication);
+            }
             if (auto *discovery = hostDiscovery.value(id))
                 discovery->answerAuthentication(reply);
         });
     }
     dialog->setPrompt(hosts.value(id).label(), selected);
-    dialog->show();
+    showNextAuthentication();
+}
+void Window::showNextAuthentication() {
+    while (!authenticationQueue.isEmpty()) {
+        const auto dialog = authenticationDialogs.value(authenticationQueue.first());
+        if (!dialog) {
+            authenticationQueue.removeFirst();
+            continue;
+        }
+        if (!dialog->isVisible())
+            dialog->show();
+        return;
+    }
 }
 void Window::saveHosts() {
     QJsonArray data, compatible;
@@ -2424,7 +2446,7 @@ void Window::connectionsDialog() {
     dialog.resize(800, 300);
     dialog.exec();
 }
-void Window::discover(bool reconcile) {
+void Window::discover(bool reconcile, bool interactive) {
     if (!workspaceLoaded || !cachePending.isEmpty() || !refreshScopes.isEmpty() ||
         !retirements.isEmpty()) {
         refreshQueued |= reconcile;
@@ -2452,7 +2474,7 @@ void Window::discover(bool reconcile) {
     for (auto it = hostDiscovery.begin(); it != hostDiscovery.end(); ++it)
         if (hosts.value(it.key()).enabled) {
             hostFeedback[it.key()] = "Refreshing…";
-            refreshHost(it.key(), refreshRevision);
+            refreshHost(it.key(), refreshRevision, interactive);
         }
     updateHostSummary();
 }

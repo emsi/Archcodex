@@ -675,12 +675,8 @@ class DesktopHost:
         self.connected = False
         self.report('connecting', 'Connecting over SSH…')
         child = ChildConnection(args, self.desktop.auth.environment(auth))
-        started = asyncio.create_task(child.start(120))
         try:
-            done, _ = await asyncio.wait([started, auth.stopped], return_when=asyncio.FIRST_COMPLETED)
-            if auth.stopped in done:
-                raise auth.stopped.result()
-            connection = await started
+            connection = await auth.wait(child.start(None))
             self.active = connection
             inventory = await connection.open({'kind': 'inventory', 'revision': self.revision,
                                                'servers': self.servers, 'containers': self.containers})
@@ -694,7 +690,7 @@ class DesktopHost:
                 with contextlib.suppress(asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(child.error_task), 1)
             detail = child.tail.decode(errors='replace').strip()
-            message = detail or str(error) or 'SSH connection/authentication timed out after 120 seconds.'
+            message = detail or str(error) or 'SSH startup timed out while no authentication prompt was pending.'
             if not self.connected:
                 lower = message.lower()
                 if 'permission denied' in lower or 'authentication failed' in lower:
@@ -708,7 +704,6 @@ class DesktopHost:
             self.active = None
             self.auth = None
             self.desktop.auth.end(auth)
-            await cancel(started)
             await self.clear()
             await child.stop()
 
@@ -770,9 +765,17 @@ class DesktopHost:
                     stream.close()
                     if revision == self.revision:
                         break
+                self.interactive = False
                 return
             except (OSError, ValueError, asyncio.TimeoutError):
                 pass
+        elif self.auth and not self.auth.stopped.done():
+            # Refresh/Connect updates the desired inventory without interrupting
+            # a live handshake or discarding an answer being typed in the GUI.
+            self.auth.interactive |= self.interactive
+            self.interactive = False
+            self.prompts_changed()
+            return
         await self.stop()
         self.delay = 1
         self.task = asyncio.create_task(self.run())

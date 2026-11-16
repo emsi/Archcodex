@@ -12,8 +12,8 @@ class SharedHostDiscovery : public QObject {
     SharedHostDiscovery(const QString &id, const QString &sshHost = {}, QObject *parent = nullptr);
     ~SharedHostDiscovery() override;
     const QString id, sshHost;
-    void refresh(const QString &revision = {}, bool servers = true, bool containers = true,
-                 const QJsonObject &sshOptions = {}, bool interactive = false);
+    virtual void refresh(const QString &revision = {}, bool servers = true, bool containers = true,
+                         const QJsonObject &sshOptions = {}, bool interactive = false);
     void answerAuthentication(const QJsonObject &reply);
     void stop();
   signals:

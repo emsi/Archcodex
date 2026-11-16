@@ -45,6 +45,60 @@ class Attempts(unittest.IsolatedAsyncioTestCase):
         attempt.answer({'attempt': attempt.token, 'id': 'prompt', 'cancel': True})
         self.assertEqual(attempt.stopped.result().state, 'cancelled')
 
+    async def test_startup_deadline_pauses_for_pending_prompt_then_resumes(self):
+        attempt = sshauth.Attempt(True, lambda: None)
+        operation = asyncio.get_running_loop().create_future()
+        attempt.pending['queued'] = ('Password:', 'entry', asyncio.get_running_loop().create_future())
+        waiting = asyncio.create_task(attempt.wait(operation, timeout=0.08))
+        await asyncio.sleep(0.16)
+        self.assertFalse(waiting.done())
+        attempt.pending.clear()
+        attempt.notify()
+        with self.assertRaises(asyncio.TimeoutError):
+            await asyncio.wait_for(waiting, 1)
+        self.assertTrue(operation.cancelled())
+
+    async def test_challenge_arrival_pauses_an_already_running_startup_deadline(self):
+        attempt = sshauth.Attempt(True, lambda: None)
+        started = asyncio.Event()
+        result = asyncio.get_running_loop().create_future()
+        async def operation():
+            started.set()
+            return await result
+        waiting = asyncio.create_task(attempt.wait(operation(), timeout=0.1))
+        await started.wait()
+        attempt.pending['prompt'] = ('Password:', 'entry', asyncio.get_running_loop().create_future())
+        attempt.notify()
+        await asyncio.sleep(0.2)
+        self.assertFalse(waiting.done())
+        result.set_result('connected')
+        self.assertEqual(await asyncio.wait_for(waiting, 1), 'connected')
+
+    async def test_pending_prompt_does_not_hide_ssh_exit_or_cancellation(self):
+        for cancelled in (False, True):
+            with self.subTest(cancelled=cancelled):
+                attempt = sshauth.Attempt(True, lambda: None)
+                operation = asyncio.get_running_loop().create_future()
+                attempt.pending['prompt'] = ('Password:', 'entry', asyncio.get_running_loop().create_future())
+                waiting = asyncio.create_task(attempt.wait(operation))
+                await asyncio.sleep(0)
+                if cancelled:
+                    attempt.stop()
+                    with self.assertRaises(sshauth.Stopped):
+                        await asyncio.wait_for(waiting, 1)
+                    self.assertTrue(operation.cancelled())
+                else:
+                    operation.set_exception(EOFError('SSH exited'))
+                    with self.assertRaises(EOFError):
+                        await asyncio.wait_for(waiting, 1)
+
+    async def test_silent_startup_still_has_a_deadline(self):
+        attempt = sshauth.Attempt(True, lambda: None)
+        operation = asyncio.get_running_loop().create_future()
+        with self.assertRaises(asyncio.TimeoutError):
+            await attempt.wait(operation, timeout=0.01)
+        self.assertTrue(operation.cancelled())
+
 
 @unittest.skipUnless(paramiko, 'Optional Paramiko fixture not installed; run with uv --with paramiko')
 class OpenSsh(unittest.IsolatedAsyncioTestCase):

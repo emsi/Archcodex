@@ -49,8 +49,9 @@ See [update behavior and limitations](docs/updates.md) and
 - **For myCodex:** Docker access and Python 3 on each selected host, plus a
   running systemd user manager on the local computer. Remote hosts use host
   OpenSSH, including password, encrypted-key and keyboard-interactive authentication.
-  Select **Connections → Hosts… → Connect / retry** to answer prompts; credentials
-  are never saved. See [SSH authentication and host options](docs/ssh-authentication.md).
+  Enabled hosts prompt automatically when Archcodex starts. Use
+  **Connections → Hosts… → Connect / retry** after cancelling or a failed login;
+  credentials are never saved. See [SSH authentication and host options](docs/ssh-authentication.md).
 
 ## Remember opened terminals
 
