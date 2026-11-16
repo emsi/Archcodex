@@ -1,4 +1,4 @@
-# myCodex integration: 0.6.1
+# myCodex integration
 
 “Local computer” means the computer running Archcodex. “Remote host” is the
 configured SSH destination. Every TUI runs on the local computer, including when
@@ -6,10 +6,13 @@ its app-server is inside a remote container.
 
 The adopted [local TUI plan](local-tui-connections.md) and
 [security design](container-transport-security.md) are implemented for local and
-SSH myCodex hosts. Existing containers remain the primary workflow. No myCodex
+SSH hosts. Existing containers remain the primary workflow. No myCodex
 command, image update, container recreation, socket mount or permanent remote
-service is required. Direct TCP and generic SSH host-socket profiles remain
-future adapters.
+service is required. [Hosts](hosts.md) also discovers ordinary remote Codex servers
+over the same SSH connection. Direct TCP remains a future adapter.
+
+Host configuration, implicit local-host protection and discovery options are described
+in [Hosts](hosts.md). Container-specific identity and WORKDIR rules below are unchanged.
 
 ## Connection and execution
 
@@ -45,7 +48,7 @@ for queue bounds, private paths, process accounting and cleanup.
 
 ## Requirements and defaults
 
-- Local discovery is enabled by default. Use **Connections → myCodex hosts…**
+- Local discovery is enabled by default. Use **Connections → hosts…**
   to disable it, retry it or add/remove an SSH host. Host entries are persisted
   in Archcodex's `window.ini`; discovered server profiles and metadata use SQLite.
 - Each selected Docker host needs `/usr/bin/python3` and the Docker CLI in PATH,
@@ -230,6 +233,7 @@ real helper subprocesses, byte streams, 40 clients and two containers; native
 observer tests also exercise real WebSocket handshakes and notifications.
 No credential files or live model turns were used in automated tests.
 
-Direct TCP and generic SSH-forwarded host socket profiles remain future adapters.
+Ordinary SSH-host servers use the same connection; see [Hosts](hosts.md).
+Direct TCP remains a future adapter.
 Published container socket directories are an optional future optimization;
 `codex app-server daemon` is not needed to connect to an already-running server.

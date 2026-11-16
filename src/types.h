@@ -22,6 +22,12 @@ struct BackendProfile {
     bool isContainer() const {
         return kind == QStringLiteral("mycodex");
     }
+    bool isLocal() const {
+        return kind == QStringLiteral("local-unix");
+    }
+    bool usesRelay() const {
+        return isContainer() || kind == QStringLiteral("ssh-unix");
+    }
     QString validate() const;
     QString endpoint() const {
         return QStringLiteral("unix://") + socketPath;

@@ -1,8 +1,8 @@
 # Backend design
 
-Status: target contracts for the adopted architecture. Local Unix and local/SSH myCodex adapters are
-implemented in [0.4.0](implementation.md); direct TCP and generic SSH socket profiles remain planned.
-Last updated: 2026-11-09.
+Status: target contracts for the adopted architecture. Local Unix, ordinary SSH-host servers and local/SSH myCodex adapters are implemented.
+[Hosts](hosts.md) describes their unified configuration and shared SSH transport.
+Direct TCP remains planned. Last updated: 2026-11-16.
 
 ## 1. Separation of responsibilities
 
@@ -123,47 +123,16 @@ Use host OpenSSH rather than a separate embedded SSH implementation. Respect
 the user's host aliases, SSH configuration, known hosts, agent and jump hosts.
 Do not copy private keys into the Flatpak or change SSH configuration on attach.
 
-The preferred route is native OpenSSH Unix-socket forwarding:
+Ordinary host servers and myCodex containers share the same host configuration and
+foreground SSH transport. The remote helper registers host sockets directly and
+container sockets through the existing container attachment. Private local relay
+sockets serve both the observer and the local TUI. See [Hosts](hosts.md) for identity,
+partial discovery, cleanup and migration rules.
 
-```text
-GUI protocol client
-  -> host non-PTY Codex proxy
-  -> private local forwarded Unix socket
-  -> OpenSSH connection
-  -> existing remote Unix app-server socket
-
-Host Codex TUI
-  -> the same local forwarded Unix socket
-  -> the same remote app-server
-```
-
-Use a private host runtime directory and a distinct socket for each connection
-generation. Set restrictive socket permissions, request forwarding setup failure
-reporting, and run the forwarding connection without a remote command or PTY.
-Do not remove a pre-existing socket unless it is known to belong to this
-connection. Disconnect cleanup removes only the application's own forwarding
-resources.
-
-OpenSSH supports local/remote Unix socket forwarding directly; no `socat` bridge
-is needed for a host-visible remote socket. See
-[ssh(1)](https://man.openbsd.org/ssh.1). Forwarding permissions on the SSH server
-still apply. A path inside an unexposed container is not a host-visible socket;
-that case belongs to the later myCodex adapter.
-
-Treat the tunnel as transport, not as the server supervisor. An independently
-running remote app-server continues after the tunnel closes. Reconnect establishes
-a new tunnel and refreshes state once. Do not enable agent forwarding merely to
-connect to Codex.
-
-Host-key and interactive authentication handling must be designed deliberately:
-preserve OpenSSH verification and support the user's existing agent/askpass
-workflow where possible. An implementation spike must verify that authentication
-prompts are usable from the packaged GUI without hanging the event loop.
-
-Acceptance: an SSH alias, jump host, encrypted key through an agent, a changed
-host key, rejected forwarding, paths requiring careful quoting, SSH loss during
-a turn and return to the same conversation. The raw protocol channel never gets
-a PTY; only the interactive TUI gets one.
+Native OpenSSH Unix-socket forwarding remains a possible transport alternative;
+the implementation uses the existing multiplexed channel so discovery and all
+server streams share one connection per configured SSH host. It does not require
+port-forwarding permission or create a listener on the remote host.
 
 ## 6. Stage four: myCodex
 

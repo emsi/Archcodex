@@ -2,8 +2,9 @@
 #pragma once
 #include "asyncstore.h"
 #include "backend.h"
-#include "containerdiscovery.h"
 #include "discovery.h"
+#include "hostconnection.h"
+#include "hosts.h"
 #include "sessionmodel.h"
 #include "store.h"
 #include <QMainWindow>
@@ -67,19 +68,26 @@ class Window : public QMainWindow {
     QString localUser, localHost;
     QString configuredLocalCodex, discoveredLocalCodex;
     bool localIdentityDiscovered = false;
-    QHash<QString, QString> containerHostNames;
+    QHash<QString, QString> hostNames, hostUsers;
     DiscoveryReport discoveryReport;
     QPointer<DiscoveryDialog> discoveryDialog;
     QToolButton *discoveryStatus;
-    QToolButton *containerStatus;
-    QHash<QString, ContainerDiscovery *> containerDiscovery;
-    QHash<QString, QString> containerHosts, containerFeedback;
-    QSet<QString> disabledContainerHosts, emptyContainers, containerProblems;
-    void containerHostsDialog();
-    void addContainerHost(const QString &id, const QString &host, bool start);
-    void saveContainerHosts();
+    QToolButton *hostStatus;
+    QHash<QString, SharedHostDiscovery *> hostDiscovery;
+    QMap<QString, HostProfile> hosts;
+    QHash<QString, QString> hostFeedback;
+    QSet<QString> emptyContainers, hostProblems;
+    void hostsDialog();
+    void addHost(const HostProfile &host, bool start);
+    void refreshHost(const QString &id, const QString &revision = {});
+    void setHostEnabled(const QString &id, bool enabled);
+    void removeHost(const QString &id);
+    void applyHostInventory(const QString &id, const QJsonObject &inventory);
+    QStringList applyRemoteServers(const QString &id, const QJsonObject &inventory);
+    QString hostId(const BackendProfile &profile) const;
+    void saveHosts();
     void applyContainers(const QString &host, const QJsonObject &inventory);
-    void updateContainerSummary();
+    void updateHostSummary();
     void applySessions(const QList<Session> &items);
     QList<Session> cachePending;
     void restoreCache(bool connectOnStart);

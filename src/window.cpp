@@ -506,13 +506,13 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     discoveryStatus->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
     discoveryStatus->setAutoRaise(true);
     statusBar()->addPermanentWidget(discoveryStatus);
-    containerStatus = new QToolButton;
-    containerStatus->setObjectName("containerDiscoveryStatus");
-    containerStatus->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
-    containerStatus->setAutoRaise(true);
-    containerStatus->setText("myCodex hosts…");
-    statusBar()->addPermanentWidget(containerStatus);
-    connect(containerStatus, &QToolButton::clicked, this, &Window::containerHostsDialog);
+    hostStatus = new QToolButton;
+    hostStatus->setObjectName("hostDiscoveryStatus");
+    hostStatus->setToolButtonStyle(Qt::ToolButtonTextBesideIcon);
+    hostStatus->setAutoRaise(true);
+    hostStatus->setText("Hosts…");
+    statusBar()->addPermanentWidget(hostStatus);
+    connect(hostStatus, &QToolButton::clicked, this, &Window::hostsDialog);
     connect(discoveryStatus, &QToolButton::clicked, this, &Window::showDiscoveryDetails);
     auto *projectsMenu = menuBar()->addMenu("&Session");
     projectsMenu->addAction(commands->add("new_session", "New session in current project",
@@ -555,8 +555,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                                             [this] { connectionsDialog(); }));
     connectionMenu->addAction(commands->add("discovery_details", "Discovery details…",
                                             "Connections", {}, [this] { showDiscoveryDetails(); }));
-    connectionMenu->addAction(commands->add("mycodex_hosts", "myCodex hosts…", "Connections", {},
-                                            [this] { containerHostsDialog(); }));
+    connectionMenu->addAction(
+        commands->add("mycodex_hosts", "Hosts…", "Connections", {}, [this] { hostsDialog(); }));
     auto *view = menuBar()->addMenu("&View");
     auto *hideUnsaved = view->addAction("Hide unsaved sessions");
     hideUnsaved->setObjectName("hideUnsavedSessions");
@@ -699,18 +699,12 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         discoveryReport.checked = QDateTime::currentDateTime();
         updateSummary();
     });
-    auto hosts = QJsonDocument::fromJson(settings.value("containerHosts").toByteArray()).array();
-    if (hosts.isEmpty())
-        hosts.append(QJsonObject{{"id", "local-mycodex"}, {"ssh", ""}, {"enabled", true}});
-    for (const auto &value : hosts) {
-        const auto h = value.toObject();
-        const auto id = h["id"].toString(), host = h["ssh"].toString();
-        if (id.isEmpty() || !validText(id, 128) || (!host.isEmpty() && !validSshHost(host)))
-            continue;
-        if (!h["enabled"].toBool(true))
-            disabledContainerHosts.insert(id);
-        addContainerHost(id, host, false);
-    }
+    const bool legacyHosts = !settings.contains("hosts");
+    const auto records = QJsonDocument::fromJson(
+                             settings.value(legacyHosts ? "containerHosts" : "hosts").toByteArray())
+                             .array();
+    for (const auto &host : readHosts(records, legacyHosts))
+        addHost(host, false);
     opening = new OpeningCoordinator(this);
     workspaceStatus = new QToolButton(this);
     workspaceStatus->setObjectName("workspaceStatus");
@@ -786,7 +780,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                     model->setContainerWorkdir(p.id, p.identity["containerWorkdir"].toString());
                     results->setContainerWorkdir(p.id, p.identity["containerWorkdir"].toString());
                 }
-                attach(p, connectOnStart && p.autoConnect && !p.discovered && !p.isContainer());
+                attach(p, connectOnStart && p.autoConnect && !p.discovered && p.isLocal());
             }
             workspaceError = cache.workspaceError;
             workspaceWritable = workspaceError.isEmpty();
@@ -877,7 +871,7 @@ Window::~Window() {
         b->disconnect(this);
         delete b;
     }
-    for (auto *d : containerDiscovery) {
+    for (auto *d : hostDiscovery) {
         d->disconnect(this);
         delete d;
     }
@@ -1233,168 +1227,370 @@ void Window::applySessions(const QList<Session> &items) {
     if (globalSearchActive && !matches.isEmpty())
         updateSearchSummary();
 }
-void Window::addContainerHost(const QString &id, const QString &host, bool start) {
-    if (containerDiscovery.contains(id))
+void Window::addHost(const HostProfile &profile, bool start) {
+    if (hosts.contains(profile.id))
         return;
-    containerHosts[id] = host;
-    auto *d = new ContainerDiscovery(id, host, this);
-    containerDiscovery[id] = d;
-    containerFeedback[id] = disabledContainerHosts.contains(id) ? "Disabled" : "Not connected";
-    connect(d, &ContainerDiscovery::snapshot, this,
-            [this, id](const QJsonObject &data) { applyContainers(id, data); });
-    connect(d, &ContainerDiscovery::failed, this, [this, id](const QString &error) {
-        if (disabledContainerHosts.contains(id))
+    auto host = profile;
+    if (host.isLocal())
+        host.enabled = host.servers = true;
+    hosts[host.id] = host;
+    auto *d = new SharedHostDiscovery(host.id, host.ssh, this);
+    hostDiscovery[host.id] = d;
+    hostFeedback[host.id] = host.enabled ? "Not connected" : "Disabled";
+    connect(d, &SharedHostDiscovery::snapshot, this,
+            [this, id = host.id](const QJsonObject &data) { applyHostInventory(id, data); });
+    connect(d, &SharedHostDiscovery::failed, this, [this, id = host.id](const QString &error) {
+        if (!hosts.contains(id) || !hosts[id].enabled)
             return;
         refreshScopeFinished(id, {error});
-        containerFeedback[id] = error;
-        containerProblems.insert(id);
-        updateContainerSummary();
+        hostFeedback[id] = error;
+        hostProblems.insert(id);
+        updateHostSummary();
     });
-    if (start) {
-        containerFeedback[id] = "Discovering…";
-        d->refresh();
-    }
-    updateContainerSummary();
+    if (start)
+        refreshHost(host.id);
+    updateHostSummary();
 }
-void Window::saveContainerHosts() {
+void Window::saveHosts() {
     QJsonArray data;
-    for (auto it = containerHosts.begin(); it != containerHosts.end(); ++it)
-        data.append(QJsonObject{{"id", it.key()},
-                                {"ssh", it.value()},
-                                {"enabled", !disabledContainerHosts.contains(it.key())}});
+    for (const auto &host : hosts)
+        data.append(host.json());
     QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
-    settings.setValue("containerHosts", QJsonDocument(data).toJson(QJsonDocument::Compact));
+    settings.setValue("hosts", QJsonDocument(data).toJson(QJsonDocument::Compact));
 }
-void Window::updateContainerSummary() {
+void Window::refreshHost(const QString &id, const QString &revision) {
+    if (!hosts.contains(id) || !hosts[id].enabled)
+        return;
+    const auto &host = hosts[id];
+    if ((!host.servers || host.isLocal()) && !host.containers) {
+        hostDiscovery[id]->stop();
+        hostProblems.remove(id);
+        hostFeedback[id] = host.isLocal() ? "Local Codex discovery active" : "Discovery disabled";
+        refreshScopeFinished(id);
+    } else {
+        hostFeedback[id] = "Discovering…";
+        hostDiscovery[id]->refresh(revision, host.servers, host.containers);
+    }
+    updateHostSummary();
+}
+void Window::setHostEnabled(const QString &id, bool enabled) {
+    if (!hosts.contains(id) || (hosts[id].isLocal() && !enabled))
+        return;
+    hosts[id].enabled = enabled;
+    if (enabled)
+        refreshHost(id);
+    else {
+        hostDiscovery[id]->stop();
+        refreshScopeFinished(id, {"Host disabled during refresh."});
+        hostFeedback[id] = "Disabled";
+        hostProblems.remove(id);
+        for (const auto &p : profiles)
+            if (hostId(p) == id)
+                backends[p.id]->disconnectServer();
+    }
+    saveHosts();
+    updateHostSummary();
+}
+void Window::removeHost(const QString &id) {
+    if (!hosts.contains(id) || hosts[id].isLocal())
+        return;
+    delete hostDiscovery.take(id);
+    refreshScopeFinished(id, {"Host removed during refresh."});
+    hosts.remove(id);
+    hostFeedback.remove(id);
+    hostProblems.remove(id);
+    for (const auto &p : profiles)
+        if (p.discoveryHost == id) {
+            terminal->closeBackend(p.id);
+            backends[p.id]->disconnectServer();
+        }
+    saveHosts();
+    updateHostSummary();
+}
+void Window::updateHostSummary() {
     QStringList details;
-    for (auto it = containerHosts.begin(); it != containerHosts.end(); ++it)
-        details << (it.value().isEmpty() ? "This computer" : it.value()) + ": " +
-                       containerFeedback.value(it.key());
-    containerStatus->setToolTip(details.join('\n'));
-    containerStatus->setText(containerProblems.isEmpty() ? "myCodex hosts…"
-                                                         : "myCodex connection issues…");
-    containerStatus->setIcon(
-        QIcon::fromTheme(containerProblems.isEmpty() ? "network-server" : "dialog-warning"));
+    for (const auto &host : hosts)
+        details << (host.isLocal() ? "This Computer" : host.ssh) + ": " +
+                       hostFeedback.value(host.id);
+    hostStatus->setToolTip(details.join('\n'));
+    hostStatus->setText(hostProblems.isEmpty() ? "Hosts…" : "Host connection issues…");
+    hostStatus->setIcon(
+        QIcon::fromTheme(hostProblems.isEmpty() ? "network-server" : "dialog-warning"));
     emit connectionSummaryChanged();
 }
-void Window::containerHostsDialog() {
+void Window::hostsDialog() {
     QDialog dialog(this);
-    dialog.setWindowTitle("myCodex hosts");
+    dialog.setWindowTitle("Hosts");
     auto *layout = new QVBoxLayout(&dialog);
-    auto *description =
-        new QLabel("Local containers are discovered automatically. Remote discovery uses "
-                   "host OpenSSH and requires a known host key and non-interactive authentication "
-                   "(for example, "
-                   "your SSH agent). Docker and Python 3 must be available on each host. "
-                   "Disabling a host disconnects its clients and keeps their terminal views. "
-                   "Removing a host closes its terminal views.");
+    auto *description = new QLabel(
+        "Discover Codex servers and myCodex containers on each host. SSH hosts use your "
+        "OpenSSH configuration and non-interactive authentication. Python 3 is required; "
+        "Docker is needed only for myCodex. This Computer is always available. "
+        "Disabling a remote host retains terminal output; removing it closes its views.");
     description->setWordWrap(true);
     layout->addWidget(description);
     auto *list = new QListWidget;
-    list->setObjectName("containerHosts");
+    list->setObjectName("hosts");
     layout->addWidget(list);
-    auto populate = [&] {
-        const auto current =
-            list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
-        list->clear();
-        for (auto it = containerHosts.begin(); it != containerHosts.end(); ++it) {
-            const auto label = (it.value().isEmpty() ? "This computer" : it.value()) + " — " +
-                               containerFeedback.value(it.key());
-            auto *item = new QListWidgetItem(label, list);
-            item->setData(Qt::UserRole, it.key());
-            item->setToolTip(label);
-            if (it.key() == current)
-                list->setCurrentItem(item);
-        }
+    auto *servers = new QCheckBox("Discover Codex servers");
+    auto *containers = new QCheckBox("Discover myCodex containers");
+    servers->setObjectName("discoverHostServers");
+    containers->setObjectName("discoverHostContainers");
+    layout->addWidget(servers);
+    layout->addWidget(containers);
+    auto currentId = [&] {
+        return list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
     };
-    populate();
-    connect(this, &Window::connectionSummaryChanged, &dialog, populate);
     auto *row = new QHBoxLayout;
     layout->addLayout(row);
     auto button = [&](const QString &text, auto action) {
         auto *b = new QPushButton(text);
         row->addWidget(b);
         connect(b, &QPushButton::clicked, &dialog, action);
+        return b;
     };
     button("Add SSH host…", [&] {
         bool ok = false;
-        const auto host =
-            QInputDialog::getText(&dialog, "Add myCodex host", "SSH alias or user@host",
-                                  QLineEdit::Normal, {}, &ok)
-                .trimmed();
+        if (hosts.size() >= 64) {
+            error("At most 64 hosts can be configured.");
+            return;
+        }
+        const auto ssh = QInputDialog::getText(&dialog, "Add host", "SSH alias or user@host",
+                                               QLineEdit::Normal, {}, &ok)
+                             .trimmed();
         if (!ok)
             return;
-        if (!validSshHost(host)) {
+        if (!validSshHost(ssh)) {
             error("Enter an SSH alias or user@host without command options.");
             return;
         }
-        if (containerHosts.values().contains(host)) {
-            error("This host is already configured.");
-            return;
-        }
-        addContainerHost(QUuid::createUuid().toString(QUuid::WithoutBraces), host, true);
-        saveContainerHosts();
-    });
-    button("Connect / retry", [&] {
-        if (!list->currentItem())
-            return;
-        const auto id = list->currentItem()->data(Qt::UserRole).toString();
-        disabledContainerHosts.remove(id);
-        containerFeedback[id] = "Discovering…";
-        containerDiscovery[id]->refresh();
-        saveContainerHosts();
-        updateContainerSummary();
-    });
-    button("Disable", [&] {
-        if (!list->currentItem())
-            return;
-        const auto id = list->currentItem()->data(Qt::UserRole).toString();
-        disabledContainerHosts.insert(id);
-        containerDiscovery[id]->stop();
-        refreshScopeFinished(id, {"Host disabled during refresh."});
-        containerFeedback[id] = "Disabled";
-        containerProblems.remove(id);
-        for (const auto &p : profiles)
-            if (p.discoveryHost == id)
-                backends[p.id]->disconnectServer();
-        saveContainerHosts();
-        updateContainerSummary();
-    });
-    button("Remove", [&] {
-        if (!list->currentItem())
-            return;
-        const auto id = list->currentItem()->data(Qt::UserRole).toString();
-        if (containerHosts[id].isEmpty()) {
-            error("The local host can be disabled, but not removed.");
-            return;
-        }
-        delete containerDiscovery.take(id);
-        refreshScopeFinished(id, {"Host removed during refresh."});
-        containerHosts.remove(id);
-        containerFeedback.remove(id);
-        containerProblems.remove(id);
-        disabledContainerHosts.remove(id);
-        for (const auto &p : profiles)
-            if (p.discoveryHost == id) {
-                terminal->closeBackend(p.id);
-                backends[p.id]->disconnectServer();
+        for (const auto &host : hosts)
+            if (host.ssh == ssh) {
+                error("This host is already configured.");
+                return;
             }
-        saveContainerHosts();
-        updateContainerSummary();
+        addHost({QUuid::createUuid().toString(QUuid::WithoutBraces), ssh}, true);
+        saveHosts();
     });
+    auto *retry = button("Connect / retry", [&] {
+        const auto id = currentId();
+        setHostEnabled(id, true);
+        if (hosts.contains(id) && hosts[id].isLocal())
+            discovery->refresh();
+    });
+    auto *disable = button("Disable", [&] { setHostEnabled(currentId(), false); });
+    disable->setObjectName("disableHost");
+    auto *remove = button("Remove", [&] { removeHost(currentId()); });
+    remove->setObjectName("removeHost");
+    auto selected = [&] {
+        const auto id = currentId();
+        const bool valid = hosts.contains(id), local = valid && hosts[id].isLocal();
+        QSignalBlocker a(servers), b(containers);
+        servers->setChecked(valid && hosts[id].servers);
+        containers->setChecked(valid && hosts[id].containers);
+        servers->setEnabled(valid && !local);
+        containers->setEnabled(valid);
+        disable->setEnabled(valid && !local && hosts[id].enabled);
+        remove->setEnabled(valid && !local);
+        retry->setEnabled(valid);
+    };
+    auto populate = [&] {
+        const auto current = currentId();
+        QSignalBlocker blocker(list);
+        list->clear();
+        QStringList ids;
+        for (const auto &host : hosts)
+            if (host.isLocal())
+                ids.prepend(host.id);
+            else
+                ids.append(host.id);
+        for (const auto &id : ids) {
+            const auto &host = hosts[id];
+            const auto label =
+                (host.isLocal() ? "This Computer" : host.ssh) + " — " +
+                (host.isLocal() ? QString("%1 host servers · ").arg(discoveryReport.endpoints)
+                                : QString()) +
+                hostFeedback.value(id);
+            auto *item = new QListWidgetItem(label, list);
+            item->setData(Qt::UserRole, id);
+            item->setToolTip(label);
+            if (id == current)
+                list->setCurrentItem(item);
+        }
+        if (!list->currentItem())
+            list->setCurrentRow(0);
+        selected();
+    };
+    connect(list, &QListWidget::currentRowChanged, &dialog, selected);
+    auto options = [&] {
+        const auto id = currentId();
+        if (!hosts.contains(id))
+            return;
+        auto &host = hosts[id];
+        host.servers = host.isLocal() || servers->isChecked();
+        host.containers = containers->isChecked();
+        for (const auto &p : profiles)
+            if (hostId(p) == id && (p.isContainer() ? !host.containers : !host.servers))
+                backends[p.id]->disconnectServer();
+        refreshHost(id);
+        saveHosts();
+    };
+    connect(servers, &QCheckBox::toggled, &dialog, options);
+    connect(containers, &QCheckBox::toggled, &dialog, options);
+    connect(this, &Window::connectionSummaryChanged, &dialog, populate);
+    populate();
     auto *close = new QDialogButtonBox(QDialogButtonBox::Close);
     connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
     layout->addWidget(close);
-    dialog.resize(850, 390);
+    dialog.resize(850, 440);
     dialog.exec();
 }
+void Window::applyHostInventory(const QString &id, const QJsonObject &inventory) {
+    if (!hosts.contains(id) || !hosts[id].enabled)
+        return;
+    for (const auto &field : {"host", "user"}) {
+        const auto value = inventory[field].toString();
+        if (!value.isEmpty() && validText(value, 255))
+            (QString::fromLatin1(field) == "host" ? hostNames : hostUsers)[id] = value;
+    }
+    hostProblems.remove(id);
+    if (hosts[id].containers)
+        applyContainers(id, inventory);
+    else
+        hostFeedback[id] = "myCodex discovery disabled";
+    QStringList issues;
+    for (const auto &value : inventory["issues"].toArray())
+        issues << value.toObject()["summary"].toString();
+    if (!hosts[id].isLocal() && hosts[id].servers) {
+        issues += applyRemoteServers(id, inventory["hostServers"].toObject());
+        hostFeedback[id].prepend(
+            QString("%1 host servers · ")
+                .arg(inventory["hostServers"].toObject()["endpoints"].toArray().size()));
+        if (!issues.isEmpty()) {
+            hostProblems.insert(id);
+            hostFeedback[id] += "\n" + issues.join('\n');
+        }
+    }
+    if (!issues.isEmpty())
+        hostProblems.insert(id);
+    refreshNames();
+    if (inventory["revision"].toString() == refreshRevision && inventory["settled"].toBool()) {
+        if (hostProblems.contains(id))
+            issues << hostFeedback[id];
+        refreshScopeFinished(id, issues);
+    }
+    updateHostSummary();
+}
+QStringList Window::applyRemoteServers(const QString &host, const QJsonObject &inventory) {
+    if (!hosts.contains(host) || !hosts[host].enabled || !hosts[host].servers ||
+        hosts[host].isLocal())
+        return {};
+    QStringList issues;
+    for (const auto &value : inventory["issues"].toArray())
+        issues << value.toObject()["summary"].toString();
+    bool valid = inventory["endpoints"].isArray() && inventory["issues"].isArray();
+    const auto endpoints = inventory["endpoints"].toArray();
+    if (endpoints.size() > 4096)
+        return {"Host server inventory exceeds its limit."};
+    QSet<QString> present, paths;
+    const auto digest = [](const QString &s) {
+        return QString::fromLatin1(
+            QCryptographicHash::hash(s.toUtf8(), QCryptographicHash::Sha256).toHex());
+    };
+    for (const auto &value : endpoints) {
+        const auto ep = value.toObject();
+        const auto path = ep["path"].toString();
+        if (paths.contains(path)) {
+            valid = false;
+            issues << "Duplicate host endpoint in inventory.";
+            continue;
+        }
+        paths.insert(path);
+        BackendProfile p;
+        p.id = "ssh-" + digest(host + QChar(0x1f) + path);
+        if (ignoredSockets.contains(p.id))
+            continue;
+        p.kind = "ssh-unix";
+        p.sshHost = hosts[host].ssh;
+        p.discoveryHost = host;
+        p.socketPath = path;
+        p.relaySocket = ep["localSocket"].toString();
+        p.executable = ep["executable"].toString("codex");
+        p.discovered = true;
+        for (const auto &field : {"user", "host", "ownerHome", "cwd", "pid", "default"})
+            if (ep.contains(field))
+                p.identity[field] = ep[field];
+        p.environmentId = digest(host + QChar(0x1f) + ep["user"].toString() + QChar(0x1f) +
+                                 ep["ownerHome"].toString() + QChar(0x1f) + ep["host"].toString() +
+                                 (ep["hostEnvironment"].toBool() ? QString() : p.id));
+        p.name = serverLabel(p);
+        if (!p.validate().isEmpty() || !QDir::isAbsolutePath(p.relaySocket) ||
+            !validText(p.relaySocket)) {
+            valid = false;
+            issues << "Invalid host endpoint in inventory.";
+            continue;
+        }
+        const auto old = profiles.value(p.id);
+        const bool changed = !backends.contains(p.id) || old.relaySocket != p.relaySocket ||
+                             old.environmentId != p.environmentId;
+        if (profiles.contains(p.id)) {
+            p.autoConnect = old.autoConnect;
+            if (old.environmentId == p.environmentId) {
+                for (const auto &field : {"codexHome", "userAgent"})
+                    if (old.identity.contains(field))
+                        p.identity[field] = old.identity[field];
+            }
+        }
+        cancelRetirement(p.id);
+        store->allowBackend(p.id);
+        if (!refreshRevision.isEmpty()) {
+            if (!profiles.contains(p.id))
+                refreshAdded.insert(p.id);
+            else if (old.json() != p.json() && !refreshAdded.contains(p.id))
+                refreshUpdated.insert(p.id);
+        }
+        if (changed && backends.contains(p.id)) {
+            auto *b = backends.take(p.id);
+            b->disconnect(this);
+            delete b;
+        }
+        profiles[p.id] = p;
+        store->save(p);
+        opening->updateProfile(p);
+        model->backendEnvironment(p.id, p.environmentId);
+        results->backendEnvironment(p.id, p.environmentId);
+        if (changed)
+            attach(p, p.autoConnect && !paused.contains(p.id));
+        else if (!backends[p.id]->ready() && p.autoConnect && !paused.contains(p.id) &&
+                 !discoveredPresent.contains(p.id))
+            backends[p.id]->connectServer();
+        present.insert(p.id);
+        discoveredPresent.insert(p.id);
+    }
+    if (valid && inventory["complete"].toBool() && issues.isEmpty()) {
+        const bool refreshing = !refreshRevision.isEmpty() && refreshScopes.contains(host) &&
+                                inventory["revision"].toString() == refreshRevision;
+        for (const auto &p : std::as_const(profiles))
+            if (p.kind == "ssh-unix" && p.discoveryHost == host && !present.contains(p.id)) {
+                discoveredPresent.remove(p.id);
+                if (refreshing)
+                    retireConnection(p.id);
+                else if (auto *b = backends.value(p.id))
+                    b->disconnectServer();
+            }
+    }
+    refreshNames();
+    if (!valid)
+        issues << "Host server discovery has not supplied a valid inventory.";
+    return issues;
+}
 void Window::applyContainers(const QString &hostId, const QJsonObject &inventory) {
-    if (!containerHosts.contains(hostId) || disabledContainerHosts.contains(hostId))
+    if (!hosts.contains(hostId) || !hosts[hostId].enabled || !hosts[hostId].containers)
         return;
     const auto host = inventory["host"].toString();
     if (!host.isEmpty() && validText(host, 255)) {
-        containerHostNames[hostId] = host;
-        if (containerHosts[hostId].isEmpty()) {
+        hostNames[hostId] = host;
+        if (hosts[hostId].isLocal()) {
             localHost = host;
             localIdentityDiscovered = true;
             const auto user = inventory["user"].toString();
@@ -1410,10 +1606,10 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
         issues << issue.toObject()["summary"].toString();
     const auto containers = inventory["containers"].toArray();
     if (containers.size() > 512) {
-        containerFeedback[hostId] = "Container inventory exceeds the 512-container limit.";
-        containerProblems.insert(hostId);
-        refreshScopeFinished(hostId, {containerFeedback[hostId]});
-        updateContainerSummary();
+        hostFeedback[hostId] = "Container inventory exceeds the 512-container limit.";
+        hostProblems.insert(hostId);
+        refreshScopeFinished(hostId, {hostFeedback[hostId]});
+        updateHostSummary();
         return;
     }
     for (const auto &value : containers) {
@@ -1457,7 +1653,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             p.containerId = cid;
             p.containerEpoch = c["containerEpoch"].toString();
             p.dockerContext = c["dockerContext"].toString();
-            p.sshHost = containerHosts[hostId];
+            p.sshHost = hosts[hostId].ssh;
             p.discoveryHost = hostId;
             p.runtimeUser = c["runtimeUser"].toString();
             p.runtimeHome = c["runtimeHome"].toString();
@@ -1474,6 +1670,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                           {"codexHome", c["codexHome"]},
                           {"containerWorkdir", c["cwd"]},
                           {"dockerHost", host},
+                          {"hostUser", inventory["user"]},
                           {"pid", ep["pid"]},
                           {"cwd", ep["cwd"]}};
             p.name = serverLabel(p);
@@ -1545,11 +1742,11 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             empty.insert(rootId);
             BackendProfile container;
             container.kind = "mycodex";
-            container.sshHost = containerHosts[hostId];
+            container.sshHost = hosts[hostId].ssh;
             container.discoveryHost = hostId;
             model->backendGroup(rootId, groupKey(container), groupLabel(container),
-                                container.sshHost.isEmpty() ? 1 : 2);
-            model->backendName(rootId, c["containerName"].toString());
+                                container.sshHost.isEmpty() ? 0 : 1);
+            model->backendName(rootId, "myCodex · " + c["containerName"].toString());
             model->backendDetails(
                 rootId, c["paused"].toBool() ? "Container paused"
                                              : "Running container — no accessible Codex server.\n" +
@@ -1570,7 +1767,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
     const auto engines = inventory["engines"].toObject();
     if (validInventory) {
         for (const auto &p : std::as_const(profiles)) {
-            if (p.discoveryHost != hostId || present.contains(p.id))
+            if (!p.isContainer() || p.discoveryHost != hostId || present.contains(p.id))
                 continue;
             const auto engine = p.identity["dockerEngine"].toString();
             const auto scan = engines[engine].toObject();
@@ -1589,31 +1786,33 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             }
         }
     }
-    if (refreshing && inventory["settled"].toBool()) {
-        if (!inventory["complete"].toBool() && issues.isEmpty())
-            issues << "The container inventory is incomplete.";
-        refreshScopeFinished(hostId, issues);
-    }
     refreshNames();
-    containerFeedback[hostId] =
+    hostFeedback[hostId] =
         QString("%1 containers, %2 servers").arg(containers.size()).arg(present.size()) +
         (issues.isEmpty() ? QString() : "\n" + issues.join('\n'));
     if (issues.isEmpty())
-        containerProblems.remove(hostId);
+        hostProblems.remove(hostId);
     else
-        containerProblems.insert(hostId);
-    updateContainerSummary();
+        hostProblems.insert(hostId);
+    updateHostSummary();
 }
 void Window::refreshNames() {
     for (const auto &p : profiles) {
-        if (!p.isContainer() && !localIdentityDiscovered) {
+        if (p.isLocal() && !localIdentityDiscovered) {
             if (!p.identity["user"].toString().isEmpty())
                 localUser = p.identity["user"].toString();
             if (!p.identity["host"].toString().isEmpty())
                 localHost = p.identity["host"].toString();
+        } else if (p.kind == "ssh-unix") {
+            if (!hostNames.contains(p.discoveryHost))
+                hostNames[p.discoveryHost] = p.identity["host"].toString();
+            if (!hostUsers.contains(p.discoveryHost))
+                hostUsers[p.discoveryHost] = p.identity["user"].toString();
         } else if (p.isContainer() && !p.identity["dockerHost"].toString().isEmpty()) {
-            if (!containerHostNames.contains(p.discoveryHost))
-                containerHostNames[p.discoveryHost] = p.identity["dockerHost"].toString();
+            if (!hostNames.contains(p.discoveryHost))
+                hostNames[p.discoveryHost] = p.identity["dockerHost"].toString();
+            if (!hostUsers.contains(p.discoveryHost) && p.identity["hostUser"].isString())
+                hostUsers[p.discoveryHost] = p.identity["hostUser"].toString();
             if (p.sshHost.isEmpty() && !localIdentityDiscovered)
                 localHost = p.identity["dockerHost"].toString();
         }
@@ -1647,24 +1846,31 @@ void Window::refreshNames() {
     }
     updateSummary();
 }
+QString Window::hostId(const BackendProfile &p) const {
+    if (!p.discoveryHost.isEmpty())
+        return p.discoveryHost;
+    if (p.isLocal() || p.sshHost.isEmpty())
+        for (const auto &host : hosts)
+            if (host.isLocal())
+                return host.id;
+    return {};
+}
 QString Window::groupKey(const BackendProfile &p) const {
-    return !p.isContainer() ? QString("local-host")
-           : p.sshHost.isEmpty()
-               ? QString("mycodex-local")
-               : "mycodex-ssh:" + (p.discoveryHost.isEmpty() ? p.sshHost : p.discoveryHost);
+    return p.sshHost.isEmpty() ? QString("local-host") : "ssh-host:" + hostId(p);
 }
 QString Window::groupLabel(const BackendProfile &p) const {
-    if (!p.isContainer())
-        return localUser + " @ " + localHost;
-    return "myCodex @ " +
-           (p.sshHost.isEmpty() ? localHost : containerHostNames.value(p.discoveryHost, p.sshHost));
+    if (p.sshHost.isEmpty())
+        return "This Computer · " + localUser + "@" + localHost;
+    const auto id = hostId(p);
+    const auto user = hostUsers.value(id);
+    const auto name = hostNames.value(id, p.sshHost);
+    return p.sshHost + (name == p.sshHost && user.isEmpty()
+                            ? QString()
+                            : " · " + (user.isEmpty() ? QString() : user + "@") + name);
 }
 void Window::presentProfile(const BackendProfile &p, const QString &label) {
     for (auto *source : {model, results}) {
-        source->backendGroup(p.id, groupKey(p), groupLabel(p),
-                             !p.isContainer()      ? 0
-                             : p.sshHost.isEmpty() ? 1
-                                                   : 2);
+        source->backendGroup(p.id, groupKey(p), groupLabel(p), p.sshHost.isEmpty() ? 0 : 1);
         source->backendName(p.id, label.isEmpty() ? serverTreeLabel(p) : label);
         source->backendDetails(p.id, serverDetails(p));
     }
@@ -1934,9 +2140,10 @@ void Window::showDiscoveryDetails() {
 }
 void Window::editConnection(const QString &id) {
     BackendProfile p = profiles.value(id);
-    if (p.isContainer()) {
-        error("Container endpoints are discovered automatically. Manage their host in Connections "
-              "→ myCodex hosts.");
+    if (!p.isLocal()) {
+        error("Remote and container endpoints are discovered automatically. Manage their host in "
+              "Connections "
+              "→ Hosts.");
         return;
     }
     if (id.isEmpty()) {
@@ -2070,7 +2277,7 @@ void Window::connectionsDialog() {
         if (!persist([&] { store->removeBackend(id); }))
             return;
         ignoredSockets.insert(
-            profiles[id].isContainer() ? id : discoveredPaths.value(id, profiles[id].socketPath));
+            profiles[id].usesRelay() ? id : discoveredPaths.value(id, profiles[id].socketPath));
         notifications->withdrawBackend(id);
         if (auto *b = backends.take(id)) {
             b->disconnectServer();
@@ -2111,30 +2318,32 @@ void Window::discover(bool reconcile) {
         refreshRemoved = 0;
         discoveryReport.refreshIssues = {};
         refreshScopes.insert("local");
-        for (auto it = containerDiscovery.cbegin(); it != containerDiscovery.cend(); ++it)
-            if (!disabledContainerHosts.contains(it.key()))
+        for (auto it = hostDiscovery.cbegin(); it != hostDiscovery.cend(); ++it)
+            if (hosts.value(it.key()).enabled)
                 refreshScopes.insert(it.key());
         refreshDeadline.start(60000);
     }
     QStringList paths;
     for (const auto &p : profiles)
-        if (!p.isContainer() && !p.socketPath.isEmpty())
+        if (p.isLocal() && !p.socketPath.isEmpty())
             paths << p.socketPath;
     discoveryReport.inProgress = true;
     updateRefreshSummary();
     discovery->refresh(paths, refreshRevision);
-    for (auto it = containerDiscovery.begin(); it != containerDiscovery.end(); ++it)
-        if (!disabledContainerHosts.contains(it.key())) {
-            containerFeedback[it.key()] = "Refreshing…";
-            it.value()->refresh(refreshRevision);
+    for (auto it = hostDiscovery.begin(); it != hostDiscovery.end(); ++it)
+        if (hosts.value(it.key()).enabled) {
+            hostFeedback[it.key()] = "Refreshing…";
+            refreshHost(it.key(), refreshRevision);
         }
-    updateContainerSummary();
+    updateHostSummary();
 }
 bool Window::protectsConnection(const QString &id) const {
     if (!workspaceLoaded || !workspaceWritable || !cachePending.isEmpty() ||
         savedWorkspaceBackends.contains(id) || opening->referencesBackend(id) ||
-        disabledContainerHosts.contains(profiles.value(id).discoveryHost) || paused.contains(id) ||
-        !profiles.value(id).autoConnect)
+        (!hostId(profiles.value(id)).isEmpty() &&
+         (!hosts.contains(hostId(profiles.value(id))) ||
+          !hosts.value(hostId(profiles.value(id))).enabled)) ||
+        paused.contains(id) || !profiles.value(id).autoConnect)
         return true;
     for (const auto &view : terminal->workspace().views)
         if (view.backendId == id)
@@ -2201,15 +2410,15 @@ void Window::refreshScopeFinished(const QString &id, const QStringList &issues) 
     if (!refreshScopes.remove(id))
         return;
     if (!issues.isEmpty())
-        discoveryReport.refreshIssues.append(QJsonObject{
-            {"code", "refresh-" + id},
-            {"summary", (id == "local"                        ? QString("Local servers")
-                         : containerHosts.value(id).isEmpty() ? QString("This computer (myCodex)")
-                                                              : containerHosts.value(id)) +
-                            ": refresh incomplete"},
-            {"explanation", "Connections in unverified scopes were retained."},
-            {"action", "Check discovery access and refresh again."},
-            {"details", QJsonArray::fromStringList(issues)}});
+        discoveryReport.refreshIssues.append(
+            QJsonObject{{"code", "refresh-" + id},
+                        {"summary", (id == "local"               ? QString("Local servers")
+                                     : hosts.value(id).isLocal() ? QString("This Computer")
+                                                                 : hosts.value(id).ssh) +
+                                        ": refresh incomplete"},
+                        {"explanation", "Connections in unverified scopes were retained."},
+                        {"action", "Check discovery access and refresh again."},
+                        {"details", QJsonArray::fromStringList(issues)}});
     updateRefreshSummary();
 }
 void Window::updateRefreshSummary() {
@@ -2266,8 +2475,8 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &repor
         QString id;
         const auto aliases = item["aliases"].toArray();
         for (const auto &p : profiles)
-            if (!p.isContainer() && (p.socketPath == path || aliases.contains(p.socketPath) ||
-                                     (p.socketPath.isEmpty() && item["default"].toBool()))) {
+            if (p.isLocal() && (p.socketPath == path || aliases.contains(p.socketPath) ||
+                                (p.socketPath.isEmpty() && item["default"].toBool()))) {
                 id = p.id;
                 break;
             }
@@ -2350,10 +2559,10 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &repor
     refreshNames();
     if (issues.isEmpty()) {
         for (const auto &id : discoveredPresent - present)
-            if (profiles.contains(id) && profiles[id].discovered && !profiles[id].isContainer())
+            if (profiles.contains(id) && profiles[id].discovered && profiles[id].isLocal())
                 backends[id]->disconnectServer();
         for (const auto &id : discoveredPresent)
-            if (profiles.value(id).isContainer())
+            if (!profiles.value(id).isLocal())
                 present.insert(id);
         discoveredPresent = present;
     } else
@@ -2362,7 +2571,7 @@ void Window::applyDiscovery(const QJsonArray &endpoints, const QJsonArray &repor
         refreshScopes.contains("local")) {
         if (issues.isEmpty())
             for (const auto &p : std::as_const(profiles))
-                if (p.discovered && !p.isContainer() && !present.contains(p.id))
+                if (p.discovered && p.isLocal() && !present.contains(p.id))
                     retireConnection(p.id);
         QStringList failures;
         for (const auto &value : issues)

@@ -2,6 +2,7 @@
 #include "backend.h"
 #include "discovery.h"
 #include "fixture.h"
+#include "hosts.h"
 #include "store.h"
 #include "testenvironment.h"
 #include <QFile>
@@ -21,6 +22,55 @@ class CoreTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void hostConfigurationMigratesWithoutDisablingThisComputer() {
+        const QJsonArray legacy{
+            QJsonObject{{"id", "local-mycodex"}, {"ssh", ""}, {"enabled", false}},
+            QJsonObject{{"id", "remote"}, {"ssh", "alice@server"}, {"enabled", false}}};
+        const auto migrated = readHosts(legacy, true);
+        QCOMPARE(migrated.size(), 2);
+        QVERIFY(migrated["local-mycodex"].enabled);
+        QVERIFY(migrated["local-mycodex"].servers);
+        QVERIFY(!migrated["local-mycodex"].containers);
+        QVERIFY(!migrated["remote"].enabled);
+        QVERIFY(migrated["remote"].servers);
+        QJsonArray current;
+        for (const auto &host : migrated)
+            current.append(host.json());
+        const auto restored = readHosts(current);
+        QCOMPARE(restored["local-mycodex"].json(), migrated["local-mycodex"].json());
+        QCOMPARE(restored["remote"].json(), migrated["remote"].json());
+        auto tampered = migrated["local-mycodex"].json();
+        tampered["enabled"] = tampered["servers"] = false;
+        QVERIFY(readHosts({tampered})["local-mycodex"].enabled);
+        QVERIFY(readHosts({tampered})["local-mycodex"].servers);
+        // A remote-only or empty saved list must still acquire the implicit local host.
+        QCOMPARE(readHosts({current[1]}).size(), 2);
+        QCOMPARE(readHosts({}).size(), 1);
+        const auto malformed = readHosts({QJsonObject{{"id", "invalid"}, {"ssh", 42}}});
+        QVERIFY(!malformed.contains("invalid"));
+        QCOMPARE(malformed.size(), 1);
+    }
+    void remoteHostProfilesRequireExplicitIdentityAndNeverPersistRelayPaths() {
+        BackendProfile p{"remote", "Remote"};
+        p.kind = "ssh-unix";
+        QVERIFY(!p.validate().isEmpty());
+        p.sshHost = "server";
+        p.discoveryHost = "host-id";
+        p.socketPath = "/remote/.codex/server.sock";
+        QVERIFY(p.validate().isEmpty());
+        QVERIFY(p.usesRelay());
+        QVERIFY(!p.isContainer());
+        QVERIFY(!p.isLocal());
+        QVERIFY(clientArguments(p, "thread").isEmpty());
+        p.relaySocket = "/private/local/relay";
+        p.executable = "/remote-only/bin/codex";
+        const auto args = clientArguments(p, "thread", "/remote/work", "/desktop/bin/codex");
+        const auto request =
+            QJsonDocument::fromJson(QByteArray::fromBase64(args.last().toUtf8())).object();
+        QCOMPARE(request["socket"].toString(), p.relaySocket);
+        QCOMPARE(request["executable"].toString(), "/desktop/bin/codex");
+        QVERIFY(BackendProfile::fromJson(p.json()).relaySocket.isEmpty());
+    }
     void validationAndArgumentIsolation() {
         BackendProfile p{"id", "name", "local-unix", "/tmp/socket with spaces", "/bin/echo", false};
         QVERIFY(p.validate().isEmpty());
@@ -98,7 +148,7 @@ class CoreTests : public QObject {
         p.kind = "mycodex";
         p.identity["containerName"] = "example-project";
         p.identity["stateMode"] = "Shared";
-        QCOMPARE(serverTreeLabel(p), "example-project");
+        QCOMPARE(serverTreeLabel(p), "myCodex · example-project");
         QCOMPARE(serverLabel(p), "myCodex · example-project · This computer · Shared");
     }
     void inventoryValidationAndOpenPreflight() {

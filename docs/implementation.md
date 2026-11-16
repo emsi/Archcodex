@@ -1,4 +1,10 @@
-# Implementation: 0.5.0
+# Implementation history
+
+Current host management and ordinary SSH-server support are documented in
+[Hosts](hosts.md). The version-specific sections below record earlier deliveries;
+their descriptions of generic SSH support as unimplemented predate 0.12.0.
+
+## Implementation: 0.5.0
 
 This is an installable development version for host testing, not completion of every
 stage in the project design. The implementation uses C++20, Qt Widgets, KDE

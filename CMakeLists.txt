@@ -15,8 +15,8 @@ find_package(Threads REQUIRED)
 
 add_library(archcodex-core src/types.cpp src/store.cpp src/backend.cpp src/localbackend.cpp
   src/discovery.cpp src/discovery.qrc src/launch.cpp src/worker.cpp src/asyncbackend.cpp
-  src/asyncstore.cpp src/containerdiscovery.cpp src/jsonprocess.cpp src/workspace.cpp
-  src/opening.cpp src/updater.cpp)
+  src/asyncstore.cpp src/hostconnection.cpp src/jsonprocess.cpp src/workspace.cpp
+  src/opening.cpp src/updater.cpp src/hosts.cpp)
 target_include_directories(archcodex-core PUBLIC src)
 target_link_libraries(archcodex-core PUBLIC Qt6::Core Qt6::Network Qt6::Sql)
 target_compile_definitions(archcodex-core PUBLIC ARCHCODEX_VERSION="${ARCHCODEX_VERSION}")

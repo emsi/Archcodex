@@ -187,8 +187,8 @@ bool TerminalArea::restart(const BackendProfile &p, const Session &s, QString *e
 }
 bool TerminalArea::startSession(const BackendProfile &p, const Session &s, QString *error,
                                 bool activate) {
-    if (p.isContainer() && p.relaySocket.isEmpty()) {
-        *error = "This container has no live desktop transport. Reconnect its host first.";
+    if (p.usesRelay() && p.relaySocket.isEmpty()) {
+        *error = "This server has no live desktop transport. Reconnect its host first.";
         return false;
     }
     if (s.id.startsWith("new-")) {
