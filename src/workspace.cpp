@@ -122,6 +122,8 @@ QString workspaceSourceIdentity(const BackendProfile &p) {
                          {"codexHome", home},
                          {"sshHost", p.sshHost},
                          {"environment", p.environmentId}};
+    if (!p.identity["sshOptions"].toObject().isEmpty())
+        identity["sshOptions"] = p.identity["sshOptions"];
     if (p.isContainer()) {
         identity["container"] = p.containerId;
         identity["host"] = p.discoveryHost;

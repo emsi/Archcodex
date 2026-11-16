@@ -26,12 +26,16 @@ class SharedHostTransport : public QObject {
             const auto inventories = message["hosts"].toObject();
             for (auto it = inventories.begin(); it != inventories.end(); ++it)
                 if (hosts.contains(it.key()) &&
-                    it.value().toObject()["revision"] == hosts[it.key()]["revision"])
+                    it.value().toObject()["revision"] == hosts[it.key()]["revision"]) {
+                    hosts[it.key()]["interactive"] = false;
                     emit snapshot(it.key(), it.value().toObject());
+                }
             worker->post([r = runner] { r->acknowledge(); });
         });
         connect(runner, &JsonProcess::failed, this, [this](const QString &message) {
             started = false;
+            for (auto &host : hosts)
+                host["interactive"] = false;
             emit failed("Shared host transport: " + message +
                         "\nThis local computer needs Python 3 and a running systemd user manager.");
             if (!hosts.isEmpty()) {
@@ -44,13 +48,18 @@ class SharedHostTransport : public QObject {
         worker->post([r = runner] { delete r; });
     }
     void set(const QString &id, const QString &host, const QString &revision, bool servers,
-             bool containers) {
+             bool containers, const QJsonObject &options, bool interactive) {
         hosts[id] = {{"id", id},
                      {"sshHost", host},
                      {"revision", revision},
                      {"servers", servers && !host.isEmpty()},
-                     {"containers", containers}};
+                     {"containers", containers},
+                     {"sshOptions", options},
+                     {"interactive", interactive}};
         update();
+    }
+    void answer(const QJsonObject &reply) {
+        worker->post([r = runner, reply] { r->request({{"authReply", reply}}); });
     }
     void remove(const QString &id) {
         if (hosts.remove(id))
@@ -110,7 +119,8 @@ void SharedHostDiscovery::stop() {
     wanted = false;
     transport->remove(id);
 }
-void SharedHostDiscovery::refresh(const QString &revision, bool servers, bool containers) {
+void SharedHostDiscovery::refresh(const QString &revision, bool servers, bool containers,
+                                  const QJsonObject &options, bool interactive) {
     if (!sshHost.isEmpty() && !validSshHost(sshHost)) {
         emit failed("Enter an SSH host alias or user@host, without command options.");
         return;
@@ -118,7 +128,14 @@ void SharedHostDiscovery::refresh(const QString &revision, bool servers, bool co
     wanted = true;
     transport->set(id, sshHost,
                    revision.isEmpty() ? QUuid::createUuid().toString(QUuid::Id128) : revision,
-                   servers, containers);
+                   servers, containers, options, interactive);
+}
+void SharedHostDiscovery::answerAuthentication(const QJsonObject &response) {
+    if (!wanted)
+        return;
+    auto reply = response;
+    reply["host"] = id;
+    transport->answer(reply);
 }
 } // namespace Archcodex
 #include "hostconnection.moc"

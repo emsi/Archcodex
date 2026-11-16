@@ -2,7 +2,9 @@
 
 Archcodex has one host configuration for ordinary Codex servers and myCodex
 containers. **Connections → Hosts…** replaces **myCodex hosts…**. Add an SSH alias
-once; both discovery options default to on. This Computer is implicit, always
+or `user@host` once; both discovery options default to on. Optional user, port and
+identity-file fields and native authentication prompts are described in
+[SSH authentication](ssh-authentication.md). This Computer is implicit, always
 enabled and cannot be removed. Its ordinary Codex discovery is always enabled;
 local myCodex discovery can be switched off independently.
 
@@ -59,14 +61,16 @@ three-missed-reply defaults; normal session operation remains event-driven.
 
 ## Compatibility and implementation choices
 
-Host settings are read from `window.ini`'s `hosts` array, falling back to the old
-`containerHosts` array. Existing host IDs, SSH aliases and remote enabled states are
+Host settings are read from `window.ini`'s `hostsV2` array, falling back to `hosts`
+and then `containerHosts`. See [SSH compatibility](ssh-authentication.md#host-edits-and-compatibility)
+for editing and downgrading connection settings. Existing host IDs, SSH aliases and remote enabled states are
 preserved. A legacy disabled local entry becomes an enabled This Computer with
 only myCodex discovery disabled. Missing local entries are supplied automatically;
 saved attempts to disable the local host or its ordinary discovery are normalized.
 The existing command ID `mycodex_hosts` is retained to preserve custom shortcuts.
 
-Existing backend IDs and workspace identity calculations remain unchanged. New
+Default connection identities remain unchanged; explicit SSH options and edited
+connection generations distinguish their execution contexts. New
 ordinary remote profiles use `ssh-unix`, a host-scoped endpoint ID and transient
 relay paths that are not persisted. Profiles remain JSON in the existing SQLite
 tables; there is no schema migration. **Older releases reject saved `ssh-unix`

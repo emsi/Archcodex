@@ -106,10 +106,10 @@ class Mux:
         self.error = ""
         self.reader_task = self.writer_task = None
 
-    async def start(self):
+    async def start(self, timeout=10):
         self.writer.write(MAGIC)
         await asyncio.wait_for(self.writer.drain(), 10)
-        if await asyncio.wait_for(self.reader.readexactly(len(MAGIC)), 10) != MAGIC:
+        if await asyncio.wait_for(self.reader.readexactly(len(MAGIC)), timeout) != MAGIC:
             raise ValueError("Incompatible Archcodex transport protocol")
         self.reader_task = asyncio.create_task(self.receive())
         self.writer_task = asyncio.create_task(self.send())

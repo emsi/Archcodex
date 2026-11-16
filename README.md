@@ -47,9 +47,10 @@ See [update behavior and limitations](docs/updates.md) and
   startup. Archcodex initializes Bash's interactive configuration before
   starting the local Codex TUI; see [external editors](docs/local-tui-connections.md#external-editors-and-terminal-startup).
 - **For myCodex:** Docker access and Python 3 on each selected host, plus a
-  running systemd user manager on the local computer. Remote hosts also need
-  an accepted SSH host key and non-interactive authentication, such as an SSH
-  agent.
+  running systemd user manager on the local computer. Remote hosts use host
+  OpenSSH, including password, encrypted-key and keyboard-interactive authentication.
+  Select **Connections → Hosts… → Connect / retry** to answer prompts; credentials
+  are never saved. See [SSH authentication and host options](docs/ssh-authentication.md).
 
 ## Remember opened terminals
 

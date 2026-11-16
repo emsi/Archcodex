@@ -837,6 +837,23 @@ class RuntimeTests : public QObject {
         QVERIFY(args.contains(f.profile().executable));
         QVERIFY(!args.contains("/different/codex"));
     }
+    void supervisorForwardsOnlyItsHostAgentEnvironment() {
+        const auto command = supervisedTransportCommand(QString(32, 'b'));
+        const auto wrapper = command.indexOf("-c");
+        QVERIFY(wrapper >= 0);
+        QProcess process;
+        auto env = QProcessEnvironment::systemEnvironment();
+        env.insert("SSH_AUTH_SOCK", "/host/agent with spaces");
+        process.setProcessEnvironment(env);
+        // Replace systemd-run with an argv printer; no user service is started.
+        process.start("/usr/bin/python3",
+                      {"-I", "-c", command[wrapper + 1], "/bin/echo", "--user", "--", "fixture"});
+        QVERIFY(process.waitForFinished(5000));
+        QCOMPARE(process.exitCode(), 0);
+        const auto output = process.readAllStandardOutput();
+        QVERIFY(output.contains("--setenv=SSH_AUTH_SOCK=/host/agent with spaces"));
+        QVERIFY(command.contains("--property=LimitCORE=0"));
+    }
     void supervisorUsesBoundedArgumentsAndValidCleanupUnitSyntax() {
         const auto command = supervisedTransportCommand(QString(32, 'a'));
         QVERIFY(command.contains("--property=KillMode=control-group"));
@@ -993,11 +1010,16 @@ class RuntimeTests : public QObject {
         QVERIFY(fixture.methods.contains("thread/loaded/list"));
         const auto before = changes.size();
         fixture.notify("thread/started", {{"thread", fixture.thread("remote-thread")}});
-        QTRY_VERIFY(changes.size() > before);
-        const auto batch = qvariant_cast<QList<Session>>(changes.last()[0]);
-        QVERIFY(std::any_of(batch.begin(), batch.end(), [&](const Session &s) {
-            return s.id == "remote-thread" && s.backendId == p.id && !s.contextRequired;
-        }));
+        // Initial metadata can still arrive after ready(). Wait for this event's
+        // session, not merely for an unrelated batch to increase the count.
+        QTRY_VERIFY([&] {
+            for (auto i = before; i < changes.size(); ++i)
+                for (const auto &session : qvariant_cast<QList<Session>>(changes[i][0]))
+                    if (session.id == "remote-thread" && session.backendId == p.id &&
+                        !session.contextRequired)
+                        return true;
+            return false;
+        }());
         backend.disconnectServer();
     }
     void stalledSshDiscoveryDoesNotDelayLocalProtocolOrClose() {

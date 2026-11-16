@@ -10,6 +10,7 @@
 #include "opening.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
+#include "sshdialogs.h"
 #include "terminal.h"
 #include "updatedialog.h"
 #include "updater.h"
@@ -699,9 +700,12 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         discoveryReport.checked = QDateTime::currentDateTime();
         updateSummary();
     });
-    const bool legacyHosts = !settings.contains("hosts");
-    const auto records = QJsonDocument::fromJson(
-                             settings.value(legacyHosts ? "containerHosts" : "hosts").toByteArray())
+    const bool legacyHosts = !settings.contains("hostsV2") && !settings.contains("hosts");
+    const auto records = QJsonDocument::fromJson(settings
+                                                     .value(settings.contains("hostsV2") ? "hostsV2"
+                                                            : legacyHosts ? "containerHosts"
+                                                                          : "hosts")
+                                                     .toByteArray())
                              .array();
     for (const auto &host : readHosts(records, legacyHosts))
         addHost(host, false);
@@ -1242,23 +1246,90 @@ void Window::addHost(const HostProfile &profile, bool start) {
     connect(d, &SharedHostDiscovery::failed, this, [this, id = host.id](const QString &error) {
         if (!hosts.contains(id) || !hosts[id].enabled)
             return;
+        updateAuthentication(id, {});
         refreshScopeFinished(id, {error});
         hostFeedback[id] = error;
         hostProblems.insert(id);
         updateHostSummary();
     });
     if (start)
-        refreshHost(host.id);
+        refreshHost(host.id, {}, true);
     updateHostSummary();
 }
-void Window::saveHosts() {
-    QJsonArray data;
-    for (const auto &host : hosts)
-        data.append(host.json());
-    QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
-    settings.setValue("hosts", QJsonDocument(data).toJson(QJsonDocument::Compact));
+void Window::updateHost(const HostProfile &host) {
+    if (!hosts.contains(host.id) || hosts[host.id].isLocal() || !host.validate().isEmpty())
+        return;
+    if (hosts[host.id].connectionKey() == host.connectionKey() && hosts[host.id].ssh == host.ssh)
+        return;
+    updateAuthentication(host.id, {});
+    delete hostDiscovery.take(host.id);
+    for (auto &profile : profiles) {
+        if (profile.discoveryHost != host.id)
+            continue;
+        if (auto *backend = backends.value(profile.id))
+            backend->disconnectServer();
+        profile.relaySocket.clear();
+        discoveredPresent.remove(profile.id);
+        opening->updateProfile(profile);
+    }
+    hosts.remove(host.id);
+    hostNames.remove(host.id);
+    hostUsers.remove(host.id);
+    auto replacement = host;
+    replacement.generation = QUuid::createUuid().toString(QUuid::Id128);
+    addHost(replacement, host.enabled);
+    refreshNames();
+    saveHosts();
 }
-void Window::refreshHost(const QString &id, const QString &revision) {
+void Window::updateAuthentication(const QString &id, const QJsonArray &prompts) {
+    QJsonObject selected;
+    for (const auto &value : prompts) {
+        const auto p = value.toObject();
+        if (!p["id"].isString() || !p["attempt"].isString() || !p["text"].isString() ||
+            p["text"].toString().size() > 8192)
+            continue;
+        if (selected.isEmpty() || p["kind"] != "none")
+            selected = p;
+        if (p["kind"] != "none")
+            break;
+    }
+    if (selected.isEmpty()) {
+        if (auto dialog = authenticationDialogs.take(id))
+            dialog->withdraw();
+        return;
+    }
+    if (cancelledAuthentication.value(id) == selected["attempt"].toString())
+        return; // A queued full snapshot must not reopen a just-cancelled dialog.
+    cancelledAuthentication.remove(id);
+    auto dialog = authenticationDialogs.value(id);
+    if (!dialog) {
+        dialog = new SshPromptDialog(this);
+        authenticationDialogs[id] = dialog;
+        connect(dialog, &SshPromptDialog::answered, this, [this, id](const QJsonObject &reply) {
+            if (reply["cancel"].toBool())
+                cancelledAuthentication[id] = reply["attempt"].toString();
+            if (auto *discovery = hostDiscovery.value(id))
+                discovery->answerAuthentication(reply);
+        });
+    }
+    dialog->setPrompt(hosts.value(id).label(), selected);
+    dialog->show();
+}
+void Window::saveHosts() {
+    QJsonArray data, compatible;
+    for (const auto &host : hosts) {
+        data.append(host.json());
+        auto legacy = host.json();
+        // Older clients must not silently connect with an unsupported user/port.
+        if (!host.sshOptions().isEmpty() || !host.generation.isEmpty())
+            legacy["enabled"] = false;
+        compatible.append(legacy);
+    }
+    QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+    settings.setValue("hostsV2", QJsonDocument(data).toJson(QJsonDocument::Compact));
+    settings.setValue("hosts", QJsonDocument(compatible).toJson(QJsonDocument::Compact));
+}
+void Window::refreshHost(const QString &id, const QString &revision, bool interactive) {
     if (!hosts.contains(id) || !hosts[id].enabled)
         return;
     const auto &host = hosts[id];
@@ -1269,7 +1340,8 @@ void Window::refreshHost(const QString &id, const QString &revision) {
         refreshScopeFinished(id);
     } else {
         hostFeedback[id] = "Discovering…";
-        hostDiscovery[id]->refresh(revision, host.servers, host.containers);
+        hostDiscovery[id]->refresh(revision, host.servers, host.containers, host.sshOptions(),
+                                   interactive);
     }
     updateHostSummary();
 }
@@ -1278,8 +1350,9 @@ void Window::setHostEnabled(const QString &id, bool enabled) {
         return;
     hosts[id].enabled = enabled;
     if (enabled)
-        refreshHost(id);
+        refreshHost(id, {}, true);
     else {
+        updateAuthentication(id, {});
         hostDiscovery[id]->stop();
         refreshScopeFinished(id, {"Host disabled during refresh."});
         hostFeedback[id] = "Disabled";
@@ -1294,6 +1367,8 @@ void Window::setHostEnabled(const QString &id, bool enabled) {
 void Window::removeHost(const QString &id) {
     if (!hosts.contains(id) || hosts[id].isLocal())
         return;
+    updateAuthentication(id, {});
+    cancelledAuthentication.remove(id);
     delete hostDiscovery.take(id);
     refreshScopeFinished(id, {"Host removed during refresh."});
     hosts.remove(id);
@@ -1310,8 +1385,7 @@ void Window::removeHost(const QString &id) {
 void Window::updateHostSummary() {
     QStringList details;
     for (const auto &host : hosts)
-        details << (host.isLocal() ? "This Computer" : host.ssh) + ": " +
-                       hostFeedback.value(host.id);
+        details << host.label() + ": " + hostFeedback.value(host.id);
     hostStatus->setToolTip(details.join('\n'));
     hostStatus->setText(hostProblems.isEmpty() ? "Hosts…" : "Host connection issues…");
     hostStatus->setIcon(
@@ -1319,12 +1393,21 @@ void Window::updateHostSummary() {
     emit connectionSummaryChanged();
 }
 void Window::hostsDialog() {
-    QDialog dialog(this);
-    dialog.setWindowTitle("Hosts");
-    auto *layout = new QVBoxLayout(&dialog);
+    if (hostsWindow) {
+        hostsWindow->show();
+        hostsWindow->raise();
+        hostsWindow->activateWindow();
+        return;
+    }
+    auto *dialog = new QDialog(this);
+    hostsWindow = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowTitle("Hosts");
+    auto *layout = new QVBoxLayout(dialog);
     auto *description = new QLabel(
         "Discover Codex servers and myCodex containers on each host. SSH hosts use your "
-        "OpenSSH configuration and non-interactive authentication. Python 3 is required; "
+        "OpenSSH configuration. Select Connect to enter passwords or passphrases; they are never "
+        "saved. Python 3 is required; "
         "Docker is needed only for myCodex. This Computer is always available. "
         "Disabling a remote host retains terminal output; removing it closes its views.");
     description->setWordWrap(true);
@@ -1338,51 +1421,49 @@ void Window::hostsDialog() {
     containers->setObjectName("discoverHostContainers");
     layout->addWidget(servers);
     layout->addWidget(containers);
-    auto currentId = [&] {
+    auto currentId = [list] {
         return list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
     };
     auto *row = new QHBoxLayout;
     layout->addLayout(row);
-    auto button = [&](const QString &text, auto action) {
+    auto button = [row, dialog](const QString &text, auto action) {
         auto *b = new QPushButton(text);
         row->addWidget(b);
-        connect(b, &QPushButton::clicked, &dialog, action);
+        connect(b, &QPushButton::clicked, dialog, action);
         return b;
     };
-    button("Add SSH host…", [&] {
-        bool ok = false;
+    button("Add SSH host…", [this, dialog] {
         if (hosts.size() >= 64) {
             error("At most 64 hosts can be configured.");
             return;
         }
-        const auto ssh = QInputDialog::getText(&dialog, "Add host", "SSH alias or user@host",
-                                               QLineEdit::Normal, {}, &ok)
-                             .trimmed();
-        if (!ok)
+        const auto added =
+            editSshHost(dialog, {QUuid::createUuid().toString(QUuid::WithoutBraces), {}}, hosts);
+        if (!added)
             return;
-        if (!validSshHost(ssh)) {
-            error("Enter an SSH alias or user@host without command options.");
-            return;
-        }
-        for (const auto &host : hosts)
-            if (host.ssh == ssh) {
-                error("This host is already configured.");
-                return;
-            }
-        addHost({QUuid::createUuid().toString(QUuid::WithoutBraces), ssh}, true);
+        addHost(*added, true);
         saveHosts();
     });
-    auto *retry = button("Connect / retry", [&] {
+    auto *edit = button("Edit…", [this, dialog, currentId] {
+        const auto id = currentId();
+        if (!hosts.contains(id) || hosts[id].isLocal())
+            return;
+        const auto edited = editSshHost(dialog, hosts[id], hosts);
+        if (edited)
+            updateHost(*edited);
+    });
+    edit->setObjectName("editHost");
+    auto *retry = button("Connect / retry", [this, currentId] {
         const auto id = currentId();
         setHostEnabled(id, true);
         if (hosts.contains(id) && hosts[id].isLocal())
             discovery->refresh();
     });
-    auto *disable = button("Disable", [&] { setHostEnabled(currentId(), false); });
+    auto *disable = button("Disable", [this, currentId] { setHostEnabled(currentId(), false); });
     disable->setObjectName("disableHost");
-    auto *remove = button("Remove", [&] { removeHost(currentId()); });
+    auto *remove = button("Remove", [this, currentId] { removeHost(currentId()); });
     remove->setObjectName("removeHost");
-    auto selected = [&] {
+    auto selected = [this, currentId, servers, containers, edit, disable, remove, retry] {
         const auto id = currentId();
         const bool valid = hosts.contains(id), local = valid && hosts[id].isLocal();
         QSignalBlocker a(servers), b(containers);
@@ -1392,9 +1473,10 @@ void Window::hostsDialog() {
         containers->setEnabled(valid);
         disable->setEnabled(valid && !local && hosts[id].enabled);
         remove->setEnabled(valid && !local);
+        edit->setEnabled(valid && !local);
         retry->setEnabled(valid);
     };
-    auto populate = [&] {
+    auto populate = [this, list, currentId, selected] {
         const auto current = currentId();
         QSignalBlocker blocker(list);
         list->clear();
@@ -1407,7 +1489,7 @@ void Window::hostsDialog() {
         for (const auto &id : ids) {
             const auto &host = hosts[id];
             const auto label =
-                (host.isLocal() ? "This Computer" : host.ssh) + " — " +
+                host.label() + " — " +
                 (host.isLocal() ? QString("%1 host servers · ").arg(discoveryReport.endpoints)
                                 : QString()) +
                 hostFeedback.value(id);
@@ -1421,8 +1503,8 @@ void Window::hostsDialog() {
             list->setCurrentRow(0);
         selected();
     };
-    connect(list, &QListWidget::currentRowChanged, &dialog, selected);
-    auto options = [&] {
+    connect(list, &QListWidget::currentRowChanged, dialog, selected);
+    auto options = [this, currentId, servers, containers] {
         const auto id = currentId();
         if (!hosts.contains(id))
             return;
@@ -1435,19 +1517,33 @@ void Window::hostsDialog() {
         refreshHost(id);
         saveHosts();
     };
-    connect(servers, &QCheckBox::toggled, &dialog, options);
-    connect(containers, &QCheckBox::toggled, &dialog, options);
-    connect(this, &Window::connectionSummaryChanged, &dialog, populate);
+    connect(servers, &QCheckBox::toggled, dialog, options);
+    connect(containers, &QCheckBox::toggled, dialog, options);
+    connect(this, &Window::connectionSummaryChanged, dialog, populate);
     populate();
     auto *close = new QDialogButtonBox(QDialogButtonBox::Close);
-    connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(close, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
     layout->addWidget(close);
-    dialog.resize(850, 440);
-    dialog.exec();
+    dialog->resize(850, 440);
+    dialog->show();
 }
 void Window::applyHostInventory(const QString &id, const QJsonObject &inventory) {
     if (!hosts.contains(id) || !hosts[id].enabled)
         return;
+    updateAuthentication(id, inventory["prompts"].toArray());
+    const auto state = inventory["state"].toString();
+    if (!state.isEmpty() && state != "connected") {
+        const auto message = inventory["message"].toString("Host connection unavailable");
+        hostFeedback[id] = message;
+        if (state == "connecting" || state == "authenticating")
+            hostProblems.remove(id);
+        else {
+            hostProblems.insert(id);
+            refreshScopeFinished(id, {message});
+        }
+        updateHostSummary();
+        return;
+    }
     for (const auto &field : {"host", "user"}) {
         const auto value = inventory[field].toString();
         if (!value.isEmpty() && validText(value, 255))
@@ -1507,7 +1603,9 @@ QStringList Window::applyRemoteServers(const QString &host, const QJsonObject &i
         }
         paths.insert(path);
         BackendProfile p;
-        p.id = "ssh-" + digest(host + QChar(0x1f) + path);
+        const auto options = hosts[host].sshOptions();
+        const auto scope = hosts[host].discoveryScope();
+        p.id = "ssh-" + digest(scope + QChar(0x1f) + path);
         if (ignoredSockets.contains(p.id))
             continue;
         p.kind = "ssh-unix";
@@ -1520,7 +1618,11 @@ QStringList Window::applyRemoteServers(const QString &host, const QJsonObject &i
         for (const auto &field : {"user", "host", "ownerHome", "cwd", "pid", "default"})
             if (ep.contains(field))
                 p.identity[field] = ep[field];
-        p.environmentId = digest(host + QChar(0x1f) + ep["user"].toString() + QChar(0x1f) +
+        if (!options.isEmpty())
+            p.identity["sshOptions"] = options;
+        if (!hosts[host].generation.isEmpty())
+            p.identity["hostGeneration"] = hosts[host].generation;
+        p.environmentId = digest(scope + QChar(0x1f) + ep["user"].toString() + QChar(0x1f) +
                                  ep["ownerHome"].toString() + QChar(0x1f) + ep["host"].toString() +
                                  (ep["hostEnvironment"].toBool() ? QString() : p.id));
         p.name = serverLabel(p);
@@ -1621,7 +1723,9 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             issues << "Invalid container identity in inventory.";
             continue;
         }
-        const auto key = hostId + QChar(0x1f) + engine + QChar(0x1f) + cid;
+        const auto options = hosts[hostId].sshOptions();
+        const auto scope = hosts[hostId].discoveryScope();
+        const auto key = scope + QChar(0x1f) + engine + QChar(0x1f) + cid;
         const auto digest = [](const QString &s) {
             return QString::fromLatin1(
                 QCryptographicHash::hash(s.toUtf8(), QCryptographicHash::Sha256).toHex());
@@ -1673,6 +1777,10 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
                           {"hostUser", inventory["user"]},
                           {"pid", ep["pid"]},
                           {"cwd", ep["cwd"]}};
+            if (!options.isEmpty())
+                p.identity["sshOptions"] = options;
+            if (!hosts[hostId].generation.isEmpty())
+                p.identity["hostGeneration"] = hosts[hostId].generation;
             p.name = serverLabel(p);
             if (!p.validate().isEmpty()) {
                 issues << p.name + ": " + p.validate();
@@ -1856,17 +1964,28 @@ QString Window::hostId(const BackendProfile &p) const {
     return {};
 }
 QString Window::groupKey(const BackendProfile &p) const {
-    return p.sshHost.isEmpty() ? QString("local-host") : "ssh-host:" + hostId(p);
+    const auto generation = p.identity["hostGeneration"].toString();
+    return p.sshHost.isEmpty() ? QString("local-host")
+                               : "ssh-host:" + hostId(p) +
+                                     (generation.isEmpty() ? QString() : QChar(0x1f) + generation);
 }
 QString Window::groupLabel(const BackendProfile &p) const {
     if (p.sshHost.isEmpty())
         return "This Computer · " + localUser + "@" + localHost;
     const auto id = hostId(p);
+    if (hosts.contains(id) && p.identity["hostGeneration"].toString() != hosts[id].generation) {
+        HostProfile previous{id, p.sshHost};
+        const auto options = p.identity["sshOptions"].toObject();
+        previous.user = options["user"].toString();
+        previous.port = options["port"].toInt();
+        return previous.label() + " · Previous connection";
+    }
     const auto user = hostUsers.value(id);
     const auto name = hostNames.value(id, p.sshHost);
-    return p.sshHost + (name == p.sshHost && user.isEmpty()
-                            ? QString()
-                            : " · " + (user.isEmpty() ? QString() : user + "@") + name);
+    const auto label = hosts.contains(id) ? hosts[id].label() : p.sshHost;
+    return label + (name == p.sshHost && user.isEmpty()
+                        ? QString()
+                        : " · " + (user.isEmpty() ? QString() : user + "@") + name);
 }
 void Window::presentProfile(const BackendProfile &p, const QString &label) {
     for (auto *source : {model, results}) {

@@ -69,7 +69,7 @@ QStringList containerCommand(const BackendProfile &p, const QString &mode, const
 }
 QString transportBootstrap() {
     QJsonObject sources;
-    for (const auto &name : {"mux", "containers", "discover", "transport"})
+    for (const auto &name : {"mux", "containers", "discover", "sshauth", "transport"})
         sources[name] = resourceScript(QString::fromLatin1(name) + ".py");
     // qCompress prepends a four-byte size; Python expects the zlib stream itself.
     const auto bundle = QString::fromLatin1(
@@ -78,7 +78,7 @@ QString transportBootstrap() {
            "S=json.loads(zlib.decompress(base64.b64decode('" +
            bundle +
            "')))\n"
-           "for n in ('mux','containers','discover','transport'):\n"
+           "for n in ('mux','containers','discover','sshauth','transport'):\n"
            " m=types.ModuleType(n);m.__file__='<packaged-'+n+'>';sys.modules[n]=m;exec(S[n],m.__"
            "dict__)\n"
            "sys.modules['transport'].BUNDLE='" +
@@ -113,8 +113,17 @@ QStringList supervisedTransportCommand(const QString &instance) {
                      "--property=TimeoutStopSec=5s",
                      "--property=Restart=no",
                      "--property=UMask=0077",
+                     "--property=LimitCORE=0",
                      "--property=ExecStopPost=" + cleanup.join(' '),
                      "--"};
-    return hostCommand(args + transportCommand("desktop", instance));
+    // Resolve the agent environment on the host, before the user-manager boundary.
+    // Never import environment globally or copy a sandbox-only agent path.
+    const QString prepare = "import os,sys\n"
+                            "args=sys.argv[1:]\n"
+                            "agent=os.environ.get('SSH_AUTH_SOCK')\n"
+                            "if agent: args.insert(1,'--setenv=SSH_AUTH_SOCK='+agent)\n"
+                            "os.execv(args[0],args)\n";
+    return hostCommand(QStringList{"/usr/bin/python3", "-I", "-c", prepare} + args +
+                       transportCommand("desktop", instance));
 }
 } // namespace Archcodex
