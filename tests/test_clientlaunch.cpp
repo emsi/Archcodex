@@ -21,7 +21,7 @@ class ClientLaunchTests : public QObject {
 
   private slots:
     void editorsReachBothClientPaths_data() {
-        QTest::addColumn<bool>("relay");
+        QTest::addColumn<QString>("kind");
         QTest::addColumn<QByteArray>("editor");
         QTest::addColumn<QByteArray>("visual");
         QTest::addColumn<bool>("hostValues");
@@ -30,11 +30,11 @@ class ClientLaunchTests : public QObject {
         const auto values = [](QJsonValue e = QJsonValue::Null, QJsonValue v = QJsonValue::Null) {
             return QJsonObject{{"EDITOR", e}, {"VISUAL", v}};
         };
-        for (bool relay : {false, true}) {
+        for (const auto &kind : {QString("local-unix"), QString("mycodex"), QString("ssh-unix")}) {
             const auto row = [&](const char *name, QByteArray e, QByteArray v, bool host,
                                  QByteArray rc, QJsonObject expected) {
-                QTest::newRow((QByteArray(relay ? "relay-" : "direct-") + name).constData())
-                    << relay << e << v << host << rc << expected;
+                QTest::newRow((kind.toUtf8() + "-" + name).constData())
+                    << kind << e << v << host << rc << expected;
             };
             row("neither", {}, {}, false, {}, values());
             row("editor", "vim -f", {}, false, {}, values("vim -f"));
@@ -56,7 +56,7 @@ class ClientLaunchTests : public QObject {
         }
     }
     void editorsReachBothClientPaths() {
-        QFETCH(bool, relay);
+        QFETCH(QString, kind);
         QFETCH(QByteArray, editor);
         QFETCH(QByteArray, visual);
         QFETCH(bool, hostValues);
@@ -78,8 +78,8 @@ class ClientLaunchTests : public QObject {
                           "('EDITOR','VISUAL','ENTRY_EDITOR','ENTRY_VISUAL')})))\n");
         BackendProfile profile{"b",        "Fixture", "local-unix", dir.filePath("socket $HOME"),
                                executable, false};
-        if (relay) {
-            profile.kind = "mycodex";
+        if (kind != "local-unix") {
+            profile.kind = kind;
             profile.relaySocket = profile.socketPath;
             profile.executable = "/container-only/codex";
             profile.sshHost = "must-not-be-contacted";

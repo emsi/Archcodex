@@ -72,8 +72,8 @@ planned protocol-observation option that requires no Codex changes.
 
 ## Features
 
-- **Automatic discovery:** find existing local Codex servers and running
-  myCodex containers without creating projects manually.
+- **Automatic discovery:** find existing Codex servers and running myCodex
+  containers on local and SSH hosts without creating projects manually.
 - **Organized sessions:** browse hosts, servers, compact project folders and
   conversations, with recent-use ordering.
 - **Live status:** distinguish running and waiting sessions using app-server
@@ -94,16 +94,18 @@ planned protocol-observation option that requires no Codex changes.
 
 ### Connect and open a session
 
-1. Start Codex normally on your local computer, or start your myCodex containers.
+1. Start Codex normally on a local or SSH host, or start your myCodex containers.
 2. Launch Archcodex. Local servers and containers are discovered automatically.
-3. For remote myCodex containers, open **Connections → myCodex hosts…** and add
-   an SSH host alias from your existing SSH configuration.
+3. Open **Connections → Hosts…** and add an SSH alias once to discover both ordinary
+   Codex servers and myCodex containers there. **This Computer** is always present and enabled.
+   Docker is needed only for container discovery; the two discovery options are independent.
 4. Expand a host, server and project in **Projects**. Click once or press Enter on
    a session to open its terminal.
 
 Projects are groups of existing working directories; no project setup is needed.
-Local Codex, local myCodex and remote myCodex hosts have separate roots, and
-identical paths on different servers remain separate.
+Each host has one root containing its ordinary servers and myCodex containers.
+Identical paths on different servers remain separate. See [Hosts](docs/hosts.md)
+for discovery, migration and connection behaviour.
 
 Use **Refresh** to discover connections and forget confirmed missing automatic connections
 that have no open, pending or remembered terminal views. Their local project/history cache
@@ -183,7 +185,7 @@ Backends and Keyboard Shortcuts:
 If discovery is incomplete, click **Discovery limited** in the status bar or
 open **Connections → Discovery details**. The details include explanations,
 technical information and retry/add-connection/copy-report actions. Use
-**Connections → myCodex hosts…** to retry or disable a container host.
+**Connections → Hosts…** to retry a host or disable a remote host.
 
 The Codex TUI runs on the **local computer running Archcodex**. For myCodex
 connections, the app-server, tools and workspace stay in the selected container.
@@ -194,9 +196,8 @@ See [myCodex integration](docs/mycodex.md) for details.
 
 ### Current scope
 
-The current source supports existing local Unix-socket
-app-servers and local or SSH-hosted myCodex containers. Direct TCP connections and generic SSH forwarding
-to non-container app-servers remain planned. Native Wayland is not yet qualified;
+The current source supports existing local and SSH-hosted Unix-socket app-servers,
+and local or SSH-hosted myCodex containers. Direct TCP connections remain planned. Native Wayland is not yet qualified;
 the Flatpak uses X11/XWayland.
 
 Conversation search depends on the server's experimental search API. See

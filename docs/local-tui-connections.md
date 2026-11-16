@@ -1,8 +1,7 @@
 # Local TUI connections: current plan
 
-Updated: 2026-11-11. Status: adopted; the shared myCodex transport and desktop
-TUI launch are implemented in 0.6.0. Generic SSH socket profiles and direct TCP
-remain future adapters. See [current integration](mycodex.md) and the
+Updated: 2026-11-16. Status: adopted; shared host/container transport and desktop
+TUI launch are implemented. Direct TCP remains a future adapter. See [current integration](mycodex.md) and the
 [security design](container-transport-security.md).
 
 ## Agreed connection model
@@ -43,8 +42,8 @@ when their conversation files or IDs overlap.
 ## Transport selection
 
 - Existing local host socket: direct access for the host TUI.
-- Remote host-visible socket: native OpenSSH Unix-socket forwarding, shared by
-  clients and owned by Archcodex; planned adapter, not yet implemented.
+- Remote host-visible socket: registered directly by the existing SSH host helper,
+  using the same multiplexed connection as containers. See [Hosts](hosts.md).
 - Container-private socket: one shared, pipe-only helper attachment per container
   and runtime user. No remote listener, published socket or recreated container.
 

@@ -23,9 +23,23 @@ if role == 'ssh':
         sys.exit()
     command = shlex.split(args[-1])
     assert command.pop(0) == 'exec'
+    index = command.index('-c') + 1
+    fixture = """
+import os,json,time
+def fixture_snapshot(default=None,aliases=()):
+ data=json.load(open(os.environ['ARCHCODEX_TRANSPORT_FIXTURE']+'/state.json'))
+ time.sleep(data.get('scanDelay',0))
+ return data.get('hostEndpoints',[]),data.get('hostIssues',[])
+sys.modules['discover'].snapshot=fixture_snapshot
+sys.modules['transport'].main()
+"""
+    command[index] = command[index].replace("sys.modules['transport'].main()", fixture)
     os.execvp(command[0], command)
 
 if args[:2] == ['context', 'ls']:
+    if json.loads((root / 'state.json').read_text()).get('dockerMissing'):
+        print('Docker unavailable in fixture', file=sys.stderr)
+        sys.exit(127)
     print(json.dumps({'Name': 'fixture', 'DockerEndpoint': 'unix:///fixture/docker.sock'}))
     sys.exit()
 if args[:2] == ['context', 'inspect']:

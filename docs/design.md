@@ -1,8 +1,8 @@
 # Project design
 
-Current delivery: 0.4.0 implements direct local/SSH myCodex integration at the
-user's request, ahead of the original TCP → generic SSH → myCodex sequence below.
-The original roadmap remains historical context. [myCodex integration](mycodex.md)
+Current delivery: unified [Hosts](hosts.md) discovers ordinary Codex servers and
+myCodex containers locally and over the same SSH connection. The original roadmap
+below remains historical context. [myCodex integration](mycodex.md)
 and [implementation](implementation.md) describe the adopted route and current limits.
 
 

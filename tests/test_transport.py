@@ -249,13 +249,15 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         self.env = dict(os.environ, ARCHCODEX_TRANSPORT_FIXTURE=str(self.root),
                         PATH=str(self.root) + os.pathsep + os.environ.get('PATH', ''))
 
-    async def start(self, remote=True, count=2):
+    async def start(self, remote=True, count=2, native=False, docker=True):
         self.proc = await asyncio.create_subprocess_exec(*transport.command('desktop'), self.token,
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
             env=self.env, limit=mux.JSON_LIMIT + 1)
-        self.proc.stdin.write(mux.encoded({'hosts': [{'id': 'host', 'sshHost': 'fixture-host' if remote else ''}]}) + b'\n')
+        self.proc.stdin.write(mux.encoded({'hosts': [{'id': 'host', 'sshHost': 'fixture-host' if remote else '',
+                                                              'servers': native, 'containers': docker}]}) + b'\n')
         await self.proc.stdin.drain()
-        return await self.inventory(lambda report: sum(len(c.get('endpoints', [])) for c in report.get('containers', [])) == count)
+        return await self.inventory(lambda report: sum(len(c.get('endpoints', [])) for c in report.get('containers', [])) == count
+                                    and (not native or (report.get('settled') and report.get('hostServers', {}).get('complete'))))
 
     async def inventory(self, predicate):
         async def read():
@@ -305,6 +307,102 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
         finally:
             writer.close()
             await writer.wait_closed()
+
+    def state(self, **changes):
+        path = self.root / 'state.json'
+        state = json.loads(path.read_text())
+        state.update(changes)
+        path.write_text(json.dumps(state))
+        return state
+
+    async def configure(self, revision, *, native=True, docker=True):
+        self.proc.stdin.write(mux.encoded({'hosts': [{'id': 'host', 'sshHost': 'fixture-host',
+            'servers': native, 'containers': docker, 'revision': revision}]}) + b'\n')
+        await self.proc.stdin.drain()
+
+    async def test_native_and_container_servers_share_ssh_without_crossing_routes(self):
+        state = self.state()
+        self.mark_routes = True
+        self.state(hostEndpoints=state['endpoints']['1' * 64])
+        report = await self.start(native=True)
+        native = report['hostServers']['endpoints'][0]['localSocket']
+        container = next(c['endpoints'][0]['localSocket'] for c in report['containers'] if c['containerId'] == '2' * 64)
+        results = await asyncio.gather(*(self.roundtrip(native if i % 2 else container, b'probe') for i in range(40)))
+        self.assertEqual(results, [b'11111' if i % 2 else b'22222' for i in range(40)])
+        self.assertEqual(sum(c['role'] == 'ssh' for c in self.commands()), 1)
+        self.assertEqual(sum(c['role'] == 'docker:exec' for c in self.commands()), 2)
+
+    async def test_native_servers_work_when_docker_is_unavailable(self):
+        state = self.state()
+        self.state(hostEndpoints=state['endpoints']['1' * 64], dockerMissing=True)
+        report = await self.start(native=True, count=0)
+        self.assertTrue(report['hostServers']['complete'])
+        self.assertFalse(report['complete'])
+        self.assertTrue(report['issues'])
+        path = report['hostServers']['endpoints'][0]['localSocket']
+        self.assertEqual(await self.roundtrip(path, b'native'), b'native')
+        self.assertEqual(sum(c['role'] == 'ssh' for c in self.commands()), 1)
+
+    async def test_slow_native_scan_and_container_toggle_preserve_native_client(self):
+        state = self.state()
+        self.state(hostEndpoints=state['endpoints']['1' * 64])
+        report = await self.start(native=True)
+        path = report['hostServers']['endpoints'][0]['localSocket']
+        reader, writer = await asyncio.open_unix_connection(path)
+        try:
+            writer.write(b'initial')
+            await writer.drain()
+            self.assertEqual(await reader.readexactly(7), b'initial')
+            self.state(scanDelay=1.5)
+            await self.configure('slow')
+            await asyncio.sleep(0.15)
+            writer.write(b'fast')
+            await writer.drain()
+            self.assertEqual(await asyncio.wait_for(reader.readexactly(4), 0.5), b'fast')
+            await self.inventory(lambda r: r.get('revision') == 'slow' and r.get('settled'))
+            self.state(scanDelay=0)
+            await self.configure('native-only', docker=False)
+            report = await self.inventory(lambda r: r.get('revision') == 'native-only' and r.get('settled'))
+            self.assertFalse(report['containers'])
+            self.assertEqual(report['hostServers']['endpoints'][0]['localSocket'], path)
+            writer.write(b'preserved')
+            await writer.drain()
+            self.assertEqual(await reader.readexactly(9), b'preserved')
+            self.assertEqual(sum(c['role'] == 'ssh' for c in self.commands()), 1)
+        finally:
+            writer.close()
+            await writer.wait_closed()
+
+    async def test_incomplete_native_scan_keeps_existing_routes_until_fresh_evidence(self):
+        state = self.state()
+        self.state(hostEndpoints=state['endpoints']['1' * 64])
+        report = await self.start(native=True, docker=False, count=0)
+        path = report['hostServers']['endpoints'][0]['localSocket']
+        self.state(hostEndpoints=[], hostIssues=[{'summary': 'Procfs access unavailable'}])
+        await self.configure('partial', docker=False)
+        report = await self.inventory(lambda r: r.get('revision') == 'partial' and r.get('settled'))
+        self.assertFalse(report['hostServers']['complete'])
+        self.assertEqual(report['hostServers']['endpoints'][0]['localSocket'], path)
+        self.assertEqual(await self.roundtrip(path, b'kept'), b'kept')
+        self.state(hostIssues=[])
+        await self.configure('complete', docker=False)
+        report = await self.inventory(lambda r: r.get('revision') == 'complete' and r.get('settled'))
+        self.assertTrue(report['hostServers']['complete'])
+        self.assertFalse(report['hostServers']['endpoints'])
+        self.assertFalse(Path(path).exists())
+
+    async def test_native_endpoint_replacement_invalidates_old_token(self):
+        state = self.state()
+        self.state(hostEndpoints=state['endpoints']['1' * 64])
+        report = await self.start(native=True, docker=False, count=0)
+        old = report['hostServers']['endpoints'][0]['localSocket']
+        self.state(hostEndpoints=state['endpoints']['2' * 64])
+        await self.configure('replacement', docker=False)
+        report = await self.inventory(lambda r: r.get('revision') == 'replacement' and r.get('settled'))
+        new = report['hostServers']['endpoints'][0]['localSocket']
+        self.assertNotEqual(old, new)
+        self.assertFalse(Path(old).exists())
+        self.assertEqual(await self.roundtrip(new, b'new'), b'new')
 
     async def test_refresh_has_fresh_engine_and_endpoint_evidence_without_restarting_clients(self):
         report = await self.start(True)

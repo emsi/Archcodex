@@ -87,7 +87,7 @@ SettingsDialog::SettingsDialog(bool hide, bool showAll, const QString &localExec
     help(application,
          "Hide entries without saved history. Open terminals bypass this unsaved-session filter. "
          "This setting also appears in the View menu.\n\n"
-         "myCodex terminals use Codex on this computer, including for remote containers. "
+         "Remote and myCodex terminals use Codex on this computer. "
          "Automatic selection reuses the executable found by local server discovery. "
          "If needed, enter the absolute path reported by command -v codex in your local terminal. "
          "This does not change the executable of a local host server or start an app-server.");

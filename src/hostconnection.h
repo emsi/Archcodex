@@ -5,21 +5,21 @@
 #include <QTimer>
 namespace Archcodex {
 class JsonProcess;
-class ContainerTransport;
-class ContainerDiscovery : public QObject {
+class SharedHostTransport;
+class SharedHostDiscovery : public QObject {
     Q_OBJECT
   public:
-    ContainerDiscovery(const QString &id, const QString &sshHost = {}, QObject *parent = nullptr);
-    ~ContainerDiscovery() override;
+    SharedHostDiscovery(const QString &id, const QString &sshHost = {}, QObject *parent = nullptr);
+    ~SharedHostDiscovery() override;
     const QString id, sshHost;
-    void refresh(const QString &revision = {});
+    void refresh(const QString &revision = {}, bool servers = true, bool containers = true);
     void stop();
   signals:
     void snapshot(const QJsonObject &inventory);
     void failed(const QString &error);
 
   private:
-    std::shared_ptr<ContainerTransport> transport;
+    std::shared_ptr<SharedHostTransport> transport;
     bool wanted = false;
 };
 } // namespace Archcodex

@@ -101,7 +101,7 @@ class ChildConnection:
         await cancel(self.error_task)
 
 
-class ContainerAgent:
+class EndpointAgent:
     def __init__(self):
         self.endpoints = {}
         self.snapshot = {}
@@ -131,7 +131,11 @@ class ContainerAgent:
                 revision = self.revision
                 paths = [default] + [v['path'] for v in self.endpoints.values()]
                 watcher.configure(roots, paths)
-                endpoints, issues = discover.snapshot(default=default, aliases=paths)
+                # Procfs/filesystem inspection must not stop multiplexed terminal I/O.
+                endpoints, issues = await asyncio.to_thread(discover.snapshot, default=default, aliases=paths)
+                if revision != self.revision:
+                    dirty.set()
+                    continue
                 registered = {}
                 for ep in endpoints:
                     try:
@@ -146,12 +150,20 @@ class ContainerAgent:
                     except OSError:
                         issues.append(containers.issue('Socket changed during endpoint inspection'))
                         continue
+                if issues:
+                    # An incomplete scan cannot revoke a previously registered route.
+                    # Every new open still revalidates the socket and peer identity.
+                    paths_seen = {ep['path'] for ep in registered.values()}
+                    for token, ep in self.endpoints.items():
+                        if ep['path'] not in paths_seen:
+                            registered[token] = ep
                 self.endpoints = registered
                 public = [{k: v for k, v in ep.items() if not k.startswith('_')}
                           for ep in registered.values()]
                 issues += watcher.configure(roots, [default] + [ep['path'] for ep in public])
                 self.snapshot = {'runtimeUser': pwd.getpwuid(uid).pw_name,
-                                 'endpoints': public, 'issues': issues, 'revision': revision}
+                                 'endpoints': public, 'issues': issues, 'revision': revision,
+                                 'complete': not issues, 'settled': True}
                 self.changed.set()
         finally:
             loop.remove_reader(watcher.fd)
@@ -246,7 +258,7 @@ class SharedInventory(containers.Inventory):
             settled &= all(desc.get('issues') or desc.get('paused') or
                            desc.get('endpointRevision') == self.revision
                            for desc in self.records.values())
-            await mux.report(self.consumer, {'host': self.host, 'user': self.user,
+            await self.consumer({'host': self.host, 'user': self.user,
                 'containers': list(self.records.values()), 'issues': list(self.errors.values()),
                 'revision': self.revision, 'engines': self.engine_scans,
                 'settled': bool(settled),
@@ -364,25 +376,124 @@ class SharedInventory(containers.Inventory):
 
 
 class HostAgent:
+    """One host connection, with independently available native and Docker inventory."""
     def __init__(self):
         self.inventory = SharedInventory()
+        self.native = EndpointAgent()
         self.inventory_open = False
+        self.tasks = {}
+        self.reports = {}
+        self.changed = asyncio.Event()
+        self.revision = ''
+        self.options = {}
+        self.configuration_lock = asyncio.Lock()
+
+    def publish(self, source, report):
+        self.reports[source] = report
+        self.changed.set()
+
+    async def source(self, name):
+        delay = 1
+        while True:
+            try:
+                if name == 'servers':
+                    async def output():
+                        while True:
+                            await self.native.changed.wait()
+                            self.native.changed.clear()
+                            self.publish(name, self.native.snapshot)
+                    scan = asyncio.create_task(self.native.scan())
+                    sender = asyncio.create_task(output())
+                    try:
+                        done, _ = await asyncio.wait([scan, sender], return_when=asyncio.FIRST_COMPLETED)
+                        for task in done:
+                            task.result()
+                    finally:
+                        await cancel(scan, sender)
+                else:
+                    self.inventory.revision = self.revision
+                    async def report(data):
+                        self.publish(name, data)
+                    await self.inventory.run(report)
+                raise ValueError('Discovery subscription ended')
+            except (OSError, ValueError, asyncio.TimeoutError) as error:
+                self.publish(name, {'endpoints': self.native.snapshot.get('endpoints', []) if name == 'servers' else [],
+                    'containers': [], 'complete': False,
+                    'settled': True, 'revision': self.revision,
+                    'issues': [containers.issue(('Codex' if name == 'servers' else 'myCodex') +
+                                                ' discovery unavailable: ' + (str(error).strip() or 'request timed out'),
+                                                str(error)[:4096])]})
+            await asyncio.sleep(delay)  # Reconnect a failed subscription only.
+            delay = min(30, delay * 2)
+            if name == 'containers':
+                self.inventory = SharedInventory()
+
+    async def configure(self, request):
+        async with self.configuration_lock:
+            await self.configure_sources(request)
+
+    async def configure_sources(self, request):
+        self.revision = request.get('revision', '')
+        for name in ('servers', 'containers'):
+            enabled = request.get(name, name == 'containers')
+            if not isinstance(enabled, bool):
+                raise ValueError('Invalid host discovery option')
+            self.options[name] = enabled
+            if not enabled:
+                await cancel(self.tasks.pop(name, None))
+                self.reports[name] = {'endpoints': [], 'containers': [], 'issues': [],
+                                      'complete': False, 'settled': True, 'revision': self.revision}
+                if name == 'servers':
+                    self.native.endpoints.clear()
+                    self.native.snapshot = {}
+                    self.native.changed.clear()
+            elif name not in self.tasks:
+                self.reports[name] = {'endpoints': [], 'containers': [], 'issues': [],
+                                      'complete': False, 'settled': False}
+                if name == 'containers':
+                    self.inventory = SharedInventory()
+                self.tasks[name] = asyncio.create_task(self.source(name))
+        self.native.revision = self.revision
+        self.native.dirty.set()
+        if self.options['containers']:
+            await self.inventory.refresh(self.revision)
+        self.changed.set()
+
+    async def output(self, stream):
+        while True:
+            await self.changed.wait()
+            self.changed.clear()
+            report = dict(self.reports.get('containers', {}))
+            native = dict(self.reports.get('servers', {}))
+            report.update(host=socket.gethostname(), user=pwd.getpwuid(os.getuid()).pw_name,
+                          hostServers=native, revision=self.revision)
+            report['settled'] = all(r.get('settled') and r.get('revision') == self.revision
+                                    for r in self.reports.values())
+            await mux.report(stream, report)
 
     async def accept(self, stream, request):
         if request.get('kind') == 'refresh':
-            await self.inventory.refresh(request.get('revision', ''))
+            await self.configure(request)
             stream.mux.accepted(stream)
         elif request.get('kind') == 'inventory':
             if self.inventory_open:
                 raise ValueError('Inventory already attached')
             self.inventory_open = True
-            self.inventory.revision = request.get('revision', '')
-            stream.mux.accepted(stream)
             try:
-                await mux.produce(stream, self.inventory.run(stream))
+                await self.configure(request)
+                stream.mux.accepted(stream)
+                await mux.produce(stream, self.output(stream))
             finally:
+                await cancel(*self.tasks.values())
+                self.tasks.clear()
                 self.inventory_open = False
+        elif request.get('kind') == 'host-endpoint':
+            if not self.options.get('servers'):
+                raise ValueError('Host server discovery is disabled')
+            await self.native.accept(stream, dict(request, kind='endpoint'))
         else:
+            if not self.options.get('containers'):
+                raise ValueError('Container discovery is disabled')
             await self.inventory.accept(stream, request)
 
     async def run(self, reader, writer):
@@ -475,9 +586,10 @@ class LocalEndpoint:
 
 
 class DesktopHost:
-    def __init__(self, desktop, ident, host, revision=0):
+    def __init__(self, desktop, ident, host, revision=0, servers=False, containers_enabled=True):
         self.desktop, self.ident, self.host = desktop, ident, host
         self.revision = revision
+        self.servers, self.containers = servers, containers_enabled
         self.endpoints = {}
         self.delay = 1
         self.active = None
@@ -486,6 +598,19 @@ class DesktopHost:
 
     async def apply(self, report, open_stream):
         present = set()
+        for ep in report.get('hostServers', {}).get('endpoints', []):
+            token = ep.get('endpointToken', '')
+            if not TOKEN.fullmatch(token):
+                raise ValueError('Invalid registered host endpoint')
+            key = ('host', token)
+            present.add(key)
+            if key not in self.endpoints:
+                request = {'kind': 'host-endpoint', 'token': token}
+                endpoint = LocalEndpoint(os.path.join(self.desktop.directory, 's' + secrets.token_hex(12)),
+                                         lambda request=request: open_stream(request))
+                await endpoint.start()
+                self.endpoints[key] = endpoint
+            ep['localSocket'] = self.endpoints[key].path
         for container in report.get('containers', []):
             engine, cid = container.get('engine', ''), container.get('containerId', '')
             if not containers.CID.fullmatch(cid) or not containers.text(engine, 256):
@@ -530,7 +655,8 @@ class DesktopHost:
         try:
             connection = await child.start()
             self.active = connection
-            inventory = await connection.open({'kind': 'inventory', 'revision': self.revision})
+            inventory = await connection.open({'kind': 'inventory', 'revision': self.revision,
+                                               'servers': self.servers, 'containers': self.containers})
             async for report in mux.messages(inventory):
                 await self.apply(report, connection.open)
             raise mux.Closed('Host inventory disconnected')
@@ -555,7 +681,8 @@ class DesktopHost:
         try:
             await connection.start()
             self.active = connection
-            inventory = await connection.open({'kind': 'inventory', 'revision': self.revision})
+            inventory = await connection.open({'kind': 'inventory', 'revision': self.revision,
+                                               'servers': self.servers, 'containers': self.containers})
             async for report in mux.messages(inventory):
                 await self.apply(report, connection.open)
             raise mux.Closed('Local container inventory disconnected')
@@ -582,8 +709,9 @@ class DesktopHost:
         await cancel(self.refresh_task, self.task)
         await self.clear()
 
-    def request_refresh(self, revision):
+    def request_refresh(self, revision, servers=False, containers_enabled=True):
         self.revision = revision
+        self.servers, self.containers = servers, containers_enabled
         if not self.refresh_task or self.refresh_task.done():
             self.refresh_task = asyncio.create_task(self.refresh())
 
@@ -592,7 +720,8 @@ class DesktopHost:
             try:
                 while True:
                     revision = self.revision
-                    stream = await self.active.open({'kind': 'refresh', 'revision': revision})
+                    stream = await self.active.open({'kind': 'refresh', 'revision': revision,
+                                                     'servers': self.servers, 'containers': self.containers})
                     stream.close()
                     if revision == self.revision:
                         break
@@ -621,21 +750,24 @@ class Desktop:
             ident, host = entry.get('id', ''), entry.get('sshHost', '')
             if not ident or not containers.text(ident, 128) or (host and not HOST.fullmatch(host)) or ident in desired:
                 raise ValueError('Invalid SSH host identity')
-            desired[ident] = (host, entry.get('revision', 0))
+            servers, docker = entry.get('servers', False), entry.get('containers', True)
+            if not isinstance(servers, bool) or not isinstance(docker, bool):
+                raise ValueError('Invalid host discovery options')
+            desired[ident] = (host, entry.get('revision', 0), servers, docker)
         for ident in list(self.hosts):
             config, host = self.hosts[ident]
             replacement = desired.get(ident)
             if replacement and replacement[0] == config[0]:
                 if replacement != config:
                     self.hosts[ident] = (replacement, host)
-                    host.request_refresh(replacement[1])
+                    host.request_refresh(*replacement[1:])
             else:
                 del self.hosts[ident]
                 await host.stop()
                 self.reports.pop(ident, None)
         for ident, config in desired.items():
             if ident not in self.hosts:
-                self.hosts[ident] = (config, DesktopHost(self, ident, config[0], config[1]))
+                self.hosts[ident] = (config, DesktopHost(self, ident, *config))
         self.changed.set()
 
     async def output(self, writer):
@@ -673,7 +805,7 @@ async def run(role, token=''):
     elif role == 'host':
         operation = HostAgent().run(reader, writer)
     elif role == 'container':
-        operation = ContainerAgent().run(reader, writer)
+        operation = EndpointAgent().run(reader, writer)
     elif role == 'proxy':
         # Flatpak observer boundary only; connects to the shared local endpoint.
         if not token.startswith('/') or not containers.text(token):

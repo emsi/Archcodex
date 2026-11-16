@@ -21,8 +21,12 @@ QString BackendProfile::validate() const {
         return QStringLiteral("Invalid connection ID.");
     if (name.trimmed().isEmpty() || !validText(name, 160))
         return QStringLiteral("Enter a connection name.");
-    if (kind != "local-unix" && !isContainer())
+    if (!isLocal() && !isContainer() && kind != "ssh-unix")
         return QStringLiteral("Unsupported connection type.");
+    if (kind == "ssh-unix" &&
+        (sshHost.isEmpty() || !validSshHost(sshHost) || discoveryHost.isEmpty() ||
+         !validText(discoveryHost, 128) || socketPath.isEmpty()))
+        return QStringLiteral("Invalid SSH host or discovered server endpoint.");
     if (isContainer()) {
         static const QRegularExpression cid("^[a-f0-9]{64}$");
         if (!cid.match(containerId).hasMatch() || containerEpoch.isEmpty() ||
@@ -223,9 +227,9 @@ QString detectedLocalCodex(const QJsonArray &endpoints) {
 }
 QStringList clientArguments(const BackendProfile &p, const QString &id, const QString &cwd,
                             const QString &localExecutable) {
-    if (p.isContainer() && p.relaySocket.isEmpty())
+    if (p.usesRelay() && p.relaySocket.isEmpty())
         return {}; // Never fall back to a default or a stale container command.
-    if (p.isContainer()) {
+    if (p.usesRelay()) {
         const QJsonObject request{{"socket", p.relaySocket},
                                   {"thread", id},
                                   {"cwd", cwd},
@@ -288,7 +292,7 @@ QString serverTreeLabel(const BackendProfile &p) {
     if (!p.discovered)
         return p.name;
     if (p.isContainer())
-        return p.identity["containerName"].toString("Container").left(150);
+        return ("myCodex · " + p.identity["containerName"].toString("Container")).left(150);
     auto local = p;
     local.identity.remove("user");
     local.identity.remove("host");

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
-#include "containerdiscovery.h"
+#include "hostconnection.h"
 #include "jsonprocess.h"
 #include "launch.h"
 #include <QJsonArray>
@@ -8,19 +8,19 @@
 
 namespace Archcodex {
 // Full snapshots preserve JsonProcess's coalescing without losing another host.
-class ContainerTransport : public QObject {
+class SharedHostTransport : public QObject {
     Q_OBJECT
   public:
-    std::shared_ptr<Worker> worker = Worker::forHost("container-transport");
+    std::shared_ptr<Worker> worker = Worker::forHost("host-transport");
     JsonProcess *runner = new JsonProcess(worker->context);
     QMap<QString, QJsonObject> hosts;
     QTimer retry;
     bool started = false;
     int delay = 1000;
-    ContainerTransport() {
+    SharedHostTransport() {
         runner->moveToThread(worker->context->thread());
         retry.setSingleShot(true);
-        connect(&retry, &QTimer::timeout, this, &ContainerTransport::update);
+        connect(&retry, &QTimer::timeout, this, &SharedHostTransport::update);
         connect(runner, &JsonProcess::message, this, [this](const QJsonObject &message) {
             delay = 1000;
             const auto inventories = message["hosts"].toObject();
@@ -32,7 +32,7 @@ class ContainerTransport : public QObject {
         });
         connect(runner, &JsonProcess::failed, this, [this](const QString &message) {
             started = false;
-            emit failed("Shared container transport: " + message +
+            emit failed("Shared host transport: " + message +
                         "\nThis local computer needs Python 3 and a running systemd user manager.");
             if (!hosts.isEmpty()) {
                 retry.start(delay);
@@ -40,11 +40,16 @@ class ContainerTransport : public QObject {
             }
         });
     }
-    ~ContainerTransport() override {
+    ~SharedHostTransport() override {
         worker->post([r = runner] { delete r; });
     }
-    void set(const QString &id, const QString &host, const QString &revision) {
-        hosts[id] = {{"id", id}, {"sshHost", host}, {"revision", revision}};
+    void set(const QString &id, const QString &host, const QString &revision, bool servers,
+             bool containers) {
+        hosts[id] = {{"id", id},
+                     {"sshHost", host},
+                     {"revision", revision},
+                     {"servers", servers && !host.isEmpty()},
+                     {"containers", containers}};
         update();
     }
     void remove(const QString &id) {
@@ -76,43 +81,44 @@ class ContainerTransport : public QObject {
     void failed(const QString &message);
 };
 
-static std::shared_ptr<ContainerTransport> sharedTransport() {
-    static std::weak_ptr<ContainerTransport> shared;
+static std::shared_ptr<SharedHostTransport> sharedTransport() {
+    static std::weak_ptr<SharedHostTransport> shared;
     auto instance = shared.lock();
     if (!instance) {
-        instance = std::make_shared<ContainerTransport>();
+        instance = std::make_shared<SharedHostTransport>();
         shared = instance;
     }
     return instance;
 }
 
-ContainerDiscovery::ContainerDiscovery(const QString &key, const QString &host, QObject *parent)
+SharedHostDiscovery::SharedHostDiscovery(const QString &key, const QString &host, QObject *parent)
     : QObject(parent), id(key), sshHost(host), transport(sharedTransport()) {
-    connect(transport.get(), &ContainerTransport::snapshot, this,
+    connect(transport.get(), &SharedHostTransport::snapshot, this,
             [this](const QString &key, const QJsonObject &inventory) {
                 if (wanted && key == id)
                     emit snapshot(inventory);
             });
-    connect(transport.get(), &ContainerTransport::failed, this, [this](const QString &message) {
+    connect(transport.get(), &SharedHostTransport::failed, this, [this](const QString &message) {
         if (wanted)
             emit failed(message);
     });
 }
-ContainerDiscovery::~ContainerDiscovery() {
+SharedHostDiscovery::~SharedHostDiscovery() {
     stop();
 }
-void ContainerDiscovery::stop() {
+void SharedHostDiscovery::stop() {
     wanted = false;
     transport->remove(id);
 }
-void ContainerDiscovery::refresh(const QString &revision) {
+void SharedHostDiscovery::refresh(const QString &revision, bool servers, bool containers) {
     if (!sshHost.isEmpty() && !validSshHost(sshHost)) {
         emit failed("Enter an SSH host alias or user@host, without command options.");
         return;
     }
     wanted = true;
     transport->set(id, sshHost,
-                   revision.isEmpty() ? QUuid::createUuid().toString(QUuid::Id128) : revision);
+                   revision.isEmpty() ? QUuid::createUuid().toString(QUuid::Id128) : revision,
+                   servers, containers);
 }
 } // namespace Archcodex
-#include "containerdiscovery.moc"
+#include "hostconnection.moc"

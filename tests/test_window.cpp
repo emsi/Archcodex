@@ -1740,7 +1740,89 @@ class WindowTests : public QObject {
         dispose(menu);
         window.close();
     }
-    void localHostAndContainerHostsHaveSeparateGroupsWithShortLabels() {
+    void thisComputerCannotBeDisabledOrRemoved() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        const auto id = window.hosts.cbegin().key();
+        QVERIFY(window.hosts[id].isLocal());
+        window.setHostEnabled(id, false);
+        window.removeHost(id);
+        QVERIFY(window.hosts.contains(id));
+        QVERIFY(window.hosts[id].enabled);
+        QVERIFY(window.hosts[id].servers);
+        QTimer::singleShot(0, &window, [&] {
+            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
+            QVERIFY(dialog);
+            auto close = qScopeGuard([&] { dialog->reject(); });
+            QVERIFY(!dialog->findChild<QPushButton *>("disableHost")->isEnabled());
+            QVERIFY(!dialog->findChild<QPushButton *>("removeHost")->isEnabled());
+            QVERIFY(dialog->findChild<QCheckBox *>("discoverHostServers")->isChecked());
+            QVERIFY(!dialog->findChild<QCheckBox *>("discoverHostServers")->isEnabled());
+        });
+        window.hostsDialog();
+        window.saveHosts();
+        window.close();
+        Window restored(data.path(), false);
+        QVERIFY(restored.hosts[id].enabled);
+        restored.close();
+    }
+    void remoteNativeInventoryIsScopedAndLocalRefreshCannotRetireIt() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        QJsonObject endpoint{{"path", "/tmp/same.sock"},
+                             {"localSocket", "/tmp/fixture-relay"},
+                             {"user", "alice"},
+                             {"host", "remote"},
+                             {"ownerHome", "/home/alice"},
+                             {"hostEnvironment", true},
+                             {"default", true}};
+        QJsonObject inventory{{"endpoints", QJsonArray{endpoint}},
+                              {"issues", QJsonArray{}},
+                              {"complete", true},
+                              {"revision", "fresh"}};
+        QStringList ids;
+        for (const auto &host : {QString("first"), QString("second")}) {
+            window.addHost({host, host + "-ssh"}, false);
+            const auto id =
+                "ssh-" + QString::fromLatin1(QCryptographicHash::hash(
+                                                 (host + QChar(0x1f) + "/tmp/same.sock").toUtf8(),
+                                                 QCryptographicHash::Sha256)
+                                                 .toHex());
+            ids << id;
+            window.paused.insert(id); // Prevent external connections in this routing test.
+            QVERIFY(window.applyRemoteServers(host, inventory).isEmpty());
+            QCOMPARE(window.profiles[id].discoveryHost, host);
+            QVERIFY(window.profiles[id].usesRelay());
+        }
+        QCOMPARE(window.profiles.size(), 2);
+        QVERIFY(window.groupKey(window.profiles[ids[0]]) !=
+                window.groupKey(window.profiles[ids[1]]));
+        for (const auto &id : ids)
+            window.paused.remove(id);
+        window.refreshRevision = "fresh";
+        window.refreshScopes = {"local", "first", "second"};
+        window.applyDiscovery({}, {}, "fresh");
+        QVERIFY(window.retirements.isEmpty());
+        QCOMPARE(window.profiles.size(), 2);
+        inventory["endpoints"] = QJsonArray{};
+        inventory["complete"] = false;
+        window.applyRemoteServers("first", inventory);
+        QVERIFY(window.retirements.isEmpty());
+        inventory["complete"] = true;
+        inventory["revision"] = "stale";
+        window.applyRemoteServers("first", inventory);
+        QVERIFY(window.retirements.isEmpty());
+        inventory["revision"] = "fresh";
+        window.applyRemoteServers("first", inventory);
+        QTRY_COMPARE(window.profiles.size(), 1);
+        QVERIFY(window.profiles.contains(ids[1]));
+        window.close();
+    }
+    void ordinaryAndContainerServersShareTheirHostGroups() {
         QTemporaryDir data;
         {
             Store store(data.path() + "/metadata.sqlite");
@@ -1774,21 +1856,23 @@ class WindowTests : public QObject {
         Window window(data.path(), false);
         window.show();
         auto *tree = window.findChild<QTreeView *>();
-        QTRY_COMPARE(tree->model()->rowCount(), 3);
-        QCOMPARE(tree->model()->index(0, 0).data().toString(), "alice @ workstation");
-        QCOMPARE(tree->model()->index(1, 0).data().toString(), "myCodex @ workstation");
+        QTRY_COMPARE(tree->model()->rowCount(), 2);
+        QCOMPARE(tree->model()->index(0, 0).data().toString(), "This Computer · alice@workstation");
         QSet<QString> labels;
         for (int i = 0; i < tree->model()->rowCount(); ++i) {
             const auto group = tree->model()->index(i, 0);
             QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
             labels.insert(group.data(Qt::DisplayRole).toString());
-            QCOMPARE(tree->model()->rowCount(group), 1);
-            const auto server = tree->model()->index(0, 0, group);
-            QCOMPARE(server.data(Qt::DisplayRole).toString(),
-                     server.data(BackendRole) == "host" ? QString("Main") : QString("project"));
+            QCOMPARE(tree->model()->rowCount(group), i == 0 ? 2 : 1);
+            for (int j = 0; j < tree->model()->rowCount(group); ++j) {
+                const auto server = tree->model()->index(j, 0, group);
+                QCOMPARE(server.data(Qt::DisplayRole).toString(),
+                         server.data(BackendRole) == "host" ? QString("Main")
+                                                            : QString("myCodex · project"));
+            }
         }
-        QCOMPARE(labels, (QSet<QString>{"alice @ workstation", "myCodex @ workstation",
-                                        "myCodex @ remote-machine"}));
+        QCOMPARE(labels, (QSet<QString>{"This Computer · alice@workstation",
+                                        "ssh-alias · remote-machine"}));
         const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
         for (const auto tab : {0, 3, 2}) {
             for (auto *backend : window.findChildren<Backend *>())
@@ -1801,8 +1885,8 @@ class WindowTests : public QObject {
                      {"status", QJsonObject{{"type", tab == 2 ? "active" : "idle"},
                                             {"activeFlags", QJsonArray{}}}}}));
             window.findChild<QTabBar *>()->setCurrentIndex(tab);
-            QCOMPARE(tree->model()->rowCount(), 3);
-            for (int i = 0; i < 3; ++i) {
+            QCOMPARE(tree->model()->rowCount(), 2);
+            for (int i = 0; i < 2; ++i) {
                 const auto group = tree->model()->index(i, 0);
                 QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
                 QVERIFY(labels.contains(group.data().toString()));
@@ -1872,7 +1956,7 @@ class WindowTests : public QObject {
         Window window(data.path(), false);
         window.show();
         QTRY_COMPARE(window.findChildren<Backend *>().size(), 2);
-        auto *discovery = window.findChild<ContainerDiscovery *>();
+        auto *discovery = window.findChild<SharedHostDiscovery *>();
         discovery->snapshot(
             {{"containers", containers}, {"issues", QJsonArray{}}, {"complete", true}});
         auto *tree = window.findChild<QTreeView *>();

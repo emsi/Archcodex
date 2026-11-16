@@ -128,6 +128,16 @@ class WorkspaceTests : public QObject {
         p.identity["codexHome"] = "/different/home";
         QVERIFY(workspaceSourceIdentity(p) != identity);
         p = profile();
+        p.kind = "ssh-unix";
+        p.sshHost = "alice@remote";
+        p.discoveryHost = "host-id";
+        p.environmentId = "remote-environment";
+        const auto remote = workspaceSourceIdentity(p);
+        p.relaySocket = "/different/local/relay";
+        QCOMPARE(workspaceSourceIdentity(p), remote);
+        p.sshHost = "alice@another-remote";
+        QVERIFY(workspaceSourceIdentity(p) != remote);
+        p = profile();
         p.kind = "mycodex";
         p.containerId = "a";
         const auto container = workspaceSourceIdentity(p);

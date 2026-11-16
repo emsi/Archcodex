@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "asyncbackend.h"
 #include "asyncstore.h"
-#include "containerdiscovery.h"
 #include "fixture.h"
+#include "hostconnection.h"
 #include "jsonprocess.h"
 #include "launch.h"
 #include "testenvironment.h"
@@ -977,6 +977,29 @@ class RuntimeTests : public QObject {
         QCOMPARE(store.sessions()[0].title, "99");
         QVERIFY(store.sessions()[0].executionObserved);
     }
+    void remoteNativeProfileUsesLocalRelayForProtocolAndNotifications() {
+        Fixture fixture;
+        auto p = fixture.profile();
+        p.kind = "ssh-unix";
+        p.sshHost = "must-not-be-contacted";
+        p.discoveryHost = "host-fixture";
+        p.executable = "/remote-only/codex";
+        p.relaySocket = p.socketPath;
+        p.socketPath = "/remote-only/server.sock";
+        AsyncBackend backend(p, BRIDGE_PATH);
+        QSignalSpy changes(&backend, &Backend::sessionsChanged);
+        backend.connectServer();
+        QTRY_VERIFY(backend.ready() && !changes.isEmpty());
+        QVERIFY(fixture.methods.contains("thread/loaded/list"));
+        const auto before = changes.size();
+        fixture.notify("thread/started", {{"thread", fixture.thread("remote-thread")}});
+        QTRY_VERIFY(changes.size() > before);
+        const auto batch = qvariant_cast<QList<Session>>(changes.last()[0]);
+        QVERIFY(std::any_of(batch.begin(), batch.end(), [&](const Session &s) {
+            return s.id == "remote-thread" && s.backendId == p.id && !s.contextRequired;
+        }));
+        backend.disconnectServer();
+    }
     void stalledSshDiscoveryDoesNotDelayLocalProtocolOrClose() {
         QTemporaryDir directory;
         QFile ssh(directory.path() + "/ssh");
@@ -993,7 +1016,7 @@ class RuntimeTests : public QObject {
         } restore{oldPath};
         qputenv("PATH", directory.path().toUtf8() + ':' + oldPath);
         Fixture fixture;
-        auto remote = std::make_unique<ContainerDiscovery>("fixture-remote", "test-host");
+        auto remote = std::make_unique<SharedHostDiscovery>("fixture-remote", "test-host");
         auto local = std::make_unique<AsyncBackend>(fixture.profile(), BRIDGE_PATH);
         QSignalSpy updates(local.get(), &Backend::sessionsChanged);
         remote->refresh();
