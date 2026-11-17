@@ -92,6 +92,14 @@ if(BUILD_TESTING)
     pkg_check_modules(XCB REQUIRED IMPORTED_TARGET xcb)
     target_link_libraries(test-notifications PRIVATE archcodex-core Qt6::Widgets Qt6::Test Qt6::DBus
       KF6::Notifications KF6::WindowSystem PkgConfig::XCB)
+    # Optional real-window-manager regression: run with tests/run-x11-activation.py.
+    # XTEST generates input only inside that runner's private X server.
+    pkg_check_modules(XCB_XTEST QUIET IMPORTED_TARGET xcb-xtest)
+    if(TARGET PkgConfig::XCB_XTEST)
+      add_executable(test-x11activation tests/test_x11activation.cpp src/notifications.cpp)
+      target_link_libraries(test-x11activation PRIVATE archcodex-core Qt6::Widgets Qt6::Test
+        Qt6::DBus KF6::Notifications KF6::WindowSystem PkgConfig::XCB PkgConfig::XCB_XTEST)
+    endif()
     if(DBUS_RUN_SESSION)
       add_test(NAME notifications COMMAND ${DBUS_RUN_SESSION} -- $<TARGET_FILE:test-notifications>)
       set_tests_properties(notifications PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "notifications.h"
+#include <KStartupInfo>
 #include <KWindowInfo>
 #include <KX11Extras>
 #include <QDBusArgument>
@@ -359,11 +360,32 @@ class NotificationsTests : public QObject {
         QVERIFY(!window.isMinimized());
         QVERIFY(window.windowState().testFlag(Qt::WindowState(state)));
     }
+    void x11ActivationRequestsExistingDesktopWithoutMovingWindow_data() {
+        QTest::addColumn<QString>("token");
+        QTest::addColumn<quint32>("expectedTime");
+        QTest::newRow("supplied") << QString("notification_TIME1234") << quint32(1234);
+        QTest::newRow("32-bit-limit")
+            << QString("notification_TIME4294967295") << quint32(0xffffffff);
+        QTest::newRow("missing") << QString() << quint32(0);
+        QTest::newRow("opaque") << QString("opaque-wayland-token") << quint32(0);
+        QTest::newRow("malformed") << QString("notification_TIMEnone") << quint32(0);
+        QTest::newRow("zero") << QString("notification_TIME0") << quint32(0);
+        QTest::newRow("empty-time") << QString("notification_TIME") << quint32(0);
+        QTest::newRow("negative") << QString("notification_TIME-1") << quint32(0);
+        QTest::newRow("signed") << QString("notification_TIME+1234") << quint32(0);
+        QTest::newRow("spaces") << QString("notification_TIME 1234 ") << quint32(0);
+        QTest::newRow("overflow") << QString("notification_TIME4294967296") << quint32(0);
+        QTest::newRow("too-long") << (QString(4096, 'a') + "_TIME1234") << quint32(0);
+        QTest::newRow("embedded-null")
+            << (QString("notification") + QChar::Null + "_TIME1234") << quint32(0);
+    }
     void x11ActivationRequestsExistingDesktopWithoutMovingWindow() {
         // This fixture owns root-window properties: opt in only on a private Xvfb.
         if (qEnvironmentVariable("ARCHCODEX_TEST_X11_WM") != "1" ||
             QGuiApplication::platformName() != "xcb")
             QSKIP("Run on a private Xvfb with ARCHCODEX_TEST_X11_WM=1");
+        QFETCH(QString, token);
+        QFETCH(quint32, expectedTime);
         std::unique_ptr<xcb_connection_t, decltype(&xcb_disconnect)> connection(
             xcb_connect(nullptr, nullptr), xcb_disconnect);
         auto *c = connection.get();
@@ -389,7 +411,7 @@ class NotificationsTests : public QObject {
         xcb_change_window_attributes(c, root, XCB_CW_EVENT_MASK, &mask);
         xcb_flush(c);
         bool moved = false, activatedOnTargetDesktop = false;
-        uint32_t timestamp = 0, selected = 0;
+        uint32_t timestamp = 0, selected = 0, origin = 0;
         QSocketNotifier ready(xcb_get_file_descriptor(c), QSocketNotifier::Read);
         const auto receive = [&] {
             while (auto *event = xcb_poll_for_event(c)) {
@@ -399,6 +421,7 @@ class NotificationsTests : public QObject {
                         selected = message->data.data32[0];
                         property(root, current, selected);
                     } else if (message->type == active) {
+                        origin = message->data.data32[0];
                         timestamp = message->data.data32[1];
                         activatedOnTargetDesktop = selected == 1;
                         property(root, active, message->window, XCB_ATOM_WINDOW);
@@ -419,9 +442,22 @@ class NotificationsTests : public QObject {
         QTRY_COMPARE(KX11Extras::currentDesktop(), 1);
         QVERIFY(KWindowInfo(window.winId(), NET::WMDesktop).valid());
         QCOMPARE(KWindowInfo(window.winId(), NET::WMDesktop).desktop(), 2);
-        Notifications::presentWindow(&window, "notification_TIME1234");
+        const auto serverTime = [] {
+            KStartupInfoId id;
+            id.initId(KStartupInfo::createNewStartupId());
+            return quint32(id.timestamp());
+        };
+        const auto before = serverTime();
+        Notifications::presentWindow(&window, token);
         QTRY_VERIFY((receive(), activatedOnTargetDesktop));
-        QCOMPARE(timestamp, 1234u);
+        QCOMPARE(origin, 1u); // Ordinary application activation, not a pager/force request.
+        if (expectedTime)
+            QCOMPARE(timestamp, expectedTime);
+        else {
+            QVERIFY(timestamp);
+            QVERIFY(qint32(timestamp - before) >= 0);
+            QVERIFY(qint32(serverTime() - timestamp) >= 0);
+        }
         QCOMPARE(KX11Extras::currentDesktop(), 2);
         QCOMPARE(KWindowInfo(window.winId(), NET::WMDesktop).desktop(), 2);
         QVERIFY(!moved);
