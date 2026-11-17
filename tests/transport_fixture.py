@@ -17,6 +17,15 @@ if role == 'ssh':
     assert 'ControlPath=none' in args
     assert 'ServerAliveInterval=15' in args and 'ServerAliveCountMax=3' in args
     assert 'ForwardAgent=no' in args and 'ClearAllForwardings=yes' in args
+    state = json.loads((root / 'state.json').read_text())
+    for text in state.get('authentication', []):
+        import subprocess
+        result = subprocess.run([os.environ['SSH_ASKPASS'], text], capture_output=True)
+        if result.returncode:
+            sys.exit(255)
+        if result.stdout.rstrip(b'\n') != b'fixture-answer':
+            print('Permission denied (publickey,password).', file=sys.stderr)
+            sys.exit(255)
     if args[-2] == 'fixture-stalled':
         import time
         time.sleep(60)

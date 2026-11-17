@@ -186,6 +186,9 @@ class Security(unittest.TestCase):
             try:
                 listener.bind(str(instance / ('s' + 'b' * 24)))
                 listener.close()
+                (instance / 'askpass').write_text('credential-free adapter')
+                with socket.socket(socket.AF_UNIX) as askpass:
+                    askpass.bind(str(instance / 'askpass.sock'))
                 transport.cleanup(token)
                 self.assertFalse(instance.exists())
                 self.assertTrue(Path(directory).is_dir())
@@ -270,6 +273,134 @@ class ProcessRoute(unittest.IsolatedAsyncioTestCase):
                 if predicate(report):
                     return report
         return await asyncio.wait_for(read(), 15)
+
+    async def auth_start(self, interactive=False):
+        state = json.loads((self.root / 'state.json').read_text())
+        state['authentication'] = ['Password:', 'Verification code:']
+        (self.root / 'state.json').write_text(json.dumps(state))
+        self.proc = await asyncio.create_subprocess_exec(*transport.command('desktop'), self.token,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+            env=self.env, limit=mux.JSON_LIMIT + 1)
+        await self.auth_connect('one', interactive)
+
+    async def auth_connect(self, revision, interactive=True):
+        self.proc.stdin.write(mux.encoded({'hosts': [{'id': 'host', 'sshHost': 'fixture-host',
+            'revision': revision, 'interactive': interactive}]}) + b'\n')
+        await self.proc.stdin.drain()
+
+    async def auth_answer(self, prompt, **fields):
+        self.proc.stdin.write(mux.encoded({'authReply': dict(prompt, host='host', **fields)}) + b'\n')
+        await self.proc.stdin.drain()
+
+    async def test_launch_authentication_connects_without_a_manual_retry(self):
+        await self.auth_start(True)
+        for text in ('Password:', 'Verification code:'):
+            prompt = (await self.inventory(lambda r: any(p['text'] == text for p in r.get('prompts', []))))['prompts'][0]
+            self.assertEqual(prompt['text'], text)
+            await self.auth_answer(prompt, answer='fixture-answer')
+        await self.inventory(lambda r: r.get('state') == 'connected')
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+
+    async def test_refresh_preserves_pending_authentication_and_new_inventory_revision(self):
+        await self.auth_start(True)
+        prompt = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        await self.auth_connect('refresh', False)
+        snapshot = await self.inventory(lambda r: r.get('revision') == 'refresh')
+        self.assertEqual(snapshot['prompts'][0], prompt)
+        await self.auth_answer(prompt, answer='fixture-answer')
+        second = (await self.inventory(lambda r: any(p['id'] != prompt['id'] for p in r.get('prompts', []))))['prompts'][0]
+        await self.auth_answer(second, answer='fixture-answer')
+        await self.inventory(lambda r: r.get('state') == 'connected' and r.get('revision') == 'refresh')
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+
+    async def test_refreshing_connected_host_does_not_authorize_future_recovery_prompts(self):
+        await self.auth_start(True)
+        for text in ('Password:', 'Verification code:'):
+            prompt = (await self.inventory(lambda r: any(p['text'] == text for p in r.get('prompts', []))))['prompts'][0]
+            await self.auth_answer(prompt, answer='fixture-answer')
+        await self.inventory(lambda r: r.get('state') == 'connected')
+        await self.auth_connect('refresh', True)
+        await self.inventory(lambda r: r.get('state') == 'connected' and r.get('revision') == 'refresh')
+        ssh = next(c for c in self.commands() if c['role'] == 'ssh')
+        os.kill(ssh['pid'], signal.SIGTERM)
+        required = await self.inventory(lambda r: r.get('state') == 'authentication-required')
+        self.assertFalse(required['prompts'])
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 2)
+
+    async def test_background_authentication_stops_until_explicit_connect(self):
+        await self.auth_start()
+        report = await self.inventory(lambda r: r.get('state') == 'authentication-required')
+        self.assertFalse(report['prompts'])
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+        await asyncio.sleep(1.2)
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+        await self.auth_connect('two')
+        first = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        await self.auth_answer(first, answer='fixture-answer')
+        second = (await self.inventory(lambda r: any(p['id'] != first['id'] for p in r.get('prompts', []))))['prompts'][0]
+        self.assertEqual(second['text'], 'Verification code:')
+        await self.auth_answer(second, answer='fixture-answer')
+        report = await self.inventory(lambda r: r.get('state') == 'connected' and len(r.get('containers', [])) == 2)
+        self.assertNotIn('fixture-answer', json.dumps(report))
+        self.assertFalse(report.get('prompts'))
+
+    async def test_cancel_and_stale_answers_cannot_authenticate_next_attempt(self):
+        await self.auth_start(True)
+        first = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        await self.auth_answer(first, cancel=True)
+        await self.inventory(lambda r: r.get('state') == 'cancelled')
+        await self.auth_connect('two')
+        second = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        self.assertNotEqual(first['attempt'], second['attempt'])
+        await self.auth_answer(first, answer='fixture-answer')
+        report = await self.inventory(lambda r: bool(r.get('prompts')))
+        self.assertEqual(report['prompts'][0]['id'], second['id'])
+        await self.auth_answer(second, answer='incorrect')
+        failed = await self.inventory(lambda r: r.get('state') == 'authentication-failed')
+        self.assertIn('Permission denied', failed['message'])
+        await asyncio.sleep(1.2)
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 2)
+
+    async def test_authentication_wait_exceeds_old_handshake_deadline(self):
+        await self.auth_start(True)
+        first = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        await asyncio.sleep(10.2)
+        await self.auth_answer(first, answer='fixture-answer')
+        second = (await self.inventory(lambda r: any(p['id'] != first['id'] for p in r.get('prompts', []))))['prompts'][0]
+        await self.auth_answer(second, cancel=True)
+        await self.inventory(lambda r: r.get('state') == 'cancelled')
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
+
+    async def test_prompt_wait_does_not_block_local_host_or_replay_on_snapshot(self):
+        await self.auth_start(True)
+        first = (await self.inventory(lambda r: bool(r.get('prompts'))))['prompts'][0]
+        configuration = {'hosts': [
+            {'id': 'host', 'sshHost': 'fixture-host', 'revision': 'one', 'interactive': False},
+            {'id': 'local', 'sshHost': '', 'revision': 'local', 'containers': True}]}
+        self.proc.stdin.write(mux.encoded(configuration) + b'\n')
+        await self.proc.stdin.drain()
+        async def ready():
+            while line := await self.proc.stdout.readline():
+                snapshot = json.loads(line)['hosts']
+                local = snapshot.get('local', {})
+                if local.get('state') == 'connected' and local.get('containers') and local['containers'][0].get('endpoints'):
+                    return snapshot
+            self.fail('Helper exited')
+        snapshot = await asyncio.wait_for(ready(), 10)
+        self.assertEqual(snapshot['host']['prompts'][0]['id'], first['id'])
+        local_socket = snapshot['local']['containers'][0]['endpoints'][0]['localSocket']
+        self.assertEqual(await self.roundtrip(local_socket, b'terminal-input'), b'terminal-input')
+        # Removing the challenged host terminates SSH/askpass; the local stream survives.
+        configuration['hosts'] = configuration['hosts'][1:]
+        self.proc.stdin.write(mux.encoded(configuration) + b'\n')
+        await self.proc.stdin.drain()
+        async def removed():
+            while line := await self.proc.stdout.readline():
+                if 'host' not in json.loads(line)['hosts']:
+                    return
+        await asyncio.wait_for(removed(), 5)
+        self.assertEqual(await self.roundtrip(local_socket, b'still-connected'), b'still-connected')
+        self.assertEqual(len([c for c in self.commands() if c['role'] == 'ssh']), 1)
 
     def commands(self):
         path = self.root / 'commands'

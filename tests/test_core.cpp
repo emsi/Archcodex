@@ -50,6 +50,37 @@ class CoreTests : public QObject {
         QVERIFY(!malformed.contains("invalid"));
         QCOMPARE(malformed.size(), 1);
     }
+    void sshHostOptionsRoundTripAndValidate() {
+        HostProfile host{"one", "server"};
+        host.user = "alice";
+        host.port = 2222;
+        host.identityFile = "~/.ssh/key with spaces";
+        QVERIFY(host.validate().isEmpty());
+        QCOMPARE(readHosts({host.json()})["one"].json(), host.json());
+        auto duplicate = host;
+        duplicate.id = "duplicate";
+        duplicate.user.clear();
+        duplicate.ssh = "alice@server";
+        QCOMPARE(duplicate.connectionKey(), host.connectionKey());
+        auto otherPort = host;
+        otherPort.id = "other-port";
+        otherPort.port = 2223;
+        QCOMPARE(readHosts({host.json(), duplicate.json(), otherPort.json()}).size(), 3);
+        host.ssh = "bob@server";
+        QVERIFY(!host.validate().isEmpty());
+        host.ssh = "server";
+        for (const auto &path : {"relative", "/key\ninvalid"}) {
+            host.identityFile = path;
+            QVERIFY(!host.validate().isEmpty());
+        }
+        auto invalid = duplicate.json();
+        invalid["sshOptions"] = QJsonObject{{"port", 2.5}};
+        QVERIFY(!readHosts({invalid}).contains(duplicate.id));
+        invalid["sshOptions"] = QJsonObject{{"port", 65536}};
+        QVERIFY(!readHosts({invalid}).contains(duplicate.id));
+        invalid["sshOptions"] = QJsonObject{{"password", "never accepted"}};
+        QVERIFY(!readHosts({invalid}).contains(duplicate.id));
+    }
     void remoteHostProfilesRequireExplicitIdentityAndNeverPersistRelayPaths() {
         BackendProfile p{"remote", "Remote"};
         p.kind = "ssh-unix";

@@ -318,7 +318,7 @@ remaining host checks are recorded in section 9 and the implementation log.
 - One transient `systemd-run --user --pipe --collect` service owns the desktop
   helper and its SSH/Docker clients, with `KillMode=control-group`, a five-second
   stop timeout, no systemd restart, and umask 0077. `ExecStopPost` removes only
-  that instance's socket entries after normal exit or SIGKILL. No unit is
+  that instance's socket entries and askpass adapter after normal exit or SIGKILL. No unit is
   installed, enabled or left as a permanent service. A running desktop systemd
   user manager is now required for myCodex integration. Its login environment
   must provide Docker/OpenSSH access and any SSH agent. Other backends are
@@ -329,8 +329,8 @@ remaining host checks are recorded in section 9 and the implementation log.
   on pipe EOF; signal propagation through Docker is not assumed. Fatal helper
   failures retry with a 1–30 second backoff; healthy operation has no periodic
   inventory loop. GUI configuration and snapshots use bounded, coalesced queues.
-- SSH retains host-key verification, uses batch authentication and a ten-second
-  connection timeout, disables inherited agent/X11/port forwarding, and uses no
+- SSH retains host-key verification, uses a ten-second network connection timeout and bounded
+  [interactive authentication](ssh-authentication.md) through local askpass, disables inherited agent/X11/port forwarding, and uses no
   detached or user-owned control master. Approved keepalives are 15 seconds / 3
   missed responses. A separate configured host profile remains a separate trust
   and transport boundary even if two profiles reach the same machine.

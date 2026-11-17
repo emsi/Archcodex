@@ -20,6 +20,7 @@ import zlib
 import containers
 import discover
 import mux
+import sshauth
 
 BUNDLE = ""  # Set by the packaged, isolated bootstrap, not the environment.
 HOST = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_.@:%+\[\]-]{0,254}$")
@@ -31,11 +32,11 @@ def bootstrap():
     if not bundle:  # Source-tree tests; packaged roles never read external code.
         from pathlib import Path
         root = Path(__file__).parent
-        sources = {n: (root / (n + '.py')).read_text() for n in ('mux', 'containers', 'discover', 'transport')}
+        sources = {n: (root / (n + '.py')).read_text() for n in ('mux', 'containers', 'discover', 'sshauth', 'transport')}
         bundle = base64.b64encode(zlib.compress(mux.encoded(sources))).decode()
     return ("import base64,json,sys,types,zlib\n"
             "S=json.loads(zlib.decompress(base64.b64decode('" + bundle + "')))\n"
-            "for n in ('mux','containers','discover','transport'):\n"
+            "for n in ('mux','containers','discover','sshauth','transport'):\n"
             " m=types.ModuleType(n);m.__file__='<packaged-'+n+'>';sys.modules[n]=m;exec(S[n],m.__dict__)\n"
             "sys.modules['transport'].BUNDLE='" + bundle + "'\n"
             "sys.modules['transport'].main()\n")
@@ -82,17 +83,18 @@ async def consume_errors(process, tail):
 
 
 class ChildConnection:
-    def __init__(self, args):
+    def __init__(self, args, env=None):
+        self.env = env
         self.args, self.process, self.connection, self.error_task = args, None, None, None
         self.tail = bytearray()
 
-    async def start(self):
+    async def start(self, timeout=10):
         self.process = await containers.spawn(*self.args, stdin=asyncio.subprocess.PIPE,
                     stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
-                    limit=mux.MAX_FRAME * 2)
+                    limit=mux.MAX_FRAME * 2, env=self.env)
         self.error_task = asyncio.create_task(consume_errors(self.process, self.tail))
         self.connection = mux.Mux(self.process.stdout, self.process.stdin)
-        return await self.connection.start()
+        return await self.connection.start(timeout)
 
     async def stop(self):
         if self.connection:
@@ -537,7 +539,9 @@ def cleanup(token):
     try:
         for name in os.listdir(fd):
             info = os.stat(name, dir_fd=fd, follow_symlinks=False)
-            if re.fullmatch(r's[a-f0-9]{24}', name) and stat.S_ISSOCK(info.st_mode) and info.st_uid == os.getuid():
+            socket_file = (re.fullmatch(r's[a-f0-9]{24}', name) or name == 'askpass.sock') and stat.S_ISSOCK(info.st_mode)
+            adapter = name == 'askpass' and stat.S_ISREG(info.st_mode)
+            if (socket_file or adapter) and info.st_uid == os.getuid():
                 os.unlink(name, dir_fd=fd)
         os.rmdir(path)
     finally:
@@ -586,9 +590,12 @@ class LocalEndpoint:
 
 
 class DesktopHost:
-    def __init__(self, desktop, ident, host, revision=0, servers=False, containers_enabled=True):
+    def __init__(self, desktop, ident, host, revision=0, servers=False, containers_enabled=True, options=None, interactive=False):
         self.desktop, self.ident, self.host = desktop, ident, host
         self.revision = revision
+        self.options, self.interactive = sshauth.options(options or {}), interactive
+        self.auth = None
+        self.connected = False
         self.servers, self.containers = servers, containers_enabled
         self.endpoints = {}
         self.delay = 1
@@ -634,6 +641,8 @@ class DesktopHost:
                 ep['localSocket'] = endpoint.path
         for key in set(self.endpoints) - present:
             await self.endpoints.pop(key).stop()
+        self.connected = True
+        report['state'] = 'connected'
         self.desktop.reports[self.ident] = report
         self.desktop.changed.set()
         self.delay = 1
@@ -642,29 +651,59 @@ class DesktopHost:
         endpoints, self.endpoints = self.endpoints, {}
         await asyncio.gather(*(e.stop() for e in endpoints.values()))
 
+    def report(self, state, message):
+        self.desktop.reports[self.ident] = {'state': state, 'message': message,
+            'revision': self.revision, 'complete': False, 'settled': state not in ('connecting', 'authenticating'),
+            'prompts': self.auth.snapshot() if self.auth else []}
+        self.desktop.changed.set()
+
+    def prompts_changed(self):
+        if self.auth and not self.auth.stopped.done():
+            self.report('authenticating', 'SSH authentication in progress…')
+
     async def remote(self):
-        # All command arguments are quoted once for the remote shell; no PTY,
-        # background master, agent forwarding, or per-terminal SSH process.
-        args = ['ssh', '-T', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=10',
+        # Authentication uses askpass; stdin/stdout remain the transport protocol.
+        args = ['ssh', '-T', '-o', 'BatchMode=no', '-o', 'ConnectTimeout=10',
                 '-o', 'ControlMaster=no', '-o', 'ControlPath=none', '-o', 'ControlPersist=no',
                 '-o', 'ForwardAgent=no', '-o', 'ForwardX11=no', '-o', 'ClearAllForwardings=yes',
+                '-o', 'AddKeysToAgent=no',
                 '-o', 'ForkAfterAuthentication=no', '-o', 'StdinNull=no', '-o', 'SessionType=default',
-                '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3',
-                '--', self.host, 'exec ' + shlex.join(command('host'))]
-        child = ChildConnection(args)
+                '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=3']
+        args += sshauth.arguments(self.options) + ['--', self.host, 'exec ' + shlex.join(command('host'))]
+        auth = self.auth = self.desktop.auth.begin(self.interactive, self.prompts_changed)
+        self.interactive = False  # Recovery never replays an interactive request.
+        self.connected = False
+        self.report('connecting', 'Connecting over SSH…')
+        child = ChildConnection(args, self.desktop.auth.environment(auth))
         try:
-            connection = await child.start()
+            connection = await auth.wait(child.start(None))
             self.active = connection
             inventory = await connection.open({'kind': 'inventory', 'revision': self.revision,
                                                'servers': self.servers, 'containers': self.containers})
             async for report in mux.messages(inventory):
                 await self.apply(report, connection.open)
             raise mux.Closed('Host inventory disconnected')
-        except Exception as error:
+        except sshauth.Stopped:
+            raise
+        except (OSError, ValueError, EOFError, asyncio.TimeoutError) as error:
+            if isinstance(error, EOFError) and child.error_task:
+                with contextlib.suppress(asyncio.TimeoutError):
+                    await asyncio.wait_for(asyncio.shield(child.error_task), 1)
             detail = child.tail.decode(errors='replace').strip()
-            raise mux.Closed(str(error) + ('\n' + detail if detail else '')) from error
+            message = detail or str(error) or 'SSH startup timed out while no authentication prompt was pending.'
+            if not self.connected:
+                lower = message.lower()
+                if 'permission denied' in lower or 'authentication failed' in lower:
+                    raise sshauth.Stopped('authentication-failed', 'SSH authentication failed. ' + message) from error
+                transient = any(text in lower for text in ('timed out', 'connection refused', 'connection reset',
+                                    'network is unreachable', 'no route to host', 'temporary failure in name resolution'))
+                if not transient:
+                    raise sshauth.Stopped('failed', 'SSH connection failed. ' + message) from error
+            raise mux.Closed(message) from error
         finally:
             self.active = None
+            self.auth = None
+            self.desktop.auth.end(auth)
             await self.clear()
             await child.stop()
 
@@ -697,11 +736,11 @@ class DesktopHost:
         while True:
             try:
                 await (self.remote() if self.host else self.local())
+            except sshauth.Stopped as error:
+                self.report(error.state, str(error))
+                return  # Authentication, cancellation and configuration failures need user action.
             except (OSError, ValueError, asyncio.TimeoutError) as error:
-                self.desktop.reports[self.ident] = {'containers': [], 'complete': False,
-                    'revision': self.revision,
-                    'issues': [containers.issue('Container transport disconnected', str(error)[:4096])]}
-                self.desktop.changed.set()
+                self.report('disconnected', str(error) or 'Host transport disconnected')
             await asyncio.sleep(self.delay)  # Failed-connection retry, never session polling.
             self.delay = min(30, self.delay * 2)
 
@@ -709,7 +748,8 @@ class DesktopHost:
         await cancel(self.refresh_task, self.task)
         await self.clear()
 
-    def request_refresh(self, revision, servers=False, containers_enabled=True):
+    def request_refresh(self, revision, servers=False, containers_enabled=True, options=None, interactive=False):
+        self.interactive = interactive
         self.revision = revision
         self.servers, self.containers = servers, containers_enabled
         if not self.refresh_task or self.refresh_task.done():
@@ -725,9 +765,17 @@ class DesktopHost:
                     stream.close()
                     if revision == self.revision:
                         break
+                self.interactive = False
                 return
             except (OSError, ValueError, asyncio.TimeoutError):
                 pass
+        elif self.auth and not self.auth.stopped.done():
+            # Refresh/Connect updates the desired inventory without interrupting
+            # a live handshake or discarding an answer being typed in the GUI.
+            self.auth.interactive |= self.interactive
+            self.interactive = False
+            self.prompts_changed()
+            return
         await self.stop()
         self.delay = 1
         self.task = asyncio.create_task(self.run())
@@ -738,6 +786,7 @@ class Desktop:
         self.directory = instance_path(token)
         os.mkdir(self.directory, 0o700)
         self.token = token
+        self.auth = sshauth.Broker(self.directory)
         self.hosts, self.reports = {}, {}
         self.changed = asyncio.Event()
 
@@ -753,14 +802,19 @@ class Desktop:
             servers, docker = entry.get('servers', False), entry.get('containers', True)
             if not isinstance(servers, bool) or not isinstance(docker, bool):
                 raise ValueError('Invalid host discovery options')
-            desired[ident] = (host, entry.get('revision', 0), servers, docker)
+            opts = sshauth.options(entry.get('sshOptions', {}))
+            interactive = entry.get('interactive', False)
+            if not isinstance(interactive, bool) or (not host and opts):
+                raise ValueError('Invalid SSH connection configuration')
+            desired[ident] = (host, entry.get('revision', 0), servers, docker, opts, interactive)
         for ident in list(self.hosts):
             config, host = self.hosts[ident]
             replacement = desired.get(ident)
-            if replacement and replacement[0] == config[0]:
+            if replacement and replacement[0] == config[0] and replacement[4] == config[4]:
                 if replacement != config:
                     self.hosts[ident] = (replacement, host)
-                    host.request_refresh(*replacement[1:])
+                    if replacement[:5] != config[:5]:
+                        host.request_refresh(*replacement[1:])
             else:
                 del self.hosts[ident]
                 await host.stop()
@@ -781,20 +835,33 @@ class Desktop:
             await writer.drain()
 
     async def run(self, reader, writer):
-        output = asyncio.create_task(self.output(writer))
+        output = input_task = None
         async def inputs():
             while line := await reader.readline():
                 if len(line) > 256 * 1024:
                     raise ValueError('Host configuration exceeded its limit')
-                await self.configure(json.loads(line))
-        input_task = asyncio.create_task(inputs())
+                message = json.loads(line)
+                if 'authReply' in message:
+                    reply = message['authReply']
+                    if not isinstance(reply, dict) or not isinstance(reply.get('host'), str):
+                        raise ValueError('Invalid authentication reply')
+                    entry = self.hosts.get(reply.get('host'))
+                    if entry and entry[1].auth:
+                        entry[1].auth.answer(reply)
+                    self.changed.set()  # Acknowledge without ever echoing an answer.
+                else:
+                    await self.configure(message)
         try:
+            await self.auth.start()
+            output = asyncio.create_task(self.output(writer))
+            input_task = asyncio.create_task(inputs())
             done, _ = await asyncio.wait([input_task, output], return_when=asyncio.FIRST_COMPLETED)
             for task in done:
                 task.result()
         finally:
             await cancel(input_task, output)
             await asyncio.gather(*(host.stop() for _, host in self.hosts.values()))
+            await self.auth.close()
             cleanup(self.token)
 
 

@@ -32,6 +32,7 @@ class OpeningCoordinator;
 class Notifications;
 class Updater;
 class UpdateDialog;
+class SshPromptDialog;
 class Window : public QMainWindow {
     Q_OBJECT
     friend class ::WindowTests;
@@ -75,11 +76,18 @@ class Window : public QMainWindow {
     QToolButton *hostStatus;
     QHash<QString, SharedHostDiscovery *> hostDiscovery;
     QMap<QString, HostProfile> hosts;
+    QPointer<QDialog> hostsWindow;
+    QHash<QString, QPointer<SshPromptDialog>> authenticationDialogs;
+    QStringList authenticationQueue;
+    QHash<QString, QString> cancelledAuthentication;
+    void updateHost(const HostProfile &host);
+    void updateAuthentication(const QString &id, const QJsonArray &prompts);
+    void showNextAuthentication();
     QHash<QString, QString> hostFeedback;
     QSet<QString> emptyContainers, hostProblems;
     void hostsDialog();
     void addHost(const HostProfile &host, bool start);
-    void refreshHost(const QString &id, const QString &revision = {});
+    void refreshHost(const QString &id, const QString &revision = {}, bool interactive = false);
     void setHostEnabled(const QString &id, bool enabled);
     void removeHost(const QString &id);
     void applyHostInventory(const QString &id, const QJsonObject &inventory);
@@ -202,7 +210,7 @@ class Window : public QMainWindow {
     void attach(const BackendProfile &profile, bool start);
     void connectionsDialog();
     void editConnection(const QString &id = {});
-    void discover(bool reconcile = true);
+    void discover(bool reconcile = true, bool interactive = false);
     void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues,
                         const QString &revision = {});
     void activate(const QModelIndex &index);

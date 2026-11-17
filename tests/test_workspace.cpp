@@ -135,6 +135,9 @@ class WorkspaceTests : public QObject {
         const auto remote = workspaceSourceIdentity(p);
         p.relaySocket = "/different/local/relay";
         QCOMPARE(workspaceSourceIdentity(p), remote);
+        p.identity["sshOptions"] = QJsonObject{{"port", 2222}};
+        QVERIFY(workspaceSourceIdentity(p) != remote);
+        p.identity.remove("sshOptions");
         p.sshHost = "alice@another-remote";
         QVERIFY(workspaceSourceIdentity(p) != remote);
         p = profile();

@@ -9,6 +9,7 @@
 #include "searchbenchmark.h"
 #include "sessionmodel.h"
 #include "settingsdialog.h"
+#include "sshdialogs.h"
 #include "terminal.h"
 #include "testenvironment.h"
 #include "updater.h"
@@ -49,6 +50,35 @@
 #include <QtTest>
 
 namespace {
+// Replace external discovery at its existing facade boundary. Startup tests must
+// exercise Window's real startup routing without scanning or contacting user hosts.
+class StartupLocalDiscovery : public Archcodex::HostDiscovery {
+  public:
+    using HostDiscovery::HostDiscovery;
+    int calls = 0;
+    void refresh(const QStringList &, const QString &) override {
+        ++calls;
+    }
+};
+class StartupSshDiscovery : public Archcodex::SharedHostDiscovery {
+  public:
+    using SharedHostDiscovery::SharedHostDiscovery;
+    QList<bool> requests;
+    void refresh(const QString &revision, bool, bool, const QJsonObject &,
+                 bool interactive) override {
+        requests << interactive;
+        if (sshHost.isEmpty())
+            return;
+        emit snapshot({{"revision", revision},
+                       {"state", interactive ? "authenticating" : "authentication-required"},
+                       {"message", "Fixture authentication"},
+                       {"prompts", interactive ? QJsonArray{QJsonObject{{"id", "password"},
+                                                                        {"attempt", id},
+                                                                        {"kind", "entry"},
+                                                                        {"text", "Password:"}}}
+                                               : QJsonArray{}}});
+    }
+};
 class TreeActivationStyle : public QProxyStyle {
     bool singleClick;
 
@@ -1740,6 +1770,190 @@ class WindowTests : public QObject {
         dispose(menu);
         window.close();
     }
+    void startupRequestsAuthenticationForEnabledHosts_data() {
+        QTest::addColumn<bool>("queuedRefresh");
+        QTest::newRow("ordinary-startup") << false;
+        QTest::newRow("refresh-queued-during-cache-load") << true;
+    }
+    void startupRequestsAuthenticationForEnabledHosts() {
+        QFETCH(bool, queuedRefresh);
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        delete window.discovery;
+        auto *local = new StartupLocalDiscovery(&window);
+        window.discovery = local;
+        window.addHost({"first", "ubu"}, false);
+        window.addHost({"second", "odo"}, false);
+        window.addHost({"disabled", "disabled-host", false}, false);
+        QMap<QString, StartupSshDiscovery *> fixtures;
+        for (const auto &host : window.hosts) {
+            delete window.hostDiscovery.take(host.id);
+            auto *fixture = new StartupSshDiscovery(host.id, host.ssh, &window);
+            window.hostDiscovery[host.id] = fixture;
+            fixtures[host.id] = fixture;
+            connect(fixture, &SharedHostDiscovery::snapshot, &window,
+                    [&window, id = host.id](const QJsonObject &snapshot) {
+                        window.applyHostInventory(id, snapshot);
+                    });
+        }
+        window.refreshQueued = queuedRefresh;
+        window.restoreCache(true); // Actual startup path; no Connect button action.
+        QCOMPARE(local->calls, 1);
+        QCOMPARE(fixtures["first"]->requests, QList<bool>{true});
+        QCOMPARE(fixtures["second"]->requests, QList<bool>{true});
+        QVERIFY(fixtures["disabled"]->requests.isEmpty());
+        QCOMPARE(window.authenticationQueue.size(), 2);
+        QVERIFY(window.authenticationDialogs[window.authenticationQueue.first()]->isVisible());
+        QVERIFY(!window.authenticationDialogs[window.authenticationQueue.last()]->isVisible());
+        window.close();
+    }
+    void sshPromptQueuePreservesTypingAndAdvancesOnWithdrawalAndCancel() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        for (const auto &id : {"first", "second", "third"}) {
+            window.addHost({id, QString(id) + "-host"}, false);
+            window.updateAuthentication(
+                id, {QJsonObject{
+                        {"id", "p"}, {"attempt", id}, {"kind", "entry"}, {"text", "Password:"}}});
+        }
+        auto first = window.authenticationDialogs["first"];
+        auto second = window.authenticationDialogs["second"];
+        auto third = window.authenticationDialogs["third"];
+        QVERIFY(first->isVisible());
+        QVERIFY(!second->isVisible());
+        QVERIFY(!third->isVisible());
+        auto *answer = first->findChild<QLineEdit *>("sshAnswer");
+        answer->setText("unfinished answer");
+        window.updateAuthentication(
+            "second",
+            {QJsonObject{
+                {"id", "p"}, {"attempt", "second"}, {"kind", "entry"}, {"text", "Password:"}}});
+        QCOMPARE(answer->text(), QString("unfinished answer"));
+        QVERIFY(!second->isVisible());
+        window.setHostEnabled("second", false); // A queued host can be withdrawn.
+        QVERIFY(!window.authenticationQueue.contains("second"));
+        first->reject();
+        QTRY_VERIFY(third->isVisible());
+        QVERIFY(!third->isModal());
+        QCOMPARE(window.authenticationQueue, QStringList{"third"});
+        window.updateAuthentication("third", {}); // EOF/authentication completion.
+        QVERIFY(window.authenticationQueue.isEmpty());
+        window.close();
+    }
+    void sshPromptSurvivesSnapshotsAndClearsAnswers() {
+        TestHome home;
+        SshPromptDialog dialog;
+        dialog.setAttribute(Qt::WA_DeleteOnClose, false);
+        QSignalSpy replies(&dialog, &SshPromptDialog::answered);
+        const QJsonObject first{
+            {"id", "first"}, {"attempt", "one"}, {"text", "Password:"}, {"kind", "entry"}};
+        dialog.setPrompt("alice@host", first);
+        dialog.show();
+        QVERIFY(!dialog.isModal());
+        auto *answer = dialog.findChild<QLineEdit *>("sshAnswer");
+        QCOMPARE(answer->echoMode(), QLineEdit::Password);
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty())
+            QVERIFY(dialog.grab().save(screenshots + "/ssh-authentication.png"));
+        answer->setText("fixture-answer");
+        dialog.setPrompt("alice@host", first); // Coalesced/repeated full snapshots.
+        QCOMPARE(answer->text(), QString("fixture-answer"));
+        dialog.findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Ok)->click();
+        QCOMPARE(replies.size(), 1);
+        QCOMPARE(replies.first().first().toJsonObject()["answer"].toString(),
+                 QString("fixture-answer"));
+        QVERIFY(answer->text().isEmpty());
+        QVERIFY(!answer->isEnabled());
+        auto second = first;
+        second["id"] = "second";
+        second["text"] = "Verification code:";
+        dialog.setPrompt("alice@host", second);
+        QVERIFY(answer->isEnabled());
+        QVERIFY(answer->text().isEmpty());
+        dialog.reject();
+        QCOMPARE(replies.size(), 2);
+        const auto cancelled = replies.last().first().toJsonObject();
+        QVERIFY(cancelled["cancel"].toBool());
+        QVERIFY(!cancelled.contains("answer"));
+        QCOMPARE(cancelled["id"].toString(), QString("second"));
+    }
+    void sshPromptsAreWithdrawnWithTheirHost() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        window.addHost({"remote", "fixture-host"}, false);
+        QJsonObject prompt{{"id", "p"}, {"attempt", "a"}, {"text", "Password:"}, {"kind", "entry"}};
+        window.updateAuthentication("remote", {prompt});
+        QPointer<SshPromptDialog> dialog = window.authenticationDialogs["remote"];
+        QVERIFY(dialog);
+        QSignalSpy replies(dialog, &SshPromptDialog::answered);
+        dialog->findChild<QLineEdit *>("sshAnswer")->setText("fixture-answer");
+        window.updateAuthentication("remote", {prompt});
+        QCOMPARE(window.authenticationDialogs["remote"], dialog);
+        window.setHostEnabled("remote", false);
+        QVERIFY(!window.authenticationDialogs.contains("remote"));
+        QCOMPARE(replies.size(), 0); // Withdrawal is not a new cancel request.
+        // A snapshot queued before cancellation must not reopen that attempt.
+        window.hosts["remote"].enabled = true;
+        prompt["attempt"] = "another";
+        window.updateAuthentication("remote", {prompt});
+        auto cancelled = window.authenticationDialogs["remote"];
+        cancelled->reject();
+        QCoreApplication::sendPostedEvents(nullptr, QEvent::DeferredDelete);
+        window.updateAuthentication("remote", {prompt});
+        QVERIFY(!window.authenticationDialogs.value("remote"));
+        prompt["attempt"] = "fresh";
+        window.updateAuthentication("remote", {prompt});
+        QVERIFY(window.authenticationDialogs.value("remote"));
+        window.updateAuthentication("remote", {});
+        window.saveHosts();
+        QFile settings(data.filePath("window.ini"));
+        QVERIFY(settings.open(QIODevice::ReadOnly));
+        QVERIFY(!settings.readAll().contains("fixture-answer"));
+        window.close();
+    }
+    void sshHostEditsSeparateSourcesAndProtectDowngrades() {
+        TestHome home;
+        QTemporaryDir data;
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        HostProfile original{"remote", "fixture-host", false};
+        window.addHost(original, false);
+        auto edited = original;
+        edited.user = "alice";
+        edited.port = 2222;
+        edited.identityFile = "~/.ssh/test key";
+        window.updateHost(edited);
+        const auto replacement = window.hosts["remote"];
+        QVERIFY(!replacement.generation.isEmpty());
+        QVERIFY(original.discoveryScope() != replacement.discoveryScope());
+        QSettings settings(data.filePath("window.ini"), QSettings::IniFormat);
+        const auto modern =
+            readHosts(QJsonDocument::fromJson(settings.value("hostsV2").toByteArray()).array());
+        const auto legacy =
+            readHosts(QJsonDocument::fromJson(settings.value("hosts").toByteArray()).array());
+        BackendProfile oldSource{"old", "old"};
+        oldSource.kind = "ssh-unix";
+        oldSource.discoveryHost = original.id;
+        oldSource.sshHost = original.ssh;
+        auto newSource = oldSource;
+        newSource.identity["hostGeneration"] = replacement.generation;
+        QVERIFY(window.groupKey(oldSource) != window.groupKey(newSource));
+        QVERIFY(window.groupLabel(oldSource).contains("Previous connection"));
+        QVERIFY(!window.groupLabel(oldSource).contains("2222"));
+        QVERIFY(window.groupLabel(newSource).contains("2222"));
+        QCOMPARE(modern["remote"].json(), replacement.json());
+        QVERIFY(!legacy["remote"].enabled);
+        window.close();
+        Window restored(data.path(), false);
+        QCOMPARE(restored.hosts["remote"].json(), replacement.json());
+        restored.close();
+    }
     void thisComputerCannotBeDisabledOrRemoved() {
         TestHome home;
         QTemporaryDir data;
@@ -1752,16 +1966,16 @@ class WindowTests : public QObject {
         QVERIFY(window.hosts.contains(id));
         QVERIFY(window.hosts[id].enabled);
         QVERIFY(window.hosts[id].servers);
-        QTimer::singleShot(0, &window, [&] {
-            auto *dialog = qobject_cast<QDialog *>(QApplication::activeModalWidget());
-            QVERIFY(dialog);
-            auto close = qScopeGuard([&] { dialog->reject(); });
-            QVERIFY(!dialog->findChild<QPushButton *>("disableHost")->isEnabled());
-            QVERIFY(!dialog->findChild<QPushButton *>("removeHost")->isEnabled());
-            QVERIFY(dialog->findChild<QCheckBox *>("discoverHostServers")->isChecked());
-            QVERIFY(!dialog->findChild<QCheckBox *>("discoverHostServers")->isEnabled());
-        });
         window.hostsDialog();
+        auto *dialog = window.hostsWindow.data();
+        QVERIFY(dialog);
+        QVERIFY(!dialog->isModal());
+        QVERIFY(!dialog->findChild<QPushButton *>("editHost")->isEnabled());
+        QVERIFY(!dialog->findChild<QPushButton *>("disableHost")->isEnabled());
+        QVERIFY(!dialog->findChild<QPushButton *>("removeHost")->isEnabled());
+        QVERIFY(dialog->findChild<QCheckBox *>("discoverHostServers")->isChecked());
+        QVERIFY(!dialog->findChild<QCheckBox *>("discoverHostServers")->isEnabled());
+        dialog->close();
         window.saveHosts();
         window.close();
         Window restored(data.path(), false);
@@ -2401,6 +2615,12 @@ class WindowTests : public QObject {
         QTRY_VERIFY(!probe.records("thread-1").isEmpty());
         const auto key = window.terminal->currentKey();
         const auto before = probe.records("thread-1").size();
+        window.addHost({"auth-remote", "fixture-ssh"}, false);
+        const QJsonArray prompt{
+            QJsonObject{{"id", "p"}, {"attempt", "a"}, {"kind", "entry"}, {"text", "Password:"}}};
+        window.updateAuthentication("auth-remote", prompt);
+        QVERIFY(window.authenticationDialogs["auth-remote"]->isVisible());
+        window.activateWindow();
         QVERIFY(window.terminal->focusSession(key));
         auto *focus = QApplication::focusWidget();
         QVERIFY(focus && window.terminal->isAncestorOf(focus));
@@ -2408,6 +2628,8 @@ class WindowTests : public QObject {
         window.refreshScopes = {"local", "remote"};
         window.applyDiscovery({}, {}, "fresh");
         QVERIFY(window.refreshScopes.contains("remote"));
+        window.updateAuthentication("auth-remote",
+                                    prompt); // Background snapshot must not steal focus.
         QTest::keyClicks(focus, "s");
         QTRY_VERIFY_WITH_TIMEOUT(probe.records("thread-1").size() > before, 1000);
         QCOMPARE(QApplication::focusWidget(), focus);
