@@ -185,6 +185,121 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void activatingRemoteTerminalKeepsItsMovedRowVisible_data() {
+        QTest::addColumn<QString>("activation");
+        for (const auto *name : {"mouse", "enter", "notification", "recent"})
+            QTest::newRow(name) << QString(name);
+    }
+    void activatingRemoteTerminalKeepsItsMovedRowVisible() {
+        QFETCH(QString, activation);
+        QTemporaryDir data;
+        WorkspaceSnapshot saved;
+        saved.revision = 1;
+        QList<Session> records;
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            for (int n = 0; n < 6; ++n) {
+                BackendProfile p{QString("backend-%1").arg(n), QString("Server %1").arg(n)};
+                p.autoConnect = false;
+                if (n >= 2) {
+                    p.kind = "mycodex";
+                    p.sshHost = n < 4 ? "alpha" : "zeta";
+                    p.discoveryHost = p.sshHost;
+                    p.containerId = QString(64, QChar('a' + n));
+                    p.containerEpoch = "epoch";
+                    p.runtimeUser = "test";
+                    p.runtimeHome = "/home/test";
+                    p.dockerContext = "default";
+                    p.socketPath = "/tmp/codex.sock";
+                    p.identity = {{"containerWorkdir", "/work"}};
+                }
+                store.save(p);
+                for (int i = 0; i < 12; ++i) {
+                    auto s = Session::fromThread(
+                        p.id,
+                        {{"id", QString::number(i)},
+                         {"name", "Session " + QString::number(i)},
+                         {"cwd", "/work/project"},
+                         {"path", "/saved/rollout"},
+                         {"updatedAt", QDateTime::currentSecsSinceEpoch() - 1000 - n * 100 - i}});
+                    records << s;
+                    store.save(s);
+                    WorkspaceView v;
+                    v.id = QString("view-%1-%2").arg(n).arg(i);
+                    v.backendId = p.id;
+                    v.threadId = s.id;
+                    v.title = s.title;
+                    v.cwd = s.cwd;
+                    v.disposition = ViewDisposition::Disconnected;
+                    saved.views << v;
+                    saved.recent << v.id;
+                }
+            }
+            saved.selected = saved.views.first().id;
+            saved.recent.removeAll(saved.views.last().id);
+            saved.recent.insert(1, saved.views.last().id);
+            store.save(saved);
+        }
+        Window window(data.path(), false);
+        window.resize(1000, 600);
+        window.show();
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        window.tabs->setCurrentIndex(int(SessionView::Opened));
+        auto *tree = window.tree;
+        auto *area = window.terminal;
+        QCOMPARE(area->workspace().views.size(), saved.views.size());
+        const auto target = saved.views.last();
+        const auto key = target.key();
+        tree->expandAll();
+        tree->scrollTo(nodeWithKey(tree, key));
+        QCoreApplication::processEvents();
+        QVERIFY(tree->verticalScrollBar()->value() > 0);
+        const QPersistentModelIndex persistent(nodeWithKey(tree, key));
+        auto host = persistent.parent();
+        while (host.parent().isValid())
+            host = host.parent();
+        const QPersistentModelIndex persistentHost(host);
+        QVERIFY(host.row() > 0);
+        QSignalSpy focused(area, &TerminalArea::sessionFocused);
+        if (activation == "mouse") {
+            const auto point = tree->visualRect(persistent).center();
+            QTest::mouseClick(tree->viewport(), Qt::LeftButton, {}, point);
+            QTest::mouseDClick(tree->viewport(), Qt::LeftButton, {}, point);
+            QTest::mouseRelease(tree->viewport(), Qt::LeftButton, {}, point);
+        } else if (activation == "enter") {
+            tree->setCurrentIndex(persistent);
+            QTest::keyClick(tree, Qt::Key_Return);
+        } else if (activation == "notification") {
+            window.findChild<Notifications *>()->openRequested(target.backendId, target.threadId,
+                                                               {});
+        } else {
+            area->switchRecent();
+        }
+        QCOMPARE(focused.size(), 1);
+        QCOMPARE(area->currentKey(), key);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
+        QCOMPARE(persistentHost.row(), 0);
+        QVERIFY(tree->isExpanded(persistentHost));
+        QTRY_VERIFY(tree->viewport()->rect().intersects(tree->visualRect(persistent)));
+        QCOMPARE(area->workspace().views.size(), saved.views.size());
+        QVERIFY(area->findChildren<KParts::ReadOnlyPart *>().isEmpty());
+
+        // An older metadata batch cannot undo the visit. Background promotion
+        // must not select another terminal or force scrolling to the current one.
+        window.applySessions(records);
+        QCOMPARE(persistentHost.row(), 0);
+        tree->verticalScrollBar()->setValue(tree->verticalScrollBar()->maximum());
+        const auto scroll = tree->verticalScrollBar()->value();
+        auto background = records.first();
+        background.recency = window.sessions[key].opened + 10;
+        window.applySessions({background});
+        QCOMPARE(persistentHost.row(), 1);
+        QCOMPARE(tree->currentIndex().data(KeyRole).toString(), key);
+        QCOMPARE(area->currentKey(), key);
+        QCOMPARE(tree->verticalScrollBar()->value(), scroll);
+        QCOMPARE(focused.size(), 1);
+        window.close();
+    }
     void largeSearchPerformance_data() {
         QTest::addColumn<int>("delay");
         QTest::newRow("rapid") << 0;
@@ -2071,13 +2186,13 @@ class WindowTests : public QObject {
         window.show();
         auto *tree = window.findChild<QTreeView *>();
         QTRY_COMPARE(tree->model()->rowCount(), 2);
-        QCOMPARE(tree->model()->index(0, 0).data().toString(), "This Computer · alice@workstation");
         QSet<QString> labels;
         for (int i = 0; i < tree->model()->rowCount(); ++i) {
             const auto group = tree->model()->index(i, 0);
             QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
             labels.insert(group.data(Qt::DisplayRole).toString());
-            QCOMPARE(tree->model()->rowCount(group), i == 0 ? 2 : 1);
+            QCOMPARE(tree->model()->rowCount(group),
+                     group.data(KeyRole) == "group:local-host" ? 2 : 1);
             for (int j = 0; j < tree->model()->rowCount(group); ++j) {
                 const auto server = tree->model()->index(j, 0, group);
                 QCOMPARE(server.data(Qt::DisplayRole).toString(),

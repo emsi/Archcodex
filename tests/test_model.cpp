@@ -9,6 +9,113 @@ using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
+    void hostsFollowVisibleSessionRecency_data() {
+        QTest::addColumn<int>("view");
+        for (int view = 0; view <= int(SessionView::Opened); ++view)
+            QTest::newRow(qPrintable(QString::number(view))) << view;
+    }
+    void hostsFollowVisibleSessionRecency() {
+        QFETCH(int, view);
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        QAbstractItemModelTester tester(&filter,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        model.backendGroup("local", "local-host", "This Computer");
+        model.backendGroup("alpha", "ssh-alpha", "Alpha");
+        model.backendGroup("remote", "ssh-zeta", "Zeta");
+        model.backendGroup("sibling", "ssh-zeta", "Zeta");
+        auto make = [&](const QString &backend, const QString &id, qint64 time) {
+            auto s = Session::fromThread(
+                backend,
+                {{"id", id},
+                 {"cwd", "/work/" + id},
+                 {"name", "Unchanged title"},
+                 {"path", "/saved/" + id},
+                 {"updatedAt", time},
+                 {"status",
+                  QJsonObject{{"type", view == int(SessionView::Running) ? "active" : "idle"}}}});
+            s.terminalOpen = true;
+            return s;
+        };
+        auto selected = make("remote", "selected", 100);
+        auto local = make("local", "local", 400);
+        model.upsertMany({local, make("alpha", "alpha", 300), make("sibling", "sibling", 200),
+                          selected, make("remote", "other-project", 150)});
+        filter.setView(SessionView(view));
+        auto topHost = [&] { return filter.index(0, 0).data(KeyRole).toString(); };
+        QCOMPARE(topHost(), "group:local-host");
+        const auto key = sessionKey(selected.backendId, selected.id);
+        const QPersistentModelIndex persistent(filter.mapFromSource(model.sessionIndex(key)));
+        QSignalSpy reset(&model, &QAbstractItemModel::modelReset);
+        QSignalSpy topology(&model, &SessionModel::topologyChanged);
+        selected.opened = 1000;
+        model.upsert(selected);
+        QCOMPARE(topHost(), "group:ssh-zeta");
+        auto index = filter.mapFromSource(model.sessionIndex(key));
+        QCOMPARE(persistent, index);
+        for (auto parent = index.parent(); parent.isValid(); parent = parent.parent()) {
+            QCOMPARE(parent.row(), 0);
+            QCOMPARE(parent.data(RecencyRole).toLongLong(), 1000);
+        }
+        QCOMPARE(reset.size(), 0);
+        QCOMPARE(topology.size(), 0); // A visit sorts existing rows, without rebuilding them.
+        model.upsert(selected);       // Duplicate metadata does not alter the result.
+        QCOMPARE(topHost(), "group:ssh-zeta");
+        local.recency = 1100; // Existing background-activity semantics apply to hosts too.
+        model.upsert(local);
+        QCOMPARE(topHost(), "group:local-host");
+        QCOMPARE(persistent.data(KeyRole).toString(), key);
+
+        // Removing the newest visible descendant must lower its ancestors again.
+        model.remove(local.backendId, local.id);
+        QCOMPARE(topHost(), "group:ssh-zeta");
+        model.remove(selected.backendId, selected.id);
+        QCOMPARE(topHost(), "group:ssh-alpha");
+
+        SessionQuery query;
+        query.scoped = true;
+        query.backends = {"remote", "sibling"};
+        filter.setView(SessionView(view), query);
+        QCOMPARE(filter.index(0, 0).data(KeyRole).toString(), "group:ssh-zeta");
+        QCOMPARE(filter.index(0, 0).data(RecencyRole).toLongLong(), 200);
+    }
+    void hostRecencyTiesAndFilteringAreStable() {
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        model.backendGroup("a", "a", "Zeta");
+        model.backendGroup("z", "z", "Alpha");
+        auto make = [](const QString &backend, const QString &id, qint64 time) {
+            auto s = Session::fromThread(
+                backend,
+                {{"id", id}, {"cwd", "/work"}, {"path", "/saved/" + id}, {"updatedAt", time}});
+            s.terminalOpen = true;
+            return s;
+        };
+        auto a = make("a", "opened", 100), z = make("z", "opened", 100);
+        model.upsertMany({a, z});
+        auto topHost = [&] { return filter.index(0, 0).data(KeyRole).toString(); };
+        QCOMPARE(topHost(), "group:z"); // Same stable key tie-breaker as other rows.
+        model.backendGroup("a", "a", "AAA renamed host");
+        model.backendGroup("z", "z", "ZZZ renamed host");
+        model.upsertMany({z, a});
+        QCOMPARE(topHost(), "group:z");
+        auto history = make("a", "history", 1000);
+        history.terminalOpen = false;
+        model.upsert(history);
+        QCOMPARE(topHost(), "group:a");
+        filter.setView(SessionView::Opened);
+        QCOMPARE(topHost(), "group:z"); // Closed history cannot promote a host in Opened.
+        a.opened = 200;
+        model.upsert(a);
+        QCOMPARE(topHost(), "group:a");
+        a.terminalOpen = false;
+        model.upsert(a);
+        QCOMPARE(topHost(), "group:z");
+        filter.setView(SessionView::All);
+        QCOMPARE(topHost(), "group:a");
+    }
     void pagesAppendWithoutRegrouping() {
         SessionModel model;
         SessionFilter filter;

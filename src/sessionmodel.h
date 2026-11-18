@@ -25,8 +25,7 @@ enum ModelRole {
     ActiveCountRole,
     RunningCountRole,
     WaitingCountRole,
-    UnknownCountRole,
-    GroupOrderRole
+    UnknownCountRole
 };
 enum class SessionView { All, Active, Running, Waiting, Opened };
 enum class NodeKind { Server, Folder, Session, Group };
@@ -44,8 +43,7 @@ class SessionModel : public QStandardItemModel {
   public:
     explicit SessionModel(QObject *parent = nullptr);
     void backendName(const QString &id, const QString &name);
-    void backendGroup(const QString &backend, const QString &group, const QString &label,
-                      int order = 0);
+    void backendGroup(const QString &backend, const QString &group, const QString &label);
     void backendDetails(const QString &id, const QString &details);
     void backendEnvironment(const QString &id, const QString &environment);
     QString environment(const QString &backend) const;
@@ -79,7 +77,6 @@ class SessionModel : public QStandardItemModel {
     QHash<QString, QString> containerWorkdirs;
     QHash<QString, QStandardItem *> roots, folders, threads;
     QHash<QString, QString> backendGroups, groupLabels;
-    QHash<QString, int> groupOrders;
     QHash<QString, QStandardItem *> groups;
     QHash<QString, Session> records;
     QHash<QString, QSet<QString>> backendRecords;

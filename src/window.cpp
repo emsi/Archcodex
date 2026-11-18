@@ -1874,8 +1874,7 @@ void Window::applyContainers(const QString &hostId, const QJsonObject &inventory
             container.kind = "mycodex";
             container.sshHost = hosts[hostId].ssh;
             container.discoveryHost = hostId;
-            model->backendGroup(rootId, groupKey(container), groupLabel(container),
-                                container.sshHost.isEmpty() ? 0 : 1);
+            model->backendGroup(rootId, groupKey(container), groupLabel(container));
             model->backendName(rootId, "myCodex · " + c["containerName"].toString());
             model->backendDetails(
                 rootId, c["paused"].toBool() ? "Container paused"
@@ -2011,22 +2010,26 @@ QString Window::groupLabel(const BackendProfile &p) const {
 }
 void Window::presentProfile(const BackendProfile &p, const QString &label) {
     for (auto *source : {model, results}) {
-        source->backendGroup(p.id, groupKey(p), groupLabel(p), p.sshHost.isEmpty() ? 0 : 1);
+        source->backendGroup(p.id, groupKey(p), groupLabel(p));
         source->backendName(p.id, label.isEmpty() ? serverTreeLabel(p) : label);
         source->backendDetails(p.id, serverDetails(p));
     }
 }
 void Window::terminalFocused(const QString &key) {
-    syncCurrentSession();
     auto it = sessions.find(key);
-    if (it == sessions.end())
+    if (it == sessions.end()) {
+        syncCurrentSession();
         return;
+    }
     it->opened = QDateTime::currentSecsSinceEpoch();
     model->upsert(*it);
     if (searchSessions.contains(key)) {
         searchSessions[key] = *it;
         results->upsert(*it);
     }
+    // A visit can move an entire host above the viewport. Reveal the selected
+    // row after both models have sorted; background updates do not take this path.
+    syncCurrentSession();
     if (!it->id.startsWith("new-"))
         persist([&] { store->save(*it); });
 }
