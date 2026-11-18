@@ -274,6 +274,19 @@
       "sha256": "5bf7f098d6d5f4a2525fd2df2359337f4e8cfe7712be0a814dfedd1d860755cf",
       "bytes": 2475904,
       "notes": "v0.11.1.md"
+    },
+    {
+      "version": "0.12.0",
+      "tag": "v0.12.0",
+      "previous_tag": "v0.11.1",
+      "title": "Archcodex 0.12.0 \u2014 SSH hosts and session navigation",
+      "source_commit": "f0d45b8ce27de697dec354ec3582897a7f5d1cb4",
+      "source_commit_date": "2026-11-18T14:22:07Z",
+      "flatpak_commit": "e5ea48115efa8b615e7d74ba5b49db44497c02dbef0dec6fe21d2eb2cf74fc9b",
+      "asset": "Archcodex-0.12.0-x86_64.flatpak",
+      "sha256": "4a28dfb1cab5b6ce5b9e58528c083abc2992f01ab31ef34b2b82281bc5bb95da",
+      "bytes": 2512040,
+      "notes": "v0.12.0.md"
     }
   ]
 }
