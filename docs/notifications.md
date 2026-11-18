@@ -38,6 +38,28 @@ minimized window preserves maximized/full-screen state. The window manager can
 refuse focus; Archcodex does not force it. XWayland and native Wayland activation
 depend on the compositor. Native Wayland is not enabled in the current package.
 
+On X11, a click's valid nonzero 32-bit `_TIME` timestamp is preserved. A tokenless
+or malformed click instead obtains the current X-server timestamp through
+`KStartupInfo::createNewStartupId()` before requesting activation. A D-Bus click
+does not update Qt's last input time; passing zero to `KX11Extras::activateWindow()`
+would reuse that old time and can leave Archcodex behind a covering window even
+after switching desktops. The fallback is one local X-server round trip, scoped
+to explicit clicks. It does not force focus or change keep-above policy. A valid
+but stale supplied timestamp is left to the window manager's policy.
+
+The fallback also covers older portal/backend paths that deliver `ActionInvoked`
+without activation metadata. Archcodex does not register a separate
+`org.freedesktop.Application.Activate` handler or cache uncorrelated tokens from
+other D-Bus messages. Portal v2 and native KNotifications continue to pass their
+available click tokens directly. An opaque token without an X11 `_TIME` suffix
+takes the X-server fallback on XWayland. Native Wayland passes its token directly
+to the compositor.
+
+Optional `QT_LOGGING_RULES=archcodex.notifications.debug=true` diagnostics report
+whether X11 activation used a supplied or freshly obtained time, without logging
+the token. They report the request, not a guarantee that the compositor granted
+focus.
+
 ## Question compatibility
 
 | Server behavior | Notification support |
@@ -146,6 +168,36 @@ The X11 fixture checks requests for the existing desktop and window without a
 move request. It is not a KWin acceptance test. Actual KDE/X11 notification clicks
 from a sandboxed Flatpak, other desktop policies and XWayland remain host
 acceptance checks; this build container cannot create Flatpak user namespaces.
+
+## Window activation regression
+
+The X11 protocol cases in `test-notifications` check the activation source,
+timestamp validation/fallback and preservation of desktop assignment. Run these
+with `ARCHCODEX_TEST_X11_WM=1` only on a private Xvfb **without** another window
+manager; the fixture owns its root-window properties.
+
+When the optional test dependency `xcb-xtest` is available, CMake also builds
+`test-x11activation`. Run it with a real KWin and isolated display/bus/configuration:
+
+```sh
+python3 tests/run-x11-activation.py -- build/test-x11activation
+python3 tests/run-x11-activation.py --focus-policy 4 \
+  --case explicitClick:covered-here-tokenless \
+  --case explicitClick:covered-here-token -- build/test-x11activation
+```
+
+The runner requires `Xvfb`, `dbus-daemon` and `kwin_x11`; it does not install them.
+It uses separate application processes and XTEST input to establish stale target
+input time. Assertions cover actual focus and stacking, same/other desktops,
+frontmost, minimized, maximized, full-screen and keep-above cases. Supplied stale
+timestamps and extreme focus protection must still be refused. The runner cleans
+up its process groups and temporary configuration without changing the desktop's
+window-manager settings.
+
+This controlled regression is separate from installed Flatpak/notification-daemon
+click-through acceptance. Validate that on the target KDE/X11 desktop and record
+the active portal backend; check XWayland separately. The local build container's
+extracted KWin 5.27 test does not establish KWin 6 or full sandbox acceptance.
 
 ## Diagnosing a container attribution problem
 

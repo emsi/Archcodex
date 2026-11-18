@@ -22,6 +22,7 @@ class Notifications : public QObject {
     void withdrawBackend(const QString &backend);
     void withdrawSession(const QString &backend, const QString &thread);
     void setViewedSession(const QString &backend, const QString &thread);
+    // Explicit notification clicks only: tokenless X11 clicks obtain a fresh server time.
     static void presentWindow(QWidget *window, const QString &activationToken);
   signals:
     void openRequested(const QString &backend, const QString &thread, const QString &token);

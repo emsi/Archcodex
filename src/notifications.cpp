@@ -2,6 +2,7 @@
 #include "notifications.h"
 #include "notificationlog.h"
 #include <KNotification>
+#include <KStartupInfo>
 #include <KWindowInfo>
 #include <KWindowSystem>
 #include <KX11Extras>
@@ -19,6 +20,24 @@ namespace Archcodex {
 static constexpr auto service = "org.freedesktop.portal.Desktop";
 static constexpr auto path = "/org/freedesktop/portal/desktop";
 static constexpr auto interface = "org.freedesktop.portal.Notification";
+namespace {
+quint32 x11Timestamp(QStringView token) {
+    if (token.size() > 4096 || token.contains(QChar::Null))
+        return 0;
+    const auto marker = token.lastIndexOf(u"_TIME");
+    if (marker < 0)
+        return 0;
+    const auto digits = token.sliced(marker + 5);
+    if (digits.isEmpty() || digits.size() > 10)
+        return 0;
+    for (const auto digit : digits)
+        if (digit < u'0' || digit > u'9')
+            return 0;
+    bool valid = false;
+    const auto time = digits.toUInt(&valid);
+    return valid ? time : 0;
+}
+} // namespace
 Notifications::Notifications(QObject *parent)
     : Notifications(QFile::exists("/.flatpak-info"), QDBusConnection::sessionBus(), parent) {}
 Notifications::Notifications(bool usePortal, const QDBusConnection &connection, QObject *parent)
@@ -208,7 +227,21 @@ void Notifications::show(const SessionAttention &event, const BackendProfile &pr
     notification->sendEvent();
 }
 void Notifications::presentWindow(QWidget *window, const QString &token) {
-    if (KWindowSystem::isPlatformX11()) {
+    const bool x11 = KWindowSystem::isPlatformX11();
+    quint32 timestamp = 0;
+    if (x11) {
+        timestamp = x11Timestamp(token);
+        const bool supplied = timestamp != 0;
+        // This entry point is called only for an explicit notification click.
+        // A tokenless D-Bus action does not update the application's X input time;
+        // activateWindow(win, 0) would reuse that stale time and KWin can reject it.
+        // Fetch a current X-server time once, retaining ordinary focus protection.
+        // A valid supplied time (even an old one) remains the WM's decision.
+        if (!supplied)
+            timestamp = x11Timestamp(QString::fromUtf8(KStartupInfo::createNewStartupId()));
+        qCDebug(notificationLog) << "present window X11; timestamp source"
+                                 << (supplied ? "notification" : "X server") << "usable"
+                                 << (timestamp != 0);
         const KWindowInfo info(window->winId(), NET::WMDesktop);
         if (info.valid() && !info.onAllDesktops() && info.desktop() > 0 &&
             info.desktop() != KX11Extras::currentDesktop())
@@ -217,10 +250,11 @@ void Notifications::presentWindow(QWidget *window, const QString &token) {
     // showNormal() would discard maximized/full-screen state.
     window->setWindowState(window->windowState() & ~Qt::WindowMinimized);
     window->show();
-    if (KWindowSystem::isPlatformX11()) {
-        const auto marker = token.lastIndexOf("_TIME");
-        const auto timestamp = marker < 0 ? 0 : token.mid(marker + 5).toULong();
-        KX11Extras::activateWindow(window->winId(), timestamp);
+    if (x11) {
+        if (timestamp)
+            KX11Extras::activateWindow(window->winId(), timestamp);
+        else
+            qWarning() << "Could not obtain an X11 timestamp for notification activation.";
     } else if (KWindowSystem::isPlatformWayland()) {
         KWindowSystem::setCurrentXdgActivationToken(token);
         KWindowSystem::activateWindow(window->windowHandle());
