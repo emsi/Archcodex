@@ -18,6 +18,7 @@ listing.
 
 | Version | Changes |
 | --- | --- |
+| [0.12.0](v0.12.0.md) | Unified hosts, interactive SSH authentication, notification activation and host recency |
 | [0.11.1](v0.11.1.md) | Responsive conversation search, compact search feedback and Refresh of stale automatic connections |
 | [0.11.0](v0.11.0.md) | Copy selected terminal text with Ctrl+C while preserving cancellation without a selection |
 | [0.10.1](v0.10.1.md) | GitHub update checks and installation, stable terminal geometry and synchronized session navigation |
