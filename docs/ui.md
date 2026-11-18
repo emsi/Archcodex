@@ -14,10 +14,10 @@ resizable divider. Keep the first version simple.
 The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, **Waiting**, then **Opened**. These tabs are views of the same
 project/session data. Each view uses a predicate over the same session model.
 
-Top-level rows separate the local computer (`username @ hostname`), local myCodex
-(`myCodex @ hostname`) and each remote myCodex connection (`myCodex @ remote-host`).
-The local computer comes first, local myCodex second, and remote groups follow
-in name order. Server/container nodes within them keep backend routing explicit,
+Top-level rows group configurations by host: **This Computer** contains local
+Codex servers and myCodex containers; each configured SSH host has its own group.
+Every level, including hosts, sorts by its newest visible session's recency.
+Server/container nodes within them keep backend routing explicit,
 with short labels such as `Main` or the container name. Each expands into compact
 folders and sessions ordered by recent use. No project creation is needed.
 Group labels use discovery-provided host identity; configured SSH aliases are
@@ -112,7 +112,7 @@ Changes into running, idle/waiting or other loaded states advance recency using
 the event receipt time. Duplicate status notifications, inventory refreshes and
 thread-close events do not promote old history. A concurrent older metadata read
 cannot roll recency back. Sorting uses the later of this activity timestamp and
-the last terminal focus time; host groups retain their fixed order.
+the last terminal focus time, including at host level.
 Tooltips are escaped plain metadata
 rendered beside the navigator, anchored to the hovered row, and remain a stable
 snapshot while visible. This prevents metadata bursts from continually replacing
@@ -183,6 +183,20 @@ last activation and backend recency, and parent rows use their newest descendant
 Changed loaded-session status can advance backend recency; duplicate statuses
 do not. Timestamps use whole seconds, so a transition need not visibly move a row.
 Keyboard switchers freeze their own activation-only order during a gesture.
+
+Host groups use this same rule, so This Computer is not pinned above remote
+hosts. Background activity can promote a whole host without changing the active
+terminal. Each tab/search computes parent recency from its visible sessions;
+closing a terminal can lower its host in Opened, and hidden history cannot promote
+that host there. Equal timestamps use stable node IDs, including empty groups,
+rather than names or connection type. Whole-second ties and server clock skew
+remain limitations of the existing session timestamps.
+
+Explicit terminal activation reveals the selected row after updating recency,
+so moving its host does not leave it outside the viewport. Reordering preserves
+selection and expansion identities; background promotion does not itself scroll
+to the active terminal. The existing event-driven model and metadata format are
+unchanged.
 
 Indicators distinguish running, waiting for approval/input, idle, failed and
 unknown/disconnected states. Retained client errors stay in Active only. Do not communicate these differences through color

@@ -190,6 +190,13 @@ while True:
         }
     for (auto *backend : connected)
         QTRY_VERIFY(backend->ready());
+    const bool hostGroups = qEnvironmentVariableIsSet("ARCHCODEX_SEARCH_HOST_GROUPS");
+    if (hostGroups)
+        // Exercise moving expanded host branches with the same local protocol
+        // fixtures and PTY. Grouping changes no connection or launch routing.
+        for (auto *source : window.findChildren<SessionModel *>())
+            for (const auto &profile : servers.profiles)
+                source->backendGroup(profile.id, "benchmark-" + profile.id, profile.name);
     auto *area = window.findChild<TerminalArea *>();
     auto p = connected.first()->profile;
     auto session = Session::fromThread(p.id, QJsonObject{{"id", "benchmark-terminal"},
@@ -342,11 +349,16 @@ while True:
         visible += source->item(i)->data(CountRole).toInt();
     if (shape != "idle")
         QCOMPARE(visible, 5760);
+    if (hostGroups && shape != "idle")
+        for (const auto &profile : servers.profiles)
+            QCOMPARE(source->nodeIndex("group:benchmark-" + profile.id).data(CountRole).toInt(),
+                     1920);
     QVERIFY(!echoes.isEmpty());
     QJsonObject result{
         {"version", ARCHCODEX_VERSION},
         {"delay_ms", delay},
         {"shape", shape.isEmpty() ? "legacy" : shape},
+        {"host_groups", hostGroups},
         {"rounds", rounds},
         {"input", shape.isEmpty() ? "Qt" : "XTest"},
         {"elapsed_ms", duration},

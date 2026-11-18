@@ -138,12 +138,11 @@ void SessionModel::backendName(const QString &id, const QString &name) {
     } else
         rebuild(id);
 }
-void SessionModel::backendGroup(const QString &backend, const QString &group, const QString &label,
-                                int order) {
+void SessionModel::backendGroup(const QString &backend, const QString &group,
+                                const QString &label) {
     const bool moved = backendGroups.value(backend) != group;
     backendGroups[backend] = group;
     groupLabels[group] = label;
-    groupOrders[group] = order;
     if (moved && roots.contains(backend)) {
         emit topologyAboutToChange();
         placeRoot(backend);
@@ -151,7 +150,7 @@ void SessionModel::backendGroup(const QString &backend, const QString &group, co
         emit topologyChanged();
     }
     if (auto *item = groups.value(group)) {
-        updateItem(item, {{Qt::DisplayRole, label}, {GroupOrderRole, order}});
+        updateItem(item, {{Qt::DisplayRole, label}});
         aggregate(item);
     }
 }
@@ -167,7 +166,6 @@ void SessionModel::placeRoot(const QString &backend) {
         group->setColumnCount(1);
         group->setData("group:" + key, KeyRole);
         group->setData(int(NodeKind::Group), KindRole);
-        group->setData(groupOrders.value(key), GroupOrderRole);
         appendRow(group);
         groups[key] = group;
     }
@@ -760,15 +758,8 @@ bool SessionFilter::filterAcceptsRow(int row, const QModelIndex &parent) const {
            sourceModel()->index(row, 0, parent).data(CountRole).toInt() > 0;
 }
 bool SessionFilter::lessThan(const QModelIndex &a, const QModelIndex &b) const {
-    // Host groups stay in a predictable order while sessions beneath them use
-    // recency. Comparisons are reversed here because the proxy sorts descending.
-    if (a.data(KindRole).toInt() == int(NodeKind::Group) &&
-        b.data(KindRole).toInt() == int(NodeKind::Group)) {
-        if (a.data(GroupOrderRole) != b.data(GroupOrderRole))
-            return a.data(GroupOrderRole).toInt() > b.data(GroupOrderRole).toInt();
-        const auto name = QString::localeAwareCompare(a.data().toString(), b.data().toString());
-        return name ? name > 0 : a.data(KeyRole).toString() > b.data(KeyRole).toString();
-    }
+    // Every level follows its newest visible session. Stable identity breaks
+    // ties without letting host labels or connection type override recent use.
     const auto x = a.data(RecencyRole).toLongLong(), y = b.data(RecencyRole).toLongLong();
     if (x != y)
         return x < y;
