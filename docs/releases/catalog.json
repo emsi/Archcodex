@@ -287,6 +287,19 @@
       "sha256": "4a28dfb1cab5b6ce5b9e58528c083abc2992f01ab31ef34b2b82281bc5bb95da",
       "bytes": 2512040,
       "notes": "v0.12.0.md"
+    },
+    {
+      "version": "0.13.0",
+      "tag": "v0.13.0",
+      "previous_tag": "v0.12.0",
+      "title": "Archcodex 0.13.0 \u2014 Connections and keyboard paste",
+      "source_commit": "10312ea19e0469ca6dd03cf10e0e92ad90faf53a",
+      "source_commit_date": "2026-11-19T15:01:59Z",
+      "flatpak_commit": "54a13d79ac8eb80b7b2f93aa35ae28edf20b2631d8d194317a18ed1d2cf33b4c",
+      "asset": "Archcodex-0.13.0-x86_64.flatpak",
+      "sha256": "25c7e32afc0bb4ca50dd0f0ea79078a53804dee5c7a530b5b977fa93875766a7",
+      "bytes": 2529632,
+      "notes": "v0.13.0.md"
     }
   ]
 }
