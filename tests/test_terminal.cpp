@@ -80,7 +80,11 @@ bool openTerminalMenu(QWidget *input) {
     QContextMenuEvent event(QContextMenuEvent::Keyboard, QPoint(10, 10),
                             input->mapToGlobal(QPoint(10, 10)));
     QApplication::sendEvent(input, &event);
-    return shown;
+    // A desktop restores activation when the popup closes; the offscreen test
+    // platform has no window manager to do that for us.
+    input->window()->activateWindow();
+    input->setFocus();
+    return shown && QTest::qWaitForWindowActive(input->window());
 }
 } // namespace
 
