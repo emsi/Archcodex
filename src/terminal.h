@@ -5,6 +5,7 @@
 #include <KParts/ReadOnlyPart>
 #include <QPointer>
 #include <QWidget>
+#include <memory>
 class QStackedWidget;
 class QLabel;
 class QKeyEvent;
@@ -13,6 +14,7 @@ class QListWidget;
 class QAction;
 namespace Archcodex {
 class Commands;
+class TerminalShortcuts;
 class TerminalArea : public QWidget {
     Q_OBJECT
   public:
@@ -90,7 +92,7 @@ class TerminalArea : public QWidget {
     QListWidget *switcherList = nullptr;
     QLabel *switcherTitle = nullptr;
     QPointer<Commands> commands;
-    void updateShortcuts();
+    std::unique_ptr<TerminalShortcuts> shortcuts;
     QAction *terminalAction(const QString &name) const;
     void remember(const QString &key);
     bool showSession(const QString &key);

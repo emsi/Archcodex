@@ -4,7 +4,11 @@
 #include <KConfig>
 #include <KConfigGroup>
 #include <QAction>
+#include <QApplication>
 #include <QKeyEvent>
+#include <QLineEdit>
+#include <QPlainTextEdit>
+#include <QTextEdit>
 #include <QWidget>
 
 namespace Archcodex {
@@ -23,6 +27,41 @@ static QKeyCombination canonical(QKeyCombination combination) {
 Commands::Commands(QWidget *owner)
     : QObject(owner), window(owner), actions(new KActionCollection(this)) {
     actions->setComponentDisplayName("Archcodex");
+    qApp->installEventFilter(this);
+}
+bool Commands::eventFilter(QObject *watched, QEvent *event) {
+    if (event->type() != QEvent::ShortcutOverride && event->type() != QEvent::KeyPress)
+        return false;
+    auto *widget = qobject_cast<QWidget *>(watched);
+    if (!widget || widget != QApplication::focusWidget())
+        return false;
+    const auto *paste = actions->action("terminal_paste");
+    const auto *key = static_cast<QKeyEvent *>(event);
+    if (!paste || !paste->isEnabled() ||
+        !paste->shortcuts().contains(QKeySequence(key->keyCombination())))
+        return false;
+    // QWidget::isAncestorOf stops at child windows; QObject ownership includes
+    // the main window's dialogs without claiming unrelated application windows.
+    auto *owner = static_cast<QObject *>(widget);
+    while (owner && owner != window)
+        owner = owner->parent();
+    if (!owner)
+        return false;
+    // Use the configured Paste keys in native editors too, including dialogs
+    // and Konsole's scrollback search. Never fall through to the terminal when
+    // a read-only editor has focus. Standard Ctrl+V remains the editor's own key.
+    const auto handle = [&](auto *editor) {
+        if (!editor)
+            return false;
+        event->accept();
+        if (event->type() == QEvent::KeyPress && !editor->isReadOnly() &&
+            (!key->isAutoRepeat() || paste->autoRepeat()))
+            editor->paste();
+        return true;
+    };
+    return handle(qobject_cast<QLineEdit *>(widget)) ||
+           handle(qobject_cast<QPlainTextEdit *>(widget)) ||
+           handle(qobject_cast<QTextEdit *>(widget));
 }
 QAction *Commands::add(const QString &id, const QString &label, const QString &category,
                        const QList<QKeySequence> &defaults, const std::function<void()> &handler,

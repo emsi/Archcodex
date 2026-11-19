@@ -319,8 +319,12 @@ and shortcut settings use that collection. Navigation bindings apply throughout
 the main window, including Konsole, without desktop-wide shortcut registrations.
 The KPart's native shortcut-override signal allows registered application bindings
 through; conflicting KPart shortcuts are removed while claimed and restored when
-unassigned. Other terminal input is unchanged. Held cycling is the only custom
-press/release controller. Modal dialogs and shortcut recording retain their input.
+unassigned. Each action is reconciled when its shortcuts change, including when
+Konsole initializes its context menu. Newly inserted actions are registered, and
+registrations end with their terminal. Reconfiguration preserves original bindings
+and KDE defaults; temporary context-menu shortcut hints are not saved as defaults.
+Other terminal input is unchanged. Held cycling is the only custom press/release
+controller. Modal dialogs and shortcut recording retain their input.
 
 | Default | Command |
 | --- | --- |
@@ -337,7 +341,7 @@ press/release controller. Modal dialogs and shortcut recording retain their inpu
 | Ctrl+Shift+, | Settings. |
 | F10 | Focus the menu bar. |
 | Ctrl+C / Ctrl+Shift+C / Ctrl+Insert | Copy terminal selection (terminal context). |
-| Ctrl+Shift+V / Shift+Insert | Paste into terminal (terminal context). |
+| Ctrl+Shift+V / Shift+Insert | Paste into the focused terminal or editable text field. |
 
 Ctrl+C copies only when the terminal has selected text. Without a selection it
 reaches Codex or the foreground program unchanged, preserving cancellation and
@@ -345,6 +349,13 @@ interrupts. Ctrl+Shift+C and Ctrl+Insert keep their existing Copy behavior. This
 uses the configurable Terminal Copy action; removing its Ctrl+C binding restores
 ordinary terminal Ctrl+C even with a selection. Text fields retain their own Copy
 handling, including the terminal's scrollback search field.
+
+Configured Paste bindings also work in native line edits and text editors belonging
+to the application window and its dialogs. They paste into the focused editor,
+including Projects and terminal scrollback search; read-only fields consume the
+shortcut without sending clipboard text into the terminal. Editors retain their
+standard Ctrl+V binding. The Terminal menu keeps the configured shortcut label;
+Konsole's context menu can omit that label when its competing binding is suppressed.
 
 Tree arrows navigate/expand/collapse, Enter opens a session or toggles a parent,
 and Menu/Shift+F10 opens the selected row's context menu without using the pointer.
