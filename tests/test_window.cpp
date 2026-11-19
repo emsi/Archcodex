@@ -1340,6 +1340,11 @@ class WindowTests : public QObject {
                  QKeySequence("Ctrl+Shift+P"));
         QCOMPARE(commands->collection()->action("terminal_find")->shortcut(),
                  QKeySequence("Ctrl+Shift+F"));
+        query->setFocus();
+        QApplication::clipboard()->setText("waiting");
+        QTest::keySequence(query, QKeySequence("Ctrl+Shift+V"));
+        QCOMPARE(query->text(), "waiting");
+        query->clear();
         for (int i = 0; i < 5; ++i) {
             query->setFocus();
             QTest::keyClick(query, Qt::Key(Qt::Key_1 + i), Qt::AltModifier);

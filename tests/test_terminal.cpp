@@ -9,6 +9,7 @@
 #include <KXMLGUIClient>
 #include <QAccessible>
 #include <QClipboard>
+#include <QContextMenuEvent>
 #include <QDialog>
 #include <QFile>
 #include <QFrame>
@@ -19,10 +20,14 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMenu>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QTemporaryDir>
+#include <QTextEdit>
+#include <QTimer>
 #include <QtTest>
 using namespace Archcodex;
 
@@ -61,12 +66,205 @@ QString candidate(TerminalArea &area) {
     return list && list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString()
                                        : QString();
 }
+bool openTerminalMenu(QWidget *input) {
+    bool shown = false;
+    QTimer close;
+    close.setSingleShot(true);
+    QObject::connect(&close, &QTimer::timeout, &close, [&] {
+        if (auto *popup = qobject_cast<QMenu *>(QApplication::activePopupWidget())) {
+            shown = true;
+            popup->close();
+        }
+    });
+    close.start(0);
+    QContextMenuEvent event(QContextMenuEvent::Keyboard, QPoint(10, 10),
+                            input->mapToGlobal(QPoint(10, 10)));
+    QApplication::sendEvent(input, &event);
+    // A desktop restores activation when the popup closes; the offscreen test
+    // platform has no window manager to do that for us.
+    input->window()->activateWindow();
+    input->setFocus();
+    return shown && QTest::qWaitForWindowActive(input->window());
+}
 } // namespace
 
 class TerminalTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void pasteSurvivesKonsoleContextMenu() {
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        auto *area = new TerminalArea;
+        layout->addWidget(area);
+        Commands commands(&host);
+        int pastes = 0, palettes = 0;
+        const QList<QKeySequence> pasteKeys{QKeySequence("Ctrl+Shift+V"),
+                                            QKeySequence("Shift+Insert")};
+        commands.add(
+            "terminal_paste", "Paste", "Terminal", pasteKeys,
+            [&] {
+                ++pastes;
+                area->triggerAction("edit_paste");
+            },
+            area);
+        commands.add(
+            "terminal_copy", "Copy", "Terminal", {QKeySequence("Ctrl+Shift+C")},
+            [&] { area->triggerAction("edit_copy"); }, area);
+        commands.add("command_palette", "Commands", "Navigation", {QKeySequence("Ctrl+Shift+P")},
+                     [&] { ++palettes; });
+        area->setCommands(&commands);
+        BackendProfile profile{"b", "Fixture", "local-unix", "/unused", probe.executable(), false};
+        host.resize(900, 500);
+        host.show();
+        host.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QString error;
+        for (const auto &id : {"first", "second"}) {
+            auto session = Session::fromThread("b", {{"id", id}, {"cwd", home.directory.path()}});
+            QVERIFY2(area->open(profile, session, &error), qPrintable(error));
+            QTRY_VERIFY(!probe.records(id).isEmpty());
+        }
+        const auto action = [](auto &&self, KXMLGUIClient *client,
+                               const QString &name) -> QAction * {
+            if (auto *found = client->actionCollection()->action(name))
+                return found;
+            for (auto *child : client->childClients())
+                if (auto *found = self(self, child, name))
+                    return found;
+            return nullptr;
+        };
+        const auto paste = [&](const QString &id, const QKeySequence &key) {
+            QVERIFY(area->focusSession(sessionKey("b", id)));
+            QApplication::clipboard()->setText("ABC");
+            const auto before = probe.records(id).size();
+            const auto calls = pastes;
+            QTest::keySequence(QApplication::focusWidget(), key);
+            QCOMPARE(pastes, calls + 1);
+            QTRY_COMPARE(probe.records(id).size(), before + 3);
+        };
+        for (const auto &id : {"first", "second"}) {
+            for (const auto &key : pasteKeys)
+                paste(id, key);
+            auto *input = QApplication::focusWidget();
+            KParts::ReadOnlyPart *part = nullptr;
+            for (auto *candidate : area->findChildren<KParts::ReadOnlyPart *>())
+                if (candidate->widget()->isAncestorOf(input))
+                    part = candidate;
+            QVERIFY(part);
+            for (int repeat = 0; repeat < 2; ++repeat) {
+                // Exercise the real lazy XMLGUI factory, not a simulated setter.
+                QVERIFY(openTerminalMenu(input));
+                for (const auto &key : pasteKeys)
+                    paste(id, key);
+                const auto before = palettes;
+                QTest::keySequence(input, QKeySequence("Ctrl+Shift+P"));
+                QCOMPARE(palettes, before + 1);
+            }
+            const auto before = probe.records(id).size();
+            QVERIFY(area->triggerAction("edit_paste"));
+            QTRY_COMPARE(probe.records(id).size(), before + 3);
+            QVERIFY(action(action, part, "edit_paste")->shortcuts().isEmpty());
+            QVERIFY(action(action, part, "edit_copy_contextmenu")->shortcuts().isEmpty());
+        }
+        const auto beforeSearch = probe.records("second").size();
+        QVERIFY(area->triggerAction("edit_find"));
+        auto *search = qobject_cast<QLineEdit *>(QApplication::focusWidget());
+        QVERIFY(search);
+        search->clear();
+        QTest::keySequence(search, pasteKeys.front());
+        QCOMPARE(search->text(), "ABC");
+        QCOMPARE(probe.records("second").size(), beforeSearch);
+        QTest::keyClick(search, Qt::Key_Escape);
+        auto keys = Commands::bindings(commands.collection());
+        keys["terminal_paste"] = {QKeySequence("Ctrl+Alt+V")};
+        keys["terminal_copy"].clear();
+        QVERIFY2(commands.apply(keys, &error), qPrintable(error));
+        for (auto *part : area->findChildren<KParts::ReadOnlyPart *>()) {
+            QCOMPARE(action(action, part, "edit_paste")->shortcuts(), pasteKeys);
+            // Konsole temporarily assigns this hint while its menu is open.
+            // It must not become a persistent shortcut when the host releases Copy.
+            QVERIFY(action(action, part, "edit_copy_contextmenu")->shortcuts().isEmpty());
+            auto *collection = part->actionCollection();
+            auto *late = collection->addAction("late-shortcut");
+            collection->setDefaultShortcuts(
+                late, {QKeySequence("Ctrl+Alt+V"), QKeySequence("Ctrl+Alt+L")});
+            QCOMPARE(late->shortcuts(), QList<QKeySequence>{QKeySequence("Ctrl+Alt+L")});
+            late->setShortcuts({QKeySequence("Ctrl+Alt+V")});
+            QVERIFY(late->shortcuts().isEmpty());
+            delete late;
+        }
+        paste("first", QKeySequence("Ctrl+Alt+V"));
+        paste("second", QKeySequence("Ctrl+Alt+V"));
+        area->closeSession(sessionKey("b", "first"));
+        keys["terminal_paste"] = pasteKeys;
+        QVERIFY2(commands.apply(keys, &error), qPrintable(error));
+        paste("second", pasteKeys.front());
+        delete area; // Registrations must die before Konsole destroys its child actions.
+        QVERIFY2(commands.apply(keys, &error), qPrintable(error));
+    }
+    void pasteTargetsFocusedEditors() {
+        QWidget host;
+        auto *layout = new QVBoxLayout(&host);
+        auto *field = new QLineEdit;
+        auto *plain = new QPlainTextEdit;
+        auto *rich = new QTextEdit;
+        auto *area = new TerminalArea;
+        layout->addWidget(field);
+        layout->addWidget(plain);
+        layout->addWidget(rich);
+        layout->addWidget(area);
+        Commands commands(&host);
+        int terminalPastes = 0;
+        commands.add(
+            "terminal_paste", "Paste", "Terminal",
+            {QKeySequence("Ctrl+Shift+V"), QKeySequence("Shift+Insert")}, [&] { ++terminalPastes; },
+            area);
+        area->setCommands(&commands);
+        host.resize(900, 600);
+        host.show();
+        host.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&host));
+        QVERIFY(QTest::qWaitForWindowActive(&host));
+        QApplication::clipboard()->setText("clipboard text");
+        for (auto *editor : QList<QWidget *>{field, plain, rich}) {
+            editor->setFocus();
+            QTRY_COMPARE(QApplication::focusWidget(), editor);
+            QTest::keySequence(editor, QKeySequence("Ctrl+Shift+V"));
+        }
+        QCOMPARE(field->text(), "clipboard text");
+        QCOMPARE(plain->toPlainText(), "clipboard text");
+        QCOMPARE(rich->toPlainText(), "clipboard text");
+        field->setFocus();
+        field->selectAll();
+        QTest::keySequence(field, QKeySequence("Ctrl+V"));
+        QCOMPARE(field->text(), "clipboard text");
+        field->setReadOnly(true);
+        QTest::keySequence(field, QKeySequence("Ctrl+Shift+V"));
+        QCOMPARE(field->text(), "clipboard text");
+        QDialog dialog(&host);
+        auto *dialogLayout = new QVBoxLayout(&dialog);
+        auto *dialogField = new QLineEdit;
+        dialogLayout->addWidget(dialogField);
+        dialog.show();
+        dialog.activateWindow();
+        dialogField->setFocus();
+        QTRY_COMPARE(QApplication::focusWidget(), dialogField);
+        QTest::keySequence(dialogField, QKeySequence("Ctrl+Shift+V"));
+        QCOMPARE(dialogField->text(), "clipboard text");
+        QString error;
+        auto keys = Commands::bindings(commands.collection());
+        keys["terminal_paste"] = {QKeySequence("Ctrl+Alt+V")};
+        QVERIFY2(commands.apply(keys, &error), qPrintable(error));
+        dialogField->clear();
+        QTest::keySequence(dialogField, QKeySequence("Ctrl+Shift+V"));
+        QVERIFY(dialogField->text().isEmpty());
+        QTest::keySequence(dialogField, QKeySequence("Ctrl+Alt+V"));
+        QCOMPARE(dialogField->text(), "clipboard text");
+        QCOMPARE(terminalPastes, 0);
+    }
     void controlCCopiesOnlyTerminalSelections_data() {
         QTest::addColumn<bool>("enhancedKeyboard");
         QTest::newRow("legacy") << false;
@@ -175,6 +373,7 @@ while True:
         commands.add("other", "Other", "Test", {}, [&] { ++otherInvocations; });
         area->setCommands(&commands);
         clipboard->setText("unchanged");
+        QVERIFY(openTerminalMenu(input));
         controlC(input);
         checkpoint();
         QCOMPARE(received, originalControlC);

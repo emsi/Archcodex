@@ -21,7 +21,92 @@
 #include <kde_terminal_interface.h>
 
 namespace Archcodex {
-TerminalArea::TerminalArea(QWidget *parent) : QWidget(parent), stack(new QStackedWidget(this)) {
+// Konsole's lazy XMLGUI initialization can restore shortcuts after creation.
+// Filter live changes, retaining the original bindings for host reconfiguration.
+class TerminalShortcuts : public QObject {
+    struct Binding {
+        QList<QKeySequence> original, defaults, applied;
+        bool applying = false;
+    };
+    QPointer<Commands> commands;
+    QHash<QAction *, Binding> bindings;
+    QSet<KActionCollection *> collections;
+
+    void reconcile(QAction *action, bool restore = false) {
+        auto it = bindings.find(action);
+        if (it == bindings.end() || it->applying)
+            return;
+        const auto defaults = KActionCollection::defaultShortcuts(action);
+        if (defaults != it->defaults) {
+            // Collections can insert an action before assigning its defaults.
+            it->defaults = defaults;
+            it->original = defaults;
+        }
+        auto keys = restore ? it->original : action->shortcuts();
+        if (commands)
+            keys.removeIf([this](const QKeySequence &key) { return commands->owns(key); });
+        it->applied = keys;
+        if (action->shortcuts() == keys)
+            return;
+        it->applying = true;
+        action->setShortcuts(keys);
+        // A changed() observer may insert or destroy an action; don't retain a
+        // hash iterator across the setter and its synchronous notifications.
+        if (auto current = bindings.find(action); current != bindings.end())
+            current->applying = false;
+    }
+    void track(QAction *action) {
+        if (bindings.contains(action))
+            return;
+        bindings.insert(action, {action->shortcuts(), KActionCollection::defaultShortcuts(action),
+                                 action->shortcuts(), false});
+        connect(action, &QObject::destroyed, this, [this, action] { bindings.remove(action); });
+        connect(action, &QAction::changed, this, [this, action] {
+            auto it = bindings.find(action);
+            if (it == bindings.end() || it->applying || action->shortcuts() == it->applied)
+                return;
+            reconcile(action);
+        });
+        reconcile(action);
+    }
+    void refresh() {
+        for (auto *action : bindings.keys())
+            reconcile(action, true);
+    }
+
+  public:
+    void setCommands(Commands *value) {
+        if (commands)
+            disconnect(commands, nullptr, this, nullptr);
+        commands = value;
+        if (commands) {
+            connect(commands, &Commands::bindingsChanged, this, [this] { refresh(); });
+            connect(commands, &QObject::destroyed, this, [this] {
+                commands = nullptr;
+                refresh();
+            });
+        }
+        refresh();
+    }
+    void attach(KXMLGUIClient *client) {
+        auto *collection = client->actionCollection();
+        if (!collections.contains(collection)) {
+            collections.insert(collection);
+            connect(collection, &KActionCollection::inserted, this,
+                    [this](QAction *action) { track(action); });
+            connect(collection, &QObject::destroyed, this,
+                    [this, collection] { collections.remove(collection); });
+            for (auto *action : collection->actions())
+                track(action);
+        }
+        for (auto *child : client->childClients())
+            attach(child);
+    }
+};
+
+TerminalArea::TerminalArea(QWidget *parent)
+    : QWidget(parent), stack(new QStackedWidget(this)),
+      shortcuts(std::make_unique<TerminalShortcuts>()) {
     qApp->installEventFilter(this);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
@@ -88,7 +173,7 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
     disableTracking(disableTracking, part);
     connect(part, SIGNAL(overrideShortcut(QKeyEvent *, bool &)), this,
             SLOT(overrideShortcut(QKeyEvent *, bool &)), Qt::DirectConnection);
-    updateShortcuts();
+    shortcuts->attach(part);
     connect(part, &QObject::destroyed, this, [this] {
         if (frozen)
             return;
@@ -109,26 +194,7 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
 }
 void TerminalArea::setCommands(Commands *value) {
     commands = value;
-    connect(commands, &Commands::bindingsChanged, this, &TerminalArea::updateShortcuts);
-    updateShortcuts();
-}
-void TerminalArea::updateShortcuts() {
-    if (!commands)
-        return;
-    const auto visit = [this](auto &&self, KXMLGUIClient *client) -> void {
-        for (auto *action : client->actionCollection()->actions()) {
-            if (!action->property("archcodexOriginalShortcuts").isValid())
-                action->setProperty("archcodexOriginalShortcuts",
-                                    QVariant::fromValue(action->shortcuts()));
-            auto keys = action->property("archcodexOriginalShortcuts").value<QList<QKeySequence>>();
-            keys.removeIf([this](const QKeySequence &key) { return commands->owns(key); });
-            action->setShortcuts(keys);
-        }
-        for (auto *child : client->childClients())
-            self(self, child);
-    };
-    for (auto *part : findChildren<KParts::ReadOnlyPart *>())
-        visit(visit, part);
+    shortcuts->setCommands(value);
 }
 void TerminalArea::overrideShortcut(QKeyEvent *event, bool &override) {
     if (!commands || !commands->matches(event))

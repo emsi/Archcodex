@@ -31,6 +31,9 @@ class Commands : public QObject {
   signals:
     void bindingsChanged();
 
+  protected:
+    bool eventFilter(QObject *watched, QEvent *event) override;
+
   private:
     QWidget *window;
     KActionCollection *actions;
