@@ -27,6 +27,7 @@ class WindowTests;
 namespace Archcodex {
 class TerminalArea;
 class DiscoveryDialog;
+class ConnectionsDialog;
 class Commands;
 class OpeningCoordinator;
 class Notifications;
@@ -54,7 +55,7 @@ class Window : public QMainWindow {
     QHash<QString, BackendProfile> profiles;
     QHash<QString, Backend *> backends;
     QHash<QString, Session> sessions, searchSessions;
-    QHash<QString, QString> connectionStates;
+    QHash<QString, ConnectionState> connectionStates;
     QHash<QString, bool> connectionReady, more;
     QSet<QString> searching;
     QMap<QString, QStringList> searchErrors; // Backend identity -> distinct diagnostics.
@@ -72,6 +73,8 @@ class Window : public QMainWindow {
     QHash<QString, QString> hostNames, hostUsers;
     DiscoveryReport discoveryReport;
     QPointer<DiscoveryDialog> discoveryDialog;
+    QPointer<ConnectionsDialog> connectionsWindow;
+    QHash<QString, QPointer<QDialog>> connectionEditors, connectionRemovals;
     QToolButton *discoveryStatus;
     QToolButton *hostStatus;
     QHash<QString, SharedHostDiscovery *> hostDiscovery;
@@ -209,6 +212,8 @@ class Window : public QMainWindow {
     void showSettings();
     void attach(const BackendProfile &profile, bool start);
     void connectionsDialog();
+    void updateConnections();
+    void removeConnection(const QString &id);
     void editConnection(const QString &id = {});
     void discover(bool reconcile = true, bool interactive = false);
     void applyDiscovery(const QJsonArray &endpoints, const QJsonArray &issues,

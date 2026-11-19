@@ -423,6 +423,50 @@ Use a small connection summary in the status bar rather than an initial
 connection dashboard. Connection status and session status remain different
 concepts. A disconnected backend keeps its saved projects visible in All.
 
+### Connections table
+
+**Connections → Manage connections…** opens one nonmodal window. Opening it again
+raises that window; terminals remain usable while it is open. Each row is a
+backend connection, identified by its backend ID even when names are identical.
+
+| Column | Meaning |
+| --- | --- |
+| Backend type | Codex or myCodex. |
+| Configuration / instance | The native Codex configuration (for example Main or a shortened CODEX_HOME path), the myCodex container name, or the unchanged manual connection name. |
+| Location | This Computer or the configured SSH host label. |
+| Environment mode | The myCodex storage mode, such as Shared or Private; empty for native Codex. |
+| Connection status | Disconnected, Connecting, Connected, or Waiting for host. |
+| Status details | Additional connection feedback, such as loading history, more history available, or a failure explanation. |
+
+The fields come from structured profile and connection state, not from parsing
+display labels. A history warning can accompany a connected, usable backend.
+Identical automatically generated names within the same context receive numeric
+suffixes; full identity and endpoint information is available in **Details**.
+Rows stay single-line. Resizable columns, horizontal scrolling, cell tooltips and
+a bounded, selectable plain-text details area expose long values without expanding
+rows or crowding out the table.
+
+Click a column header to sort; its next click reverses the direction. The table's
+context menu also offers sorting through the Menu key or Shift+F10. The default is
+configuration ascending, with case-insensitive locale-aware comparisons and stable
+location, configuration and backend-ID tie breakers. This presentation does not
+change Projects ordering. Window geometry, column widths, sort and Details
+visibility are saved in the `connectionsTable` group of `window.ini`.
+
+Existing connection and discovery events update only changed rows and cells.
+Background updates preserve the selected backend and viewport anchor; removing
+the selected backend clears the selection. Selecting an explicit new sort brings
+the selected row into view. Opening or leaving the window open performs no extra
+backend requests.
+
+**Add local…**, **Edit…** and removal confirmation are nonmodal too. Only one editor
+or removal prompt per backend is opened. Save and Remove recheck the backend and
+configuration after the user responds, rejecting stale targets rather than acting
+on a replaced connection. Editing remains limited to native local endpoints;
+remote and container configuration is managed through **Connections → Hosts…**.
+Removal retains the existing behavior: discard Archcodex's local connection/cache,
+close its terminal clients, and leave Codex conversations and server work intact.
+
 ### Discovery feedback
 
 The explorer contains its controls and tree, plus search-result feedback only

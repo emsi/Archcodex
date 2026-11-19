@@ -413,7 +413,7 @@ class CoreTests : public QObject {
         backend.connectServer();
         QTRY_VERIFY_WITH_TIMEOUT(backend.ready(), 10000);
         QTRY_VERIFY_WITH_TIMEOUT(states.size() >= 3, 10000);
-        QCOMPARE(states.last()[0].toString(), "Connected");
+        QCOMPARE(qvariant_cast<ConnectionState>(states.last()[0]).description(), "Connected");
         backend.search("archcodex-isolated-test", 9);
         QTRY_VERIFY_WITH_TIMEOUT(!search.isEmpty(), 10000);
         QVERIFY2(search.last()[2].toString().isEmpty(), qPrintable(search.last()[2].toString()));

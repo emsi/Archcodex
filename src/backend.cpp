@@ -114,7 +114,7 @@ void CodexBackend::disconnectServer() {
         s.known = false;
         emit sessionChanged(s);
     }
-    emit connectionChanged(QStringLiteral("Disconnected"), false);
+    emit connectionChanged({});
 }
 void CodexBackend::connectServer() {
     wanted = true;
@@ -136,10 +136,13 @@ void CodexBackend::connectServer() {
                            : profile.validate();
     if (!error.isEmpty()) {
         wanted = false;
-        emit connectionChanged(error, false);
+        emit connectionChanged({profile.usesRelay() && profile.relaySocket.isEmpty()
+                                    ? ConnectionState::Phase::WaitingForHost
+                                    : ConnectionState::Phase::Disconnected,
+                                error});
         return;
     }
-    emit connectionChanged(QStringLiteral("Connecting…"), false);
+    emit connectionChanged({ConnectionState::Phase::Connecting, {}});
     stderrTail.clear();
     process = new QProcess(this);
     const auto epoch = generation;
@@ -182,7 +185,7 @@ void CodexBackend::connectServer() {
                             identity[key] = response[key];
                     emit identityReceived(identity);
                     retry = 0;
-                    emit connectionChanged(QStringLiteral("Connected — loading history"), true);
+                    emit connectionChanged({ConnectionState::Phase::Connected, "loading history"});
                     loadedPage();
                     listPage({});
                 });
@@ -195,7 +198,7 @@ void CodexBackend::failed(const QString &reason) {
         s.known = false;
         emit sessionChanged(s);
     }
-    emit connectionChanged(reason, false);
+    emit connectionChanged({ConnectionState::Phase::Disconnected, reason});
     if (wanted)
         reconnectTimer.start(std::min(30000, 1000 * (1 << std::min(retry++, 5))));
 }
@@ -489,7 +492,8 @@ void CodexBackend::listPage(const QString &cursor) {
     request("thread/list", p, [this, cursor](const auto &r, const QString &error) {
         listing = false;
         if (!error.isEmpty()) {
-            emit connectionChanged("History unavailable: " + error, true);
+            emit connectionChanged(
+                {ConnectionState::Phase::Connected, "History unavailable: " + error});
             return;
         }
         for (const auto &t : r["data"].toArray()) {
@@ -500,8 +504,8 @@ void CodexBackend::listPage(const QString &cursor) {
         if (!nextCursor.isEmpty() && nextCursor == cursor)
             nextCursor.clear();
         emit moreAvailable(!nextCursor.isEmpty());
-        emit connectionChanged(
-            nextCursor.isEmpty() ? "Connected" : "Connected — more history available", true);
+        emit connectionChanged({ConnectionState::Phase::Connected,
+                                nextCursor.isEmpty() ? QString() : "more history available"});
     });
 }
 void CodexBackend::loadMore() {
@@ -515,8 +519,8 @@ void CodexBackend::loadedPage(const QString &cursor) {
     request("thread/loaded/list", p, [this, cursor](const auto &r, const QString &error) {
         if (!error.isEmpty()) {
             emit loadedInventoryFailed();
-            emit connectionChanged("Connected — loaded-session inventory unavailable: " + error,
-                                   true);
+            emit connectionChanged({ConnectionState::Phase::Connected,
+                                    "loaded-session inventory unavailable: " + error});
             return;
         }
         for (const auto &id : r["data"].toArray()) {
@@ -528,8 +532,8 @@ void CodexBackend::loadedPage(const QString &cursor) {
         if (!next.isEmpty() && next == cursor) {
             emit loadedInventoryFailed();
             emit connectionChanged(
-                "Connected — loaded-session inventory repeated a page; coverage is incomplete",
-                true);
+                {ConnectionState::Phase::Connected,
+                 "loaded-session inventory repeated a page; coverage is incomplete"});
             return;
         }
         if (!next.isEmpty())

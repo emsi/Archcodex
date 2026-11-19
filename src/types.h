@@ -6,6 +6,16 @@
 #include <QStringList>
 
 namespace Archcodex {
+struct ConnectionState {
+    enum class Phase { Disconnected, Connecting, Connected, WaitingForHost };
+    Phase phase = Phase::Disconnected;
+    QString details;
+    bool ready() const {
+        return phase == Phase::Connected;
+    }
+    QString label() const;
+    QString description() const;
+};
 struct BackendProfile {
     QString id;
     QString name;
@@ -84,9 +94,11 @@ QStringList clientArguments(const BackendProfile &profile, const QString &thread
                             const QString &cwd = {}, const QString &localExecutable = {});
 QString detectedLocalCodex(const QJsonArray &endpoints);
 QString serverLabel(const BackendProfile &profile);
+QString serverConfigurationName(const BackendProfile &profile);
 QString serverTreeLabel(const BackendProfile &profile);
 QString serverDetails(const BackendProfile &profile);
 } // namespace Archcodex
 
 Q_DECLARE_METATYPE(Archcodex::Session)
 Q_DECLARE_METATYPE(Archcodex::SessionAttention)
+Q_DECLARE_METATYPE(Archcodex::ConnectionState)

@@ -22,7 +22,8 @@ void OpeningCoordinator::setSource(const BackendProfile &profile, Backend *backe
         s.profile.identity["codexHome"] = identity["codexHome"];
         schedule();
     });
-    connect(backend, &Backend::connectionChanged, this, [this, id](const QString &, bool ready) {
+    connect(backend, &Backend::connectionChanged, this, [this, id](const ConnectionState &state) {
+        const bool ready = state.ready();
         if (!ready)
             unavailable(id);
         else {

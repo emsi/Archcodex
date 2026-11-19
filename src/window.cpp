@@ -2,6 +2,7 @@
 #include "window.h"
 #include "asyncbackend.h"
 #include "commands.h"
+#include "connectionsdialog.h"
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "launch.h"
@@ -60,6 +61,17 @@
 
 namespace Archcodex {
 namespace {
+// Exclude presentation-only metadata, but reject stale edits/removals after an
+// endpoint, execution environment, or user-managed configuration changes.
+QJsonObject connectionDefinition(const BackendProfile &profile) {
+    auto definition = profile.json();
+    definition.remove("identity");
+    if (profile.discovered)
+        definition.remove("name");
+    definition["execution"] = workspaceSourceIdentity(profile);
+    definition["hostGeneration"] = profile.identity["hostGeneration"];
+    return definition;
+}
 class TerminalTitle : public KSqueezedTextLabel {
   public:
     using KSqueezedTextLabel::KSqueezedTextLabel;
@@ -947,10 +959,11 @@ void Window::attach(const BackendProfile &p, bool start) {
                 results->upsertMany(matches);
             });
     connect(b, &Backend::connectionChanged, this,
-            [this, b = QPointer<Backend>(b), id = p.id](const QString &text, bool ready) {
+            [this, b = QPointer<Backend>(b), id = p.id](const ConnectionState &state) {
+                const bool ready = state.ready();
                 if (backends.value(id) != b)
                     return;
-                connectionStates[id] = text;
+                connectionStates[id] = state;
                 connectionReady[id] = ready;
                 if (!ready) {
                     notifications->withdrawBackend(id);
@@ -1104,7 +1117,7 @@ void Window::attach(const BackendProfile &p, bool start) {
     if (start)
         QTimer::singleShot(0, b, &Backend::connectServer);
     else
-        connectionStates[p.id] = "Disconnected";
+        connectionStates[p.id] = {};
 }
 void Window::newSession(const QString &backend, const QString &path) {
     cancelRetirement(backend);
@@ -2093,7 +2106,7 @@ void Window::updateSummary() {
     QStringList descriptions;
     for (auto it = profiles.begin(); it != profiles.end(); ++it) {
         count += connectionReady.value(it.key());
-        descriptions << it->name + ": " + connectionStates.value(it.key(), "Disconnected");
+        descriptions << it->name + ": " + connectionStates.value(it.key()).description();
     }
     connections->setText(
         profiles.isEmpty() ? "No connections"
@@ -2283,26 +2296,33 @@ void Window::showDiscoveryDetails() {
     discoveryDialog->activateWindow();
 }
 void Window::editConnection(const QString &id) {
-    BackendProfile p = profiles.value(id);
-    if (!p.isLocal()) {
-        error("Remote and container endpoints are discovered automatically. Manage their host in "
-              "Connections "
-              "→ Hosts.");
+    if (auto *existing = connectionEditors.value(id).data()) {
+        existing->show();
+        existing->raise();
+        existing->activateWindow();
         return;
     }
-    if (id.isEmpty()) {
-        p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
-        p.name = "Local Codex";
-    }
-    QDialog dialog(this);
-    dialog.setWindowTitle(id.isEmpty() ? "Add connection" : "Edit connection");
-    auto *form = new QFormLayout(&dialog);
-    auto *name = new QLineEdit(p.name);
-    auto *socket = new QLineEdit(p.socketPath);
+    if (!id.isEmpty() && (!profiles.contains(id) || !profiles[id].isLocal()))
+        return;
+    const auto original = profiles.value(id);
+    const QPointer<Backend> originalBackend = backends.value(id);
+    auto *dialog =
+        new QDialog(connectionsWindow ? static_cast<QWidget *>(connectionsWindow.data()) : this);
+    connectionEditors[id] = dialog;
+    dialog->setObjectName("connectionEditor");
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::NonModal);
+    dialog->setWindowTitle(id.isEmpty() ? "Add local connection" : "Edit connection");
+    auto *form = new QFormLayout(dialog);
+    auto *name = new QLineEdit(id.isEmpty() ? "Local Codex" : original.name);
+    name->setObjectName("connectionName");
+    auto *socket = new QLineEdit(original.socketPath);
+    socket->setObjectName("connectionSocket");
     socket->setPlaceholderText("Empty: host Codex default daemon");
-    auto *executable = new QLineEdit(p.executable);
+    auto *executable = new QLineEdit(original.executable);
+    executable->setObjectName("connectionExecutable");
     auto *automatic = new QCheckBox("Connect when Archcodex starts");
-    automatic->setChecked(p.autoConnect);
+    automatic->setChecked(original.autoConnect);
     form->addRow("Name", name);
     form->addRow("Unix socket on host", socket);
     form->addRow("Host Codex executable", executable);
@@ -2311,117 +2331,102 @@ void Window::editConnection(const QString &id) {
         new QLabel("Connects to an existing app-server. It does not start or update Codex.");
     explanation->setWordWrap(true);
     form->addRow(explanation);
+    auto *issue = new QLabel;
+    issue->setObjectName("connectionEditorError");
+    issue->setTextFormat(Qt::PlainText);
+    issue->setWordWrap(true);
+    form->addRow(issue);
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Save | QDialogButtonBox::Cancel);
     form->addRow(buttons);
-    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    connect(buttons, &QDialogButtonBox::accepted, &dialog, [&] {
-        p.name = name->text().trimmed();
-        p.socketPath = socket->text();
-        p.executable = executable->text();
-        p.autoConnect = automatic->isChecked();
-        const auto issue = p.validate();
-        if (!issue.isEmpty()) {
-            error(issue);
-            return;
-        }
-        dialog.accept();
-    });
-    dialog.resize(600, 200);
-    if (dialog.exec() != QDialog::Accepted)
-        return;
-    // Editing a detected profile makes its executable/connection settings user-managed.
-    p.discovered = false;
-    cancelRetirement(p.id);
-    store->allowBackend(p.id);
-    if (profiles.contains(id) && profiles[id].socketPath != p.socketPath)
-        p.environmentId.clear();
-    if (!persist([&] { store->save(p); }))
-        return;
-    if (auto *old = backends.take(id)) {
-        old->disconnectServer();
-        old->deleteLater();
-        terminal->closeBackend(id);
-    }
-    profiles[p.id] = p;
-    model->backendName(p.id, p.name);
-    results->backendName(p.id, p.name);
-    model->backendEnvironment(p.id, p.environmentId);
-    results->backendEnvironment(p.id, p.environmentId);
-    refreshNames();
-    attach(p, true);
-    updateSummary();
+    connect(buttons, &QDialogButtonBox::rejected, dialog, &QDialog::reject);
+    connect(
+        buttons, &QDialogButtonBox::accepted, dialog,
+        [this, dialog, id, original, originalBackend, name, socket, executable, automatic, issue] {
+            if (!id.isEmpty() &&
+                (!profiles.contains(id) || backends.value(id) != originalBackend ||
+                 connectionDefinition(profiles[id]) != connectionDefinition(original))) {
+                issue->setText("This connection changed or was removed. Close this editor and "
+                               "select it again.");
+                return;
+            }
+            auto p = id.isEmpty() ? BackendProfile{} : profiles[id];
+            if (id.isEmpty())
+                p.id = QUuid::createUuid().toString(QUuid::WithoutBraces);
+            p.name = name->text().trimmed();
+            p.socketPath = socket->text();
+            p.executable = executable->text();
+            p.autoConnect = automatic->isChecked();
+            const auto validation = p.validate();
+            if (!validation.isEmpty()) {
+                issue->setText(validation);
+                return;
+            }
+            // Editing a discovered endpoint deliberately makes it user-managed.
+            p.discovered = false;
+            cancelRetirement(p.id);
+            store->allowBackend(p.id);
+            if (!id.isEmpty() && profiles[id].socketPath != p.socketPath)
+                p.environmentId.clear();
+            if (!persist([&] { store->save(p); }))
+                return;
+            if (auto *old = backends.take(id)) {
+                old->disconnectServer();
+                old->deleteLater();
+                terminal->closeBackend(id);
+            }
+            profiles[p.id] = p;
+            model->backendEnvironment(p.id, p.environmentId);
+            results->backendEnvironment(p.id, p.environmentId);
+            refreshNames();
+            attach(p, true);
+            updateSummary();
+            dialog->accept();
+        });
+    dialog->resize(600, 240);
+    dialog->show();
 }
-void Window::connectionsDialog() {
-    QDialog dialog(this);
-    dialog.setWindowTitle("Connections — Codex servers");
-    auto *layout = new QVBoxLayout(&dialog);
-    auto *list = new QListWidget;
-    layout->addWidget(list);
-    auto populate = [&] {
-        const auto selectedId =
-            list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
-        list->clear();
-        for (auto it = profiles.begin(); it != profiles.end(); ++it) {
-            auto *item = new QListWidgetItem(
-                it->name + " — " + connectionStates.value(it.key(), "Disconnected"), list);
-            item->setData(Qt::UserRole, it.key());
-            item->setToolTip(serverDetails(*it));
-            if (it.key() == selectedId)
-                list->setCurrentItem(item);
-        }
-    };
-    connect(this, &Window::connectionSummaryChanged, &dialog, populate);
-    populate();
-    auto *row = new QHBoxLayout;
-    layout->addLayout(row);
-    auto selected = [&] {
-        return list->currentItem() ? list->currentItem()->data(Qt::UserRole).toString() : QString();
-    };
-    auto button = [&](const QString &label, auto action) {
-        auto *b = new QPushButton(label);
-        row->addWidget(b);
-        connect(b, &QPushButton::clicked, &dialog, action);
-    };
-    button("Add…", [&] {
-        editConnection();
-        populate();
-    });
-    button("Edit…", [&] {
-        auto id = selected();
-        if (!id.isEmpty()) {
-            editConnection(id);
-            populate();
-        }
-    });
-    button("Connect", [&] {
-        cancelRetirement(selected());
-        paused.remove(selected());
-        auto *b = backends.value(selected());
-        if (b)
-            b->connectServer();
-        populate();
-    });
-    button("Disconnect", [&] {
-        paused.insert(selected());
-        auto *b = backends.value(selected());
-        if (b)
-            b->disconnectServer();
-        populate();
-    });
-    button("Remove", [&] {
-        auto id = selected();
-        if (id.isEmpty())
+void Window::removeConnection(const QString &id) {
+    if (id.isEmpty() || !profiles.contains(id))
+        return;
+    if (auto *existing = connectionRemovals.value(id).data()) {
+        existing->raise();
+        existing->activateWindow();
+        return;
+    }
+    const auto original = profiles[id];
+    const QPointer<Backend> originalBackend = backends.value(id);
+    auto *dialog = new QMessageBox(
+        QMessageBox::Question, "Remove connection?",
+        "Remove this connection and its local project/history cache? Codex "
+        "conversations and running work are kept.",
+        QMessageBox::Yes | QMessageBox::No,
+        connectionsWindow ? static_cast<QWidget *>(connectionsWindow.data()) : this);
+    connectionRemovals[id] = dialog;
+    dialog->setObjectName("connectionRemoval");
+    dialog->setInformativeText(original.name);
+    dialog->setDefaultButton(QMessageBox::No);
+    dialog->setTextFormat(Qt::PlainText);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->setWindowModality(Qt::NonModal);
+    connect(dialog, &QDialog::finished, this, [this, id, original, originalBackend](int answer) {
+        if (answer != QMessageBox::Yes)
             return;
-        if (QMessageBox::question(&dialog, "Remove connection?",
-                                  "Remove this connection and its local project/history cache? "
-                                  "Codex conversations and running work are kept.") !=
-            QMessageBox::Yes)
+        if (!profiles.contains(id) || backends.value(id) != originalBackend ||
+            connectionDefinition(profiles[id]) != connectionDefinition(original)) {
+            auto *notice = new QMessageBox(
+                QMessageBox::Information, "Connection changed",
+                "This connection changed or was removed. Select it again before removing it.",
+                QMessageBox::Close, this);
+            notice->setAttribute(Qt::WA_DeleteOnClose);
+            notice->setWindowModality(Qt::NonModal);
+            notice->show();
             return;
+        }
         cancelRetirement(id);
         if (!persist([&] { store->removeBackend(id); }))
             return;
         ignoredSockets.insert(
-            profiles[id].usesRelay() ? id : discoveredPaths.value(id, profiles[id].socketPath));
+            original.usesRelay() ? id : discoveredPaths.value(id, original.socketPath));
         notifications->withdrawBackend(id);
         if (auto *b = backends.take(id)) {
             b->disconnectServer();
@@ -2441,13 +2446,69 @@ void Window::connectionsDialog() {
                 ++it;
         clearSearch();
         updateSummary();
-        populate();
     });
-    auto *close = new QDialogButtonBox(QDialogButtonBox::Close);
-    layout->addWidget(close);
-    connect(close, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
-    dialog.resize(800, 300);
-    dialog.exec();
+    dialog->show();
+}
+void Window::updateConnections() {
+    if (!connectionsWindow)
+        return;
+    QList<ConnectionRow> records;
+    auto ids = profiles.keys();
+    ids.sort();
+    QHash<QString, int> counts, ordinals;
+    for (const auto &id : ids) {
+        const auto &p = profiles[id];
+        const auto state = connectionStates.value(id);
+        const auto location =
+            p.sshHost.isEmpty() ? QString("This Computer")
+            : hosts.contains(hostId(p)) &&
+                    p.identity["hostGeneration"].toString() == hosts[hostId(p)].generation
+                ? hosts[hostId(p)].label()
+                : groupLabel(p);
+        auto row = connectionRow(p, state, location);
+        row.connectable = backends.contains(id) && !state.ready() &&
+                          state.phase != ConnectionState::Phase::Connecting &&
+                          (!p.usesRelay() || !p.relaySocket.isEmpty());
+        row.disconnectable = backends.contains(id) && !paused.contains(id);
+        ++counts[row.cells.mid(0, 4).join(QChar(0x1f))];
+        records << row;
+    }
+    for (auto &row : records) {
+        const auto key = row.cells.mid(0, 4).join(QChar(0x1f));
+        const int ordinal = ++ordinals[key];
+        if (profiles[row.id].discovered && counts[key] > 1)
+            row.cells[1] += QString(" (%1)").arg(ordinal);
+    }
+    connectionsWindow->setConnections(records);
+}
+void Window::connectionsDialog() {
+    if (!connectionsWindow) {
+        auto *dialog = new ConnectionsDialog(dataDirectory + "/window.ini", this);
+        connectionsWindow = dialog;
+        connect(this, &Window::connectionSummaryChanged, dialog, [this] { updateConnections(); });
+        connect(dialog, &ConnectionsDialog::addRequested, this, [this] { editConnection(); });
+        connect(dialog, &ConnectionsDialog::editRequested, this, &Window::editConnection);
+        connect(dialog, &ConnectionsDialog::removeRequested, this, &Window::removeConnection);
+        connect(dialog, &ConnectionsDialog::connectRequested, this, [this](const QString &id) {
+            if (!profiles.contains(id) || !backends.value(id))
+                return;
+            cancelRetirement(id);
+            paused.remove(id);
+            backends[id]->connectServer();
+            updateConnections();
+        });
+        connect(dialog, &ConnectionsDialog::disconnectRequested, this, [this](const QString &id) {
+            if (!profiles.contains(id) || !backends.value(id))
+                return;
+            paused.insert(id);
+            backends[id]->disconnectServer();
+            updateConnections();
+        });
+    }
+    updateConnections();
+    connectionsWindow->show();
+    connectionsWindow->raise();
+    connectionsWindow->activateWindow();
 }
 void Window::discover(bool reconcile, bool interactive) {
     if (!workspaceLoaded || !cachePending.isEmpty() || !refreshScopes.isEmpty() ||
