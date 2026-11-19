@@ -8,6 +8,22 @@
 #include <QRegularExpression>
 
 namespace Archcodex {
+QString ConnectionState::label() const {
+    switch (phase) {
+    case Phase::Connected:
+        return QStringLiteral("Connected");
+    case Phase::Connecting:
+        return QStringLiteral("Connecting…");
+    case Phase::WaitingForHost:
+        return QStringLiteral("Waiting for host");
+    case Phase::Disconnected:
+        return QStringLiteral("Disconnected");
+    }
+    return {};
+}
+QString ConnectionState::description() const {
+    return label() + (details.isEmpty() ? QString() : " — " + details);
+}
 bool validText(const QString &text, int maxLength) {
     if (text.size() > maxLength)
         return false;
@@ -245,14 +261,11 @@ QStringList clientArguments(const BackendProfile &p, const QString &id, const QS
         args << "resume" << "--" << id;
     return terminalCommand(args);
 }
-QString serverLabel(const BackendProfile &p) {
+QString serverConfigurationName(const BackendProfile &p) {
     if (!p.discovered)
         return p.name;
     if (p.isContainer())
-        return ("myCodex · " + p.identity["containerName"].toString() + " · " +
-                (p.sshHost.isEmpty() ? "This computer" : p.sshHost) + " · " +
-                p.identity["stateMode"].toString("Unknown storage"))
-            .left(150);
+        return p.identity["containerName"].toString("Container");
     const auto home = p.identity["codexHome"].toString();
     const auto ownerHome = p.identity["ownerHome"].toString();
     QString label;
@@ -268,6 +281,17 @@ QString serverLabel(const BackendProfile &p) {
         if (!cwd.isEmpty() && cwd != ownerHome && cwd != "/")
             label += " · " + QFileInfo(cwd).fileName();
     }
+    return label;
+}
+QString serverLabel(const BackendProfile &p) {
+    if (!p.discovered)
+        return p.name;
+    if (p.isContainer())
+        return ("myCodex · " + p.identity["containerName"].toString() + " · " +
+                (p.sshHost.isEmpty() ? "This computer" : p.sshHost) + " · " +
+                p.identity["stateMode"].toString("Unknown storage"))
+            .left(150);
+    auto label = serverConfigurationName(p);
     const auto user = p.identity["user"].toString(), host = p.identity["host"].toString();
     if (!user.isEmpty() || !host.isEmpty())
         label += " · " + user + (host.isEmpty() ? QString() : "@" + host);

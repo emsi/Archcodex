@@ -86,7 +86,8 @@ class BackendPump : public QObject {
             attention.enqueue({event, connectionEpoch});
             schedule();
         });
-        connect(core, &Backend::connectionChanged, this, [this](const QString &, bool ready) {
+        connect(core, &Backend::connectionChanged, this, [this](const ConnectionState &state) {
+            const bool ready = state.ready();
             if (!ready) {
                 connectionEpoch = ++*epoch;
                 attention.clear();
@@ -205,11 +206,13 @@ AsyncBackend::AsyncBackend(BackendProfile p, const QString &bridge, QObject *par
       worker(Worker::forHost("backend:" + profile.sshHost)),
       attentionEpoch(std::make_shared<std::atomic<quint64>>(0)) {
     searchDelivery = SearchDelivery::instance();
+    qRegisterMetaType<ConnectionState>();
     qRegisterMetaType<Session>();
     qRegisterMetaType<QList<Session>>();
     qRegisterMetaType<SessionAttention>();
     qRegisterMetaType<QList<SessionAttention>>();
-    connect(this, &Backend::connectionChanged, this, [this](const QString &, bool ready) {
+    connect(this, &Backend::connectionChanged, this, [this](const ConnectionState &state) {
+        const bool ready = state.ready();
         connected = ready;
         if (!ready)
             cancelSearchDelivery();

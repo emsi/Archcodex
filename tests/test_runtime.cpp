@@ -56,6 +56,34 @@ class RuntimeTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void structuredConnectionWarningsPreserveReadiness() {
+        Fixture fixture;
+        fixture.delaySnapshot = true;
+        fixture.failLoadedInventory = true;
+        AsyncBackend backend(fixture.profile(), BRIDGE_PATH);
+        QSignalSpy states(&backend, &Backend::connectionChanged);
+        backend.connectServer();
+        QTRY_VERIFY(backend.ready());
+        QTRY_VERIFY(!fixture.snapshotId.isUndefined());
+        const auto hasWarning = [&] {
+            for (const auto &args : states) {
+                const auto state = qvariant_cast<ConnectionState>(args[0]);
+                if (state.details.contains("inventory unavailable") && state.ready())
+                    return true;
+            }
+            return false;
+        };
+        QTRY_VERIFY(hasWarning());
+        fixture.reject(fixture.snapshotId, "History failed — still connected");
+        QTRY_VERIFY(
+            qvariant_cast<ConnectionState>(states.last()[0]).details.contains("History failed"));
+        QVERIFY(backend.ready());
+        QVERIFY(qvariant_cast<ConnectionState>(states.last()[0]).ready());
+        backend.disconnectServer();
+        QTRY_COMPARE(qvariant_cast<ConnectionState>(states.last()[0]).phase,
+                     ConnectionState::Phase::Disconnected);
+        QVERIFY(!backend.ready());
+    }
     void pacedSearchWaitsForConsumptionAndRetainsTheResultLimit() {
         Fixture fixture;
         fixture.searchMatches = 10007;

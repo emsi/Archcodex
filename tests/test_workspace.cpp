@@ -52,11 +52,11 @@ class FakeBackend : public Backend {
     void connectServer() override {
         connected = true;
         emit identityReceived(profile.identity);
-        emit connectionChanged("Ready", true);
+        emit connectionChanged({ConnectionState::Phase::Connected, {}});
     }
     void disconnectServer() override {
         connected = false;
-        emit connectionChanged("Disconnected", false);
+        emit connectionChanged({});
     }
     bool ready() const override {
         return connected;

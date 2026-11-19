@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "commands.h"
+#include "connectionsdialog.h"
 #include "discovery.h"
 #include "discoverydialog.h"
 #include "fixture.h"
@@ -44,6 +45,7 @@
 #include <QSqlQuery>
 #include <QStatusBar>
 #include <QTabBar>
+#include <QTableView>
 #include <QToolButton>
 #include <QToolTip>
 #include <QTreeView>
@@ -185,6 +187,149 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void connectionsTableRoutesActionsWhileTerminalRemainsUsable() {
+        QTemporaryDir data;
+        Fixture a, b;
+        auto first = a.profile(), second = b.profile();
+        first.id = "a";
+        first.name = "Zulu";
+        second.id = "b";
+        second.name = "Alpha";
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        first.executable = probe.executable();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(first);
+            store.save(second);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        window.connectionsDialog();
+        auto *dialog = window.connectionsWindow.data();
+        auto *table = dialog->findChild<QTableView *>();
+        window.connectionsDialog();
+        QCOMPARE(window.connectionsWindow.data(), dialog);
+        QVERIFY(!QApplication::activeModalWidget());
+        QCOMPARE(table->model()->rowCount(), 2);
+        QCOMPARE(table->model()->index(0, 1).data().toString(), "Alpha");
+        table->setCurrentIndex(table->model()->index(0, 0));
+        QTest::mouseClick(dialog->findChild<QPushButton *>("connectionConnect"), Qt::LeftButton);
+        QTRY_VERIFY(window.backends[second.id]->ready());
+        QVERIFY(a.methods.isEmpty());
+        QCOMPARE(dialog->selectedId(), second.id);
+        auto session = Session::fromThread(first.id, {{"id", "terminal"}, {"cwd", "/work"}});
+        QString error;
+        QVERIFY2(window.terminal->open(first, session, &error), qPrintable(error));
+        QTRY_VERIFY(!probe.records(session.id).isEmpty());
+        window.activateWindow();
+        window.terminal->focusCurrent();
+        QTRY_VERIFY(window.terminal->isAncestorOf(QApplication::focusWidget()));
+        const auto before = probe.records(session.id).size();
+        QTest::keyClick(QApplication::focusWidget(), Qt::Key_S);
+        QTRY_VERIFY(probe.records(session.id).size() > before);
+        QPointer<ConnectionsDialog> guarded = dialog;
+        dialog->close();
+        QTRY_VERIFY(!guarded);
+        QVERIFY(window.backends[second.id]->ready());
+        window.updateSummary();
+        window.connectionsDialog();
+        QVERIFY(window.connectionsWindow);
+        QCOMPARE(window.connectionsWindow->findChild<QTableView *>()->model()->rowCount(), 2);
+        window.terminal->closeBackend(first.id);
+        window.close();
+    }
+    void connectionFormsAreNonmodalAndRejectStaleTargets() {
+        QTemporaryDir data;
+        BackendProfile p{"edit", "Editable"};
+        p.autoConnect = false;
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        window.connectionsDialog();
+        window.editConnection(p.id);
+        auto *editor = window.connectionEditors[p.id].data();
+        QVERIFY(editor);
+        QCOMPARE(editor->windowModality(), Qt::NonModal);
+        QVERIFY(!QApplication::activeModalWidget());
+        window.editConnection(p.id);
+        QCOMPARE(window.connectionEditors[p.id].data(), editor);
+        window.profiles[p.id].socketPath = "/changed.sock";
+        auto *save = editor->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save);
+        QTest::mouseClick(save, Qt::LeftButton);
+        QVERIFY(editor->isVisible());
+        QVERIFY(editor->findChild<QLabel *>("connectionEditorError")->text().contains("changed"));
+        QCOMPARE(window.profiles[p.id].socketPath, "/changed.sock");
+        editor->close();
+        QTRY_VERIFY(!window.connectionEditors[p.id]);
+        window.removeConnection(p.id);
+        auto *confirmation = qobject_cast<QMessageBox *>(window.connectionRemovals[p.id].data());
+        QVERIFY(confirmation);
+        QCOMPARE(confirmation->windowModality(), Qt::NonModal);
+        window.profiles.remove(p.id);
+        window.updateSummary();
+        QTest::mouseClick(confirmation->button(QMessageBox::Yes), Qt::LeftButton);
+        QVERIFY(!window.profiles.contains(p.id));
+        QVERIFY(!QApplication::activeModalWidget());
+        window.editConnection();
+        editor = window.connectionEditors[{}].data();
+        QVERIFY(editor);
+        editor->findChild<QLineEdit *>("connectionSocket")->setText("relative/socket");
+        QTest::mouseClick(editor->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save),
+                          Qt::LeftButton);
+        QVERIFY(editor->isVisible());
+        QVERIFY(!editor->findChild<QLabel *>("connectionEditorError")->text().isEmpty());
+        QVERIFY(!QApplication::activeModalWidget());
+        window.connectionsWindow->close();
+        QTRY_VERIFY(!window.connectionEditors[{}]);
+        window.close();
+    }
+    void connectionFormsSaveAndRemoveTheSelectedIdentity() {
+        QTemporaryDir data;
+        Fixture fixture;
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        window.connectionsDialog();
+        window.editConnection();
+        auto *editor = window.connectionEditors[{}].data();
+        QVERIFY(editor);
+        editor->findChild<QLineEdit *>("connectionName")->setText("Literal · name — kept");
+        editor->findChild<QLineEdit *>("connectionSocket")->setText(fixture.path());
+        QTest::mouseClick(editor->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save),
+                          Qt::LeftButton);
+        QTRY_VERIFY(!window.connectionEditors[{}]);
+        QCOMPARE(window.profiles.size(), 1);
+        const auto id = window.profiles.cbegin().key();
+        QTRY_VERIFY(window.backends[id]->ready());
+        window.editConnection(id);
+        editor = window.connectionEditors[id].data();
+        editor->findChild<QLineEdit *>("connectionName")->setText("Renamed · manually");
+        // Presentation-only discovery information must not invalidate an open editor.
+        window.profiles[id].identity["pid"] = 123;
+        QTest::mouseClick(editor->findChild<QDialogButtonBox *>()->button(QDialogButtonBox::Save),
+                          Qt::LeftButton);
+        QTRY_VERIFY(!window.connectionEditors[id]);
+        QTRY_VERIFY(window.backends[id]->ready());
+        QCOMPARE(window.profiles[id].name, "Renamed · manually");
+        QCOMPARE(window.profiles[id].identity["pid"].toInt(), 123);
+        auto *table = window.connectionsWindow->findChild<QTableView *>();
+        QCOMPARE(table->model()->index(0, 1).data().toString(), "Renamed · manually");
+        window.removeConnection(id);
+        auto *confirmation = qobject_cast<QMessageBox *>(window.connectionRemovals[id].data());
+        QVERIFY(confirmation);
+        QTest::mouseClick(confirmation->button(QMessageBox::Yes), Qt::LeftButton);
+        QVERIFY(!window.profiles.contains(id));
+        QVERIFY(!window.backends.contains(id));
+        QCOMPARE(table->model()->rowCount(), 0);
+        QVERIFY(!QApplication::activeModalWidget());
+        window.close();
+    }
     void activatingRemoteTerminalKeepsItsMovedRowVisible_data() {
         QTest::addColumn<QString>("activation");
         for (const auto *name : {"mouse", "enter", "notification", "recent"})

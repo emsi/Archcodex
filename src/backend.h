@@ -30,7 +30,7 @@ class Backend : public QObject {
     // after an ordinary GUI reconnect, under the same rules as Resume.
     virtual void forkSession(const QString &id, const QString &priorExecutionEnvironment = {}) = 0;
   signals:
-    void connectionChanged(const QString &description, bool ready);
+    void connectionChanged(const Archcodex::ConnectionState &state);
     void sessionChanged(const Archcodex::Session &session);
     void sessionsChanged(const QList<Archcodex::Session> &sessions);
     void attentionRequested(const Archcodex::SessionAttention &event);
