@@ -140,7 +140,8 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
         return nullptr;
     }
     auto *part = result.plugin;
-    if (!qobject_cast<TerminalInterface *>(part)) {
+    auto *interface = qobject_cast<TerminalInterface *>(part);
+    if (!interface) {
         *error = "Konsole does not expose the expected terminal interface.";
         delete part;
         return nullptr;
@@ -153,6 +154,17 @@ KParts::ReadOnlyPart *TerminalArea::create(QString *error) {
         *error =
             "The Konsole component lacks Archcodex's terminal launch/lifecycle support. Reinstall "
             "the matching package.";
+        delete part;
+        return nullptr;
+    }
+    // Codex recognizes Konsole and sends labeled OSC 8 links instead of printing
+    // their destinations. Enable extraction before the client can emit any text.
+    // Keep the profile's allowed schemes and activation preferences unchanged.
+    if (!QMetaObject::invokeMethod(part, "changeSessionSettings",
+                                   Q_ARG(QString, "AllowEscapedLinks=true")) ||
+        !interface->profileProperty("AllowEscapedLinks").toBool()) {
+        *error = "The Konsole component could not enable terminal hyperlinks. Reinstall the "
+                 "matching package.";
         delete part;
         return nullptr;
     }

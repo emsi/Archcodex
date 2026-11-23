@@ -6,10 +6,12 @@
 #include "testenvironment.h"
 #include <KPluginFactory>
 #include <KPluginMetaData>
+#include <KSandbox>
 #include <KXMLGUIClient>
 #include <QAccessible>
 #include <QClipboard>
 #include <QContextMenuEvent>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QFile>
 #include <QFrame>
@@ -22,7 +24,9 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QPlainTextEdit>
+#include <QProcess>
 #include <QPushButton>
+#include <QScopeGuard>
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QTemporaryDir>
@@ -88,10 +92,173 @@ bool openTerminalMenu(QWidget *input) {
 }
 } // namespace
 
+class LinkReceiver : public QObject {
+    Q_OBJECT
+  public:
+    QList<QUrl> urls;
+  public slots:
+    void open(const QUrl &url) {
+        urls.append(url);
+    }
+};
+
 class TerminalTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void labeledHyperlinksUseTheNativeTerminal_data() {
+        QTest::addColumn<QByteArray>("terminator");
+        QTest::addColumn<bool>("alternate");
+        QTest::newRow("normal-bel") << QByteArray("\a") << false;
+        QTest::newRow("normal-st") << QByteArray("\033\\") << false;
+        QTest::newRow("alternate-bel") << QByteArray("\a") << true;
+        QTest::newRow("alternate-st") << QByteArray("\033\\") << true;
+    }
+    void labeledHyperlinksUseTheNativeTerminal() {
+        QFETCH(QByteArray, terminator);
+        QFETCH(bool, alternate);
+        QTemporaryDir dir;
+        // KIO uses QDesktopServices inside a sandbox. Exercise that path with a
+        // harmless URL receiver, in a child because KSandbox caches its detection.
+        // This is not an installed-Flatpak/desktop-portal integration test.
+        if (!qEnvironmentVariableIsSet("ARCHCODEX_TEST_HYPERLINK_CHILD")) {
+            QProcess child;
+            auto environment = QProcessEnvironment::systemEnvironment();
+            environment.insert("ARCHCODEX_TEST_HYPERLINK_CHILD", "1");
+            environment.insert("SNAP", dir.path());
+            child.setProcessEnvironment(environment);
+            child.setProcessChannelMode(QProcess::MergedChannels);
+            child.start(
+                QCoreApplication::applicationFilePath(),
+                {QString("labeledHyperlinksUseTheNativeTerminal:%1").arg(QTest::currentDataTag())});
+            QVERIFY(child.waitForStarted());
+            QTRY_VERIFY_WITH_TIMEOUT(child.state() == QProcess::NotRunning, 60000);
+            const auto output = child.readAll();
+            QCOMPARE(child.exitStatus(), QProcess::NormalExit);
+            QVERIFY2(child.exitCode() == 0, output.constData());
+            return;
+        }
+        QVERIFY(KSandbox::isInside());
+        LinkReceiver receiver;
+        QDesktopServices::setUrlHandler("http", &receiver, "open");
+        QDesktopServices::setUrlHandler("https", &receiver, "open");
+        const auto resetHandlers = qScopeGuard([] {
+            QDesktopServices::unsetUrlHandler("http");
+            QDesktopServices::unsetUrlHandler("https");
+        });
+        QFile script(dir.filePath("client"));
+        QVERIFY(script.open(QIODevice::WriteOnly));
+        script.write(R"PY(#!/usr/bin/python3
+import os, sys, tty
+tty.setraw(0)
+ending = b'\a' if sys.argv[-1].endswith('bel') else b'\x1b\\'
+alternate = sys.argv[-1].startswith('alternate')
+if alternate: os.write(1, b'\x1b[?1049h')
+def show(url):
+    os.write(1, b'\x1b[2J\x1b[H\x1b]8;;' + url + ending + b'PR #41' +
+             b'\x1b]8;;' + ending + b' plain\r\nREADY\r\n')
+show(b'https://example.test/pull/41')
+while True:
+    command = os.read(0, 1)
+    if not command or command == b'x': break
+    if command == b'b': show(b'javascript:alert(1)')
+    if command == b'r': show(b'http://example.test/other')
+    if command in (b'a', b'n'):
+        next_alternate = command == b'a'
+        if alternate != next_alternate:
+            os.write(1, b'\x1b[?1049h' if next_alternate else b'\x1b[?1049l')
+            alternate = next_alternate
+        show(b'https://example.test/alternate' if alternate else b'https://example.test/normal')
+)PY");
+        script.close();
+        QVERIFY(script.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner));
+        const auto raw = KPluginFactory::instantiatePlugin<KParts::ReadOnlyPart>(
+            KPluginMetaData("kf6/parts/konsolepart"));
+        QVERIFY(raw);
+        std::unique_ptr<KParts::ReadOnlyPart> unchanged(raw.plugin);
+        auto *original = qobject_cast<TerminalInterface *>(unchanged.get());
+        QVERIFY(original);
+        const auto allowed = original->profileProperty("EscapedLinksSchema");
+        const auto directClick = original->profileProperty("OpenLinksByDirectClickEnabled");
+        const auto originallyEnabled = original->profileProperty("AllowEscapedLinks");
+        TerminalArea area;
+        area.resize(800, 500);
+        area.show();
+        area.activateWindow();
+        QVERIFY(QTest::qWaitForWindowExposed(&area));
+        BackendProfile p{"b", "Fixture", "local-unix", "/unused", script.fileName(), false};
+        const QString id =
+            QString(alternate ? "alternate-" : "normal-") + (terminator == "\a" ? "bel" : "st");
+        const auto session = Session::fromThread(p.id, {{"id", id}, {"cwd", dir.path()}});
+        QString error;
+        QVERIFY2(area.open(p, session, &error), qPrintable(error));
+        auto *part = area.findChild<KParts::ReadOnlyPart *>();
+        auto *terminal = qobject_cast<TerminalInterface *>(part);
+        QVERIFY(terminal);
+        QVERIFY(terminal->profileProperty("AllowEscapedLinks").toBool());
+        QCOMPARE(terminal->profileProperty("EscapedLinksSchema"), allowed);
+        QCOMPARE(terminal->profileProperty("OpenLinksByDirectClickEnabled"), directClick);
+        QCOMPARE(original->profileProperty("AllowEscapedLinks"), originallyEnabled);
+        QTRY_VERIFY(area.isAncestorOf(QApplication::focusWidget()));
+        auto *input = QApplication::focusWidget();
+        auto *accessible = QAccessible::queryAccessibleInterface(input);
+        QVERIFY(accessible && accessible->textInterface());
+        auto *text = accessible->textInterface();
+        QTRY_VERIFY(text->text(0, text->characterCount()).contains("READY"));
+        QVERIFY(text->text(0, text->characterCount()).contains("PR #41 plain"));
+        QVERIFY(!text->text(0, text->characterCount()).contains("https://"));
+        const auto move = [&](int column, Qt::KeyboardModifiers modifiers) {
+            const auto position = text->characterRect(column).center();
+            QMouseEvent event(QEvent::MouseMove, position, input->mapToGlobal(position),
+                              Qt::NoButton, Qt::NoButton, modifiers);
+            QApplication::sendEvent(input, &event);
+        };
+        const auto preview = [&] {
+            for (auto *label : input->findChildren<QLabel *>())
+                if (label->isVisible() && label->text().startsWith("http"))
+                    return label->text();
+            return QString();
+        };
+        const auto hover = [&] {
+            move(9, Qt::NoModifier);
+            move(2, Qt::ControlModifier);
+            return preview();
+        };
+        QTRY_COMPARE(hover(), "https://example.test/pull/41");
+        QCOMPARE(input->cursor().shape(), Qt::PointingHandCursor);
+        // Configuration reapplication must not duplicate delimiter handling.
+        for (int i = 0; i < 2; ++i)
+            QVERIFY(QMetaObject::invokeMethod(part, "changeSessionSettings",
+                                              Q_ARG(QString, "AllowEscapedLinks=true")));
+        const auto click = [&](Qt::KeyboardModifiers modifiers) {
+            QTest::mouseClick(input, Qt::LeftButton, modifiers, text->characterRect(2).center());
+        };
+        if (!directClick.toBool()) {
+            click(Qt::NoModifier);
+            QVERIFY(receiver.urls.isEmpty());
+        }
+        click(Qt::ControlModifier);
+        QTRY_COMPARE(receiver.urls, QList<QUrl>{QUrl("https://example.test/pull/41")});
+        move(9, Qt::NoModifier);
+        QVERIFY(preview().isEmpty());
+        // Redrawing the same label replaces its target; forbidden schemes stay plain.
+        QTest::keyClick(input, Qt::Key_R);
+        QTRY_COMPARE(hover(), "http://example.test/other");
+        QTest::keyClick(input, Qt::Key_B);
+        QTRY_VERIFY(hover().isEmpty());
+        QVERIFY(input->cursor().shape() != Qt::PointingHandCursor);
+        QTest::keyClick(input, Qt::Key_R);
+        QTRY_COMPARE(hover(), "http://example.test/other");
+        for (const bool nextAlternate : {true, false, true, false}) {
+            QTest::keyClick(input, nextAlternate ? Qt::Key_A : Qt::Key_N);
+            const auto target =
+                QString("https://example.test/%1").arg(nextAlternate ? "alternate" : "normal");
+            QTRY_COMPARE(hover(), target);
+            click(Qt::ControlModifier);
+            QTRY_COMPARE(receiver.urls.last(), QUrl(target));
+        }
+        area.closeCurrent();
+    }
     void pasteSurvivesKonsoleContextMenu() {
         PtyProbe probe;
         QVERIFY(probe.install());

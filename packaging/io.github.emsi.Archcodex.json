@@ -45,7 +45,8 @@
         "sha256": "fe54d0297c24a52b2ec8ebf45bf75b22736f65301663846b8f3539044943e1ac"
       }, {"type": "patch", "path": "konsole-event-only.patch"},
       {"type": "patch", "path": "konsole-embedded-lifecycle.patch"},
-      {"type": "patch", "path": "konsole-literal-launch.patch"}]
+      {"type": "patch", "path": "konsole-literal-launch.patch"},
+      {"type": "patch", "path": "konsole-hyperlinks.patch"}]
     },
     {
       "name": "archcodex",
