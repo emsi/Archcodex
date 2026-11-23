@@ -147,7 +147,8 @@ class SessionTree : public QTreeView {
             if (index.isValid()) {
                 scrollTo(index);
                 emit customContextMenuRequested(visualRect(index).center());
-            }
+            } else
+                emit customContextMenuRequested(QPoint(-1, -1));
             event->accept();
             return;
         }
@@ -270,6 +271,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     auto *left = new QVBoxLayout(sidebar);
     auto *heading = new QHBoxLayout;
     auto *label = new QLabel("Projects");
+    label->setObjectName("projectsHeading");
     auto f = label->font();
     f.setBold(true);
     label->setFont(f);
@@ -285,6 +287,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     left->addLayout(heading);
     connect(discoverButton, &QPushButton::clicked, this, [this] { discover(); });
     tabs = new QTabBar;
+    for (QWidget *widget : {static_cast<QWidget *>(label), static_cast<QWidget *>(tabs)}) {
+        widget->setContextMenuPolicy(Qt::CustomContextMenu);
+        connect(widget, &QWidget::customContextMenuRequested, this,
+                [this, widget](const QPoint &position) { projectsContextMenu(widget, position); });
+    }
     tabs->addTab("All");
     tabs->addTab("Active");
     tabs->addTab("Running");
@@ -356,10 +363,20 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(sessionTree, &SessionTree::sessionActivated, this, &Window::activate);
     connect(tabs, &QTabBar::currentChanged, this, &Window::switchExplorer);
     connect(tree, &QTreeView::collapsed, this, [this](const QModelIndex &index) {
-        explorer[tabs->currentIndex()].navigation.collapsed.insert(index.data(KeyRole).toString());
+        auto &state = explorer[tabs->currentIndex()];
+        const auto key = index.data(KeyRole).toString();
+        state.navigation.collapsed.insert(key);
+        state.autoCollapsedServers.remove(key);
+        state.browsedServers.remove(key);
     });
     connect(tree, &QTreeView::expanded, this, [this](const QModelIndex &index) {
-        explorer[tabs->currentIndex()].navigation.collapsed.remove(index.data(KeyRole).toString());
+        auto &state = explorer[tabs->currentIndex()];
+        const auto key = index.data(KeyRole).toString();
+        state.navigation.collapsed.remove(key);
+        state.autoCollapsedServers.remove(key);
+        if (autoCollapseServers && autoCollapseServers->isChecked() &&
+            index.data(KindRole).toInt() == int(NodeKind::Server))
+            state.browsedServers.insert(key);
     });
     for (auto *source : {model, results}) {
         connect(source, &SessionModel::branchAboutToMove, this,
@@ -383,6 +400,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             if (!changingExplorer && filter->sourceModel() == source) {
                 const QSignalBlocker block(tree);
                 restoreTree(tree, movingExpanded, movingSelected);
+                updateServerExpansion();
             }
         });
         connect(source, &SessionModel::topologyAboutToChange, this, [this, source] {
@@ -409,6 +427,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
             expandActivityViews();
             if (source != results)
                 syncCurrentSession(); // Search pages preserve browsing/scroll position.
+            else
+                updateServerExpansion();
         });
     }
     connect(filter, &QAbstractItemModel::rowsInserted, this,
@@ -430,15 +450,19 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                     if (root)
                         seenRoots.insert(key);
                 };
+                bool branchInserted = false;
                 for (int row = first; row <= last; ++row) {
                     const auto index = filter->index(row, 0, parent);
                     if (index.data(KindRole).toInt() == int(NodeKind::Session))
                         continue;
+                    branchInserted = true;
                     expand(index);
                     // A previously filtered-out root can expose an already
                     // populated branch in a single insertion notification.
                     walkContainers(filter, index, expand);
                 }
+                if (branchInserted)
+                    updateServerExpansion();
             });
     loadMore = new QPushButton("Load more history");
     loadMore->setEnabled(false);
@@ -508,6 +532,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 state.navigation.selected.clear();
                 state.unfiltered.selected.clear();
             }
+            updateServerExpansion();
         } else
             syncCurrentSession();
     });
@@ -603,6 +628,29 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         results->setHideUnsaved(hide);
         if (globalSearchActive)
             updateSearchSummary();
+    });
+    autoCollapseServers = view->addAction("Auto-collapse other servers");
+    autoCollapseServers->setObjectName("autoCollapseOtherServers");
+    autoCollapseServers->setCheckable(true);
+    autoCollapseServers->setChecked(
+        settings.value("projects/autoCollapseOtherServers", false).toBool());
+    autoCollapseServers->setToolTip(
+        "Keep the displayed session's server expanded. Other servers collapse on terminal "
+        "switch; host groups stay open and you can temporarily expand another server to browse.");
+    commands->adopt("auto_collapse_servers", autoCollapseServers, "Projects");
+    connect(autoCollapseServers, &QAction::toggled, this, [this](bool enabled) {
+        QSettings settings(dataDirectory + "/window.ini", QSettings::IniFormat);
+        settings.setValue("projects/autoCollapseOtherServers", enabled);
+        for (auto &state : explorer)
+            state.browsedServers.clear();
+        if (enabled)
+            syncCurrentSession();
+        else {
+            updateServerExpansion();
+            // Inactive tabs already captured their logical expansion on leaving them.
+            for (auto &state : explorer)
+                state.autoCollapsedServers.clear();
+        }
     });
     view->addAction(commands->add("focus_projects", "Focus Projects", "Navigation",
                                   {QKeySequence("Ctrl+Alt+P")},
@@ -1158,8 +1206,10 @@ void Window::forkSession(const QString &backend, const QString &thread) {
 }
 void Window::sessionContextMenu(const QPoint &position) {
     const auto index = tree->indexAt(position);
-    if (!index.isValid())
+    if (!index.isValid()) {
+        projectsContextMenu(tree->viewport(), position.x() < 0 ? QPoint{} : position);
         return;
+    }
     const auto kind = static_cast<NodeKind>(index.data(KindRole).toInt());
     const auto key = index.data(KeyRole).toString();
     const auto backend = index.data(BackendRole).toString();
@@ -1199,7 +1249,74 @@ void Window::sessionContextMenu(const QPoint &position) {
             });
         });
     }
+    menu->addSeparator();
+    menu->addAction(autoCollapseServers);
     menu->popup(tree->viewport()->mapToGlobal(position));
+}
+void Window::projectsContextMenu(QWidget *widget, const QPoint &position) {
+    auto *menu = new QMenu(widget);
+    menu->setObjectName("projectsContextMenu");
+    menu->setAttribute(Qt::WA_DeleteOnClose);
+    menu->addAction(autoCollapseServers);
+    menu->popup(widget->mapToGlobal(position));
+}
+QStringList Window::navigationExpansion(int tab) const {
+    auto keys = expandedKeys(tree);
+    const auto *source = qobject_cast<SessionModel *>(filter->sourceModel());
+    for (const auto &key : explorer.value(tab).autoCollapsedServers)
+        if (source && source->nodeIndex(key).isValid() && !keys.contains(key))
+            keys << key;
+    return keys;
+}
+void Window::updateServerExpansion() {
+    if (!autoCollapseServers)
+        return;
+    auto &state = explorer[tabs->currentIndex()];
+    const bool enabled = autoCollapseServers->isChecked();
+    if (!enabled && state.autoCollapsedServers.isEmpty())
+        return;
+    const auto current = terminal ? terminal->currentKey() : QString();
+    if (expansionSession != current) {
+        expansionSession = current;
+        for (auto &view : explorer)
+            view.browsedServers.clear();
+    }
+    const auto *source = qobject_cast<SessionModel *>(filter->sourceModel());
+    const auto index =
+        source ? filter->mapFromSource(source->sessionIndex(current)) : QModelIndex{};
+    const QSignalBlocker block(tree);
+    if (!enabled || !index.isValid()) {
+        // A tab/query can exclude the displayed session. Keep its results browsable,
+        // and never alter filters or pretend another session is the current one.
+        restoreTree(tree, state.autoCollapsedServers.values(), {});
+        state.autoCollapsedServers.clear();
+        return;
+    }
+    const auto backend = index.data(BackendRole).toString();
+    QSet<QString> present;
+    const auto visit = [&](auto &&self, const QModelIndex &parent) -> void {
+        for (int row = 0; row < filter->rowCount(parent); ++row) {
+            const auto node = filter->index(row, 0, parent);
+            const auto kind = static_cast<NodeKind>(node.data(KindRole).toInt());
+            if (kind == NodeKind::Group) {
+                self(self, node);
+            } else if (kind == NodeKind::Server) {
+                const auto key = node.data(KeyRole).toString();
+                present.insert(key);
+                if (node.data(BackendRole).toString() != backend &&
+                    !state.browsedServers.contains(key)) {
+                    if (tree->isExpanded(node)) {
+                        state.autoCollapsedServers.insert(key);
+                        tree->collapse(node);
+                    }
+                } else if (state.autoCollapsedServers.remove(key))
+                    tree->expand(node);
+                // Only host/group and server rows: never traverse folders or sessions.
+            }
+        }
+    };
+    visit(visit, {});
+    state.autoCollapsedServers.intersect(present);
 }
 void Window::expandActivityViews() {
     const auto &state = explorer[tabs->currentIndex()];
@@ -2050,6 +2167,7 @@ void Window::syncCurrentSession() {
     // With no displayed terminal, Projects remains available for browsing and
     // choosing a search scope. Closing the displayed view clears its selection.
     const auto key = terminal ? terminal->currentKey() : QString();
+    updateServerExpansion();
     if (key.isEmpty())
         return;
     const auto *source = qobject_cast<SessionModel *>(filter->sourceModel());
@@ -2827,7 +2945,8 @@ bool Window::showingSearch() const {
 }
 void Window::rememberNavigation(int tab) {
     auto &navigation = explorer[tab].navigation;
-    navigation.expanded = expandedKeys(tree);
+    // The tab widget already reports the destination during a switch.
+    navigation.expanded = navigationExpansion(tab);
     navigation.selected = tree->currentIndex().data(KeyRole).toString();
     navigation.saved = true;
 }
@@ -2837,6 +2956,7 @@ void Window::beginFiltering() {
     if (!state.filtering) {
         state.unfiltered = state.navigation;
         state.navigation.collapsed.clear();
+        state.autoCollapsedServers.clear();
         state.filtering = true;
     }
 }
@@ -2844,6 +2964,7 @@ void Window::endFiltering() {
     auto &state = explorer[tabs->currentIndex()];
     if (state.filtering) {
         state.navigation = state.unfiltered;
+        state.autoCollapsedServers.clear();
         state.filtering = false;
     }
 }
@@ -3223,7 +3344,8 @@ void Window::closeEvent(QCloseEvent *event) {
     settings.setValue("geometry", saveGeometry());
     settings.setValue("splitter", splitter->saveState());
     const auto &state = explorer[tabs->currentIndex()];
-    settings.setValue("expanded", state.filtering ? state.unfiltered.expanded : expandedKeys(tree));
+    settings.setValue("expanded", state.filtering ? state.unfiltered.expanded
+                                                  : navigationExpansion(tabs->currentIndex()));
     for (auto *b : backends)
         b->disconnectServer();
     QMainWindow::closeEvent(event);

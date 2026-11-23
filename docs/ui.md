@@ -3,7 +3,7 @@
 Status: rudimentary layout requested by the user; interaction details below are
 the design baseline. The [initial implementation](implementation.md) now delivers
 the two-pane layout and records which refinements remain open.
-Last updated: 2026-11-11.
+Last updated: 2026-11-23.
 
 ## 1. Starting layout
 
@@ -137,6 +137,23 @@ Close releases only that row's open terminal, including retained exit output;
 it is disabled for conversations without a terminal view. Expand All expands
 the chosen subtree and records that expansion in the current view. Actions that
 need a connection are disabled while disconnected and rechecked when invoked.
+
+**Auto-collapse other servers** is a checkable option in the Projects heading,
+tab-strip and tree context menus, and in View/the command palette. It defaults to
+off, is remembered across restarts, and applies to all five tabs. When enabled,
+switching the displayed terminal collapses other Codex server/myCodex container
+rows and reveals the current session. Host groups are never automatically
+collapsed, so their server/container rows remain accessible. Routing uses the
+server identity, independently of identical titles or directories.
+
+You can temporarily expand another server to browse; it stays expanded through
+background updates and tab changes until the next terminal switch. Expand All
+still works. If a tab or search excludes the displayed session, automatic collapse
+pauses for that view; filters and the selected terminal are not changed. Turning
+the option off restores automatically collapsed servers without undoing manual
+collapses. Automatic collapses are not saved as manual expansion preferences.
+The option uses `projects/autoCollapseOtherServers` in `window.ini`; it requires no
+data migration and can receive a shortcut in Settings, with none assigned by default.
 
 ## 3. Existing-session discovery
 
