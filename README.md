@@ -84,7 +84,8 @@ planned protocol-observation option that requires no Codex changes.
   alert. Configure these in **Settings → Notifications**; see
   [notification behavior and compatibility](docs/notifications.md).
 - **Embedded terminal:** use the Codex TUI in Konsole, with local clipboard and
-  image input even when the workspace is in a remote myCodex container.
+  image input even when the workspace is in a remote myCodex container. Hover
+  over labeled hyperlinks to preview their destination; Ctrl+click opens them.
 - **Search and filters:** search full conversations across connected servers,
   or filter live and opened sessions as you type.
 - **Keyboard navigation:** use a command palette, configurable shortcuts and

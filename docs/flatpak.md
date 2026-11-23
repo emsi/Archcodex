@@ -33,6 +33,28 @@ launch API without shell fallback. It is required for
 The application checks for this API before launching a client. Build and test the
 application and the patched KPart together; an older plugin is incompatible.
 
+`konsole-hyperlinks.patch` supports enabling OSC 8 labeled hyperlinks before
+the terminal client starts. It corrects `changeSessionSettings()` to use the
+session's runtime-profile signal, refreshes view filters on runtime-profile
+changes, and configures link extraction for both primary and alternate screens.
+One emulator-owned connection routes delimiters to the active screen, including
+after repeated profile changes or screen switches. The component remains pinned
+to **26.04.3**.
+
+Archcodex enables `AllowEscapedLinks` on each new terminal and checks the result.
+The override is local to that terminal; it does not write a Konsole profile.
+Allowed schemes and activation preferences remain inherited from the profile
+(normally HTTP, HTTPS and local file URLs, with Ctrl+click to open). Konsole
+shows the destination on hover and uses KDE's normal URL-opening path. File
+URLs refer to the local desktop; remote filesystem mapping is not provided.
+
+`test-terminal` exercises real PTY output, both OSC 8 terminators, both screens
+and repeated switching, target replacement, disallowed schemes, profile
+isolation and Ctrl+click delivery. The click tests use a child process with
+simulated sandbox detection and a harmless `QDesktopServices` URL receiver.
+They verify the same KIO-to-Qt dispatch used inside Flatpak, but actual desktop
+portal/browser activation still requires an installed-Flatpak smoke test.
+
 Bundle the Konsole KPart and any dependencies missing from the chosen runtime.
 Installing the separate Konsole Flatpak does not supply Archcodex's plugin. Do
 not load a host-distribution Qt/KDE plugin into the Flatpak runtime. Verify plugin

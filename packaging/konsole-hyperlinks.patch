@@ -1,0 +1,152 @@
+--- a/src/Part.cpp
++++ b/src/Part.cpp
+@@ -354,13 +354,9 @@
+ {
+     Q_ASSERT(activeSession());
+ 
+-    // send a profile change command, the escape code format
+-    // is the same as the normal X-Term commands used to change the window title or icon,
+-    // but with a magic value of '50' for the parameter which specifies what to change
+-    QString command = QStringLiteral("\033]50;%1\a").arg(text);
+-
+-    sendInput(command);
++    // Use the existing runtime-profile path without sending settings to the PTY.
++    Q_EMIT activeSession()->profileChangeCommandReceived(text);
+ }
+ 
+ // Konqueror integration
+ bool Part::openUrl(const QUrl &url)
+--- a/src/session/SessionController.cpp
++++ b/src/session/SessionController.cpp
+@@ -170,6 +170,12 @@
+ 
+     // listen for changes in session, we might need to change the enabled filters
+     connect(ProfileManager::instance(), &Konsole::ProfileManager::profileChanged, this, &Konsole::SessionController::updateFilterList);
++    // Runtime profile changes also need to refresh the view's link filters.
++    connect(SessionManager::instance(), &SessionManager::sessionUpdated, this, [this](Session *updated) {
++        if (updated == session()) {
++            updateFilterList(SessionManager::instance()->sessionProfile(updated));
++        }
++    });
+ 
+     // listen for session resize requests
+     connect(session(), &Konsole::Session::resizeRequest, this, &Konsole::SessionController::sessionResizeRequest);
+--- a/src/Emulation.h
++++ b/src/Emulation.h
+@@ -100,6 +100,9 @@
+      * Associates a TerminalDisplay with this emulation.
+      */
+     void setCurrentTerminalDisplay(TerminalDisplay *display);
++
++    /** Configure OSC 8 extraction for both primary and alternate screens. */
++    void setEscapedLinks(bool enabled, const QStringList &allowedSchemes);
+ 
+     /** Returns the size of the screen image which the emulation produces */
+     QSize imageSize() const;
+--- a/src/Emulation.cpp
++++ b/src/Emulation.cpp
+@@ -13,6 +13,7 @@
+ #include <QKeyEvent>
+ 
+ // Konsole
++#include "EscapeSequenceUrlExtractor.h"
+ #include "KonsoleSettings.h"
+ #include "Screen.h"
+ #include "ScreenWindow.h"
+@@ -28,6 +29,13 @@
+     _screen[1] = new Screen(40, 80);
+     _currentScreen = _screen[0];
+ 
++    // Route each OSC 8 delimiter exactly once to the screen receiving output.
++    connect(this, &Emulation::toggleUrlExtractionRequest, this, [this]() {
++        if (auto *extractor = _currentScreen->urlExtractor()) {
++            extractor->toggleUrlInput();
++        }
++    });
++
+     QObject::connect(&_bulkTimer1, &QTimer::timeout, this, &Konsole::Emulation::showBulk);
+     QObject::connect(&_bulkTimer2, &QTimer::timeout, this, &Konsole::Emulation::showBulk);
+ 
+@@ -91,6 +99,16 @@
+ {
+     _screen[0]->setCurrentTerminalDisplay(display);
+     _screen[1]->setCurrentTerminalDisplay(display);
++}
++
++void Emulation::setEscapedLinks(bool enabled, const QStringList &allowedSchemes)
++{
++    for (Screen *screen : _screen) {
++        screen->setEnableUrlExtractor(enabled);
++        if (auto *extractor = screen->urlExtractor()) {
++            extractor->setAllowedLinkSchema(allowedSchemes);
++        }
++    }
+ }
+ 
+ void Emulation::checkScreenInUse()
+--- a/src/session/SessionManager.cpp
++++ b/src/session/SessionManager.cpp
+@@ -17,9 +17,8 @@
+ #include <KConfigGroup>
+ 
+ // Konsole
+-#include "Emulation.h" // to connect the URL escape sequence extractor
++#include "Emulation.h"
+ #include "Enumeration.h"
+-#include "EscapeSequenceUrlExtractor.h"
+ #include "Screen.h"
+ #include "ShouldApplyProperty.h"
+ #include "konsoledebug.h"
+@@ -275,22 +274,16 @@
+     if (apply.shouldApply(Profile::SilenceSeconds)) {
+         session->setMonitorSilenceSeconds(profile->silenceSeconds());
+     }
+-    if (apply.shouldApply(Profile::AllowEscapedLinks) || apply.shouldApply(Profile::ReflowLines) || apply.shouldApply(Profile::IgnoreWcWidth)) {
+-        const bool shouldEnableUrlExtractor = profile->allowEscapedLinks();
++    if (apply.shouldApply(Profile::AllowEscapedLinks) || apply.shouldApply(Profile::EscapedLinksSchema)) {
++        session->emulation()->setEscapedLinks(profile->allowEscapedLinks(), profile->escapedLinksSchema());
++    }
++    if (apply.shouldApply(Profile::ReflowLines) || apply.shouldApply(Profile::IgnoreWcWidth)) {
+         const bool enableReflowLines = profile->property<bool>(Profile::ReflowLines);
+         const bool ignoreWcWidth = profile->property<bool>(Profile::IgnoreWcWidth);
+         const auto views = session->views();
+         for (TerminalDisplay *view : views) {
+             view->screenWindow()->screen()->setReflowLines(enableReflowLines);
+             view->screenWindow()->screen()->setIgnoreWcWidth(ignoreWcWidth);
+-            view->screenWindow()->screen()->setEnableUrlExtractor(shouldEnableUrlExtractor);
+-            if (shouldEnableUrlExtractor) {
+-                view->screenWindow()->screen()->urlExtractor()->setAllowedLinkSchema(profile->escapedLinksSchema());
+-                connect(session->emulation(),
+-                        &Emulation::toggleUrlExtractionRequest,
+-                        view->screenWindow()->screen()->urlExtractor(),
+-                        &EscapeSequenceUrlExtractor::toggleUrlInput);
+-            }
+         }
+     }
+ }
+--- a/src/terminalDisplay/TerminalDisplay.cpp
++++ b/src/terminalDisplay/TerminalDisplay.cpp
+@@ -58,7 +58,6 @@
+ #include "../widgets/KonsolePrintManager.h"
+ #include "../widgets/TerminalDisplayAccessible.h"
+ #include "Emulation.h" // to connect the URL escape sequence extractor
+-#include "EscapeSequenceUrlExtractor.h"
+ #include "PrintOptions.h"
+ #include "Screen.h"
+ #include "ViewManager.h" // for colorSchemeForProfile. // TODO: Rewrite this.
+@@ -152,15 +151,6 @@
+         auto profile = SessionManager::instance()->sessionProfile(_sessionController->session());
+         _screenWindow->screen()->setReflowLines(profile->property<bool>(Profile::ReflowLines));
+         _screenWindow->screen()->setIgnoreWcWidth(profile->property<bool>(Profile::IgnoreWcWidth));
+-        _screenWindow->screen()->setEnableUrlExtractor(profile->allowEscapedLinks());
+-
+-        if (_screenWindow->screen()->urlExtractor()) {
+-            _screenWindow->screen()->urlExtractor()->setAllowedLinkSchema(profile->escapedLinksSchema());
+-            connect(_sessionController->session()->emulation(),
+-                    &Emulation::toggleUrlExtractionRequest,
+-                    _screenWindow->screen()->urlExtractor(),
+-                    &EscapeSequenceUrlExtractor::toggleUrlInput);
+-        }
+     }
+ }
+ 
