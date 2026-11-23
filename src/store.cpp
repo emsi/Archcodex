@@ -36,6 +36,10 @@ Store::Store(const QString &path) {
         "CASCADE, id TEXT, data TEXT, opened INTEGER NOT NULL, PRIMARY KEY(backend,id))",
         "CREATE TABLE IF NOT EXISTS workspace (id INTEGER PRIMARY KEY CHECK(id=1), "
         "revision INTEGER NOT NULL, data TEXT NOT NULL)",
+        // Additive: older versions can still use this database. Server metadata
+        // writes cannot overwrite read state, including events arriving first.
+        "CREATE TABLE IF NOT EXISTS unread_sessions (backend TEXT REFERENCES backends(id) "
+        "ON DELETE CASCADE, id TEXT, source TEXT NOT NULL, PRIMARY KEY(backend,id))",
         "PRAGMA user_version=2"};
     if (!db.transaction())
         throw std::runtime_error("Could not begin database migration.");
@@ -120,6 +124,30 @@ void Store::save(const Session &s) {
     q.addBindValue(s.opened);
     run(q);
 }
+QList<SessionReadState> Store::readStates() const {
+    QList<SessionReadState> out;
+    QSqlQuery q(db);
+    q.prepare("SELECT backend,id,source FROM unread_sessions");
+    run(q);
+    while (q.next())
+        out.append({q.value(0).toString(), q.value(1).toString(), q.value(2).toString(), true});
+    return out;
+}
+void Store::save(const SessionReadState &s) {
+    QSqlQuery q(db);
+    if (s.unread) {
+        q.prepare("INSERT INTO unread_sessions VALUES(?,?,?) ON CONFLICT(backend,id) "
+                  "DO UPDATE SET source=excluded.source");
+        q.addBindValue(s.backendId);
+        q.addBindValue(s.id);
+        q.addBindValue(s.sourceIdentity);
+    } else {
+        q.prepare("DELETE FROM unread_sessions WHERE backend=? AND id=?");
+        q.addBindValue(s.backendId);
+        q.addBindValue(s.id);
+    }
+    run(q);
+}
 void Store::removeBackend(const QString &id) {
     QSqlQuery q(db);
     q.prepare("DELETE FROM backends WHERE id=?");
@@ -127,6 +155,7 @@ void Store::removeBackend(const QString &id) {
     run(q);
 }
 void Store::removeSession(const QString &backend, const QString &id) {
+    save(SessionReadState{backend, id, {}, false});
     QSqlQuery q(db);
     q.prepare("DELETE FROM sessions WHERE backend=? AND id=?");
     q.addBindValue(backend);

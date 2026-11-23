@@ -56,6 +56,15 @@ class Window : public QMainWindow {
     QHash<QString, BackendProfile> profiles;
     QHash<QString, Backend *> backends;
     QHash<QString, Session> sessions, searchSessions;
+    QHash<QString, SessionReadState> readStates;
+    QHash<QString, quint64> readThrough;
+    QSet<QString> attentionKeys;
+    bool unreadCountScheduled = false;
+    QString viewedSession;
+    void applyReadState(Session &session);
+    void setUnread(const QString &key, bool unread);
+    void receivedAttention(SessionAttention event);
+    void updateUnreadCount();
     QHash<QString, ConnectionState> connectionStates;
     QHash<QString, bool> connectionReady, more;
     QSet<QString> searching;
@@ -147,7 +156,7 @@ class Window : public QMainWindow {
     QToolButton *updateStatus;
     void showUpdates(bool check = true);
     void updateUpdateStatus();
-    void updateViewedSession();
+    void updateViewedSession(bool visit = false);
     QToolButton *workspaceStatus;
     bool workspaceLoaded = false, workspaceWritable = false, workspaceSaving = false;
     bool closing = false;

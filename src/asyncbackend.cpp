@@ -66,24 +66,18 @@ class BackendPump : public QObject {
   public:
     LocalBackend *core;
     QHash<QString, Session> pending;
-    QQueue<QPair<SessionAttention, quint64>> attention;
+    QHash<QString, QPair<SessionAttention, quint64>> attention;
     std::shared_ptr<std::atomic<quint64>> epoch;
     quint64 connectionEpoch = 0; // Worker-owned identity of the actual transport.
     bool inFlight = false, scheduled = false;
-    bool attentionOverflow = false;
     BackendPump(const BackendProfile &p, const QString &bridge, AsyncBackend *target,
                 std::shared_ptr<std::atomic<quint64>> generation, QObject *parent)
         : QObject(parent), core(new LocalBackend(p, bridge, this)), epoch(std::move(generation)) {
         core->setSearchPaced(true);
         connect(core, &Backend::attentionRequested, this, [this](const SessionAttention &event) {
-            // A stalled GUI cannot create an unbounded Qt queued-signal backlog.
-            if (attention.size() == 256) {
-                attention.dequeue();
-                if (!attentionOverflow)
-                    qWarning("Session notification backlog exceeded 256; oldest event discarded.");
-                attentionOverflow = true;
-            }
-            attention.enqueue({event, connectionEpoch});
+            // Coalesce by thread, like metadata: retain its latest unread
+            // occurrence without accumulating one queued signal per event.
+            attention[event.session.id] = {event, connectionEpoch};
             schedule();
         });
         connect(core, &Backend::connectionChanged, this, [this](const ConnectionState &state) {
@@ -104,6 +98,7 @@ class BackendPump : public QObject {
         });
         connect(core, &Backend::sessionRemoved, this, [this](const QString &id) {
             pending.remove(id);
+            attention.remove(id);
             emit removed(id);
         });
         connect(this, &BackendPump::removed, target, &Backend::sessionRemoved);
@@ -182,12 +177,11 @@ class BackendPump : public QObject {
             const auto eventEpoch = connectionEpoch;
             QList<SessionAttention> events;
             while (!attention.isEmpty() && events.size() < 32) {
-                const auto event = attention.dequeue();
+                const auto event = attention.begin().value();
+                attention.erase(attention.begin());
                 if (event.second == eventEpoch)
                     events << event.first;
             }
-            if (attention.isEmpty())
-                attentionOverflow = false;
             emit batch(items, events, eventEpoch);
         });
     }

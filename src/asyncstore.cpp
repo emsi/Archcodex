@@ -26,6 +26,7 @@ class StoreWriter : public QObject {
             snapshot.profiles = store->backends();
             snapshot.projects = store->projects();
             snapshot.sessions = store->sessions();
+            snapshot.readStates = store->readStates();
             try {
                 snapshot.workspace = store->workspace();
             } catch (const std::exception &e) {
@@ -150,6 +151,11 @@ void AsyncStore::save(const Session &s) {
     if (retired.contains(s.backendId))
         return;
     writer->enqueue("s:" + sessionKey(s.backendId, s.id), [s](Store &store) { store.save(s); });
+}
+void AsyncStore::save(const SessionReadState &s) {
+    if (!retired.contains(s.backendId))
+        writer->enqueue("read:" + sessionKey(s.backendId, s.id),
+                        [s](Store &store) { store.save(s); });
 }
 void AsyncStore::save(const WorkspaceSnapshot &snapshot) {
     writer->enqueue(

@@ -5,6 +5,10 @@ default. Archcodex sends a desktop notification when it observes a session chang
 from Running to Waiting. Waiting includes idle prompts, approvals and blocking
 questions. Ordinary discovery, history reads and reconnect snapshots do not alert.
 
+The same live occurrences feed [Unread](unread.md), independently of the desktop
+notification setting or delivery. Dismissing or expiring a popup does not mark a
+session read.
+
 Alerts require saved, non-ephemeral conversation metadata. A live transition may
 arrive before that metadata: Archcodex holds it while the already scheduled
 inventory read completes. It does not guess a working directory, substitute a

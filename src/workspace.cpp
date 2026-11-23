@@ -117,6 +117,13 @@ QString workspaceSourceIdentity(const BackendProfile &p) {
     const auto home = p.identity["codexHome"].toString();
     if (home.isEmpty() || !validText(home) || !QDir::isAbsolutePath(home))
         return {};
+    return sessionSourceIdentity(p);
+}
+QString sessionSourceIdentity(const BackendProfile &p) {
+    // Read markers can be set on disconnected history before codexHome is known.
+    // Still bind them to the endpoint and execution environment. Workspace
+    // restoration additionally requires a verified absolute home above.
+    const auto home = p.identity["codexHome"].toString();
     QJsonObject identity{{"kind", p.kind},
                          {"socket", p.socketPath},
                          {"codexHome", home},
