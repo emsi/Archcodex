@@ -1385,8 +1385,10 @@ class WindowTests : public QObject {
         QTest::keyClick(tree, Qt::Key_F10, Qt::ShiftModifier);
         QPointer<QMenu> menu = tree->findChild<QMenu *>("sessionContextMenu");
         QVERIFY(menu && menu->isVisible());
-        QCOMPARE(menu->actions().size(), 2);
-        QCOMPARE(menu->actions().last()->text(), "Expand All");
+        QCOMPARE(menu->actions().size(), 4);
+        QCOMPARE(menu->actions()[1]->text(), "Expand All");
+        QVERIFY(menu->actions()[2]->isSeparator());
+        QCOMPARE(menu->actions().last(), window.autoCollapseServers);
         QTest::keyClick(menu, Qt::Key_Escape);
         QTRY_VERIFY(!menu);
         QCOMPARE(focused.size(), 0);
@@ -1689,7 +1691,13 @@ class WindowTests : public QObject {
         QCOMPARE(fixture.methods, requests);
         window.close();
     }
+    void searchPagesPreserveBrowsingAndTerminalFocus_data() {
+        QTest::addColumn<bool>("autoCollapse");
+        QTest::newRow("normal") << false;
+        QTest::newRow("auto-collapse") << true;
+    }
     void searchPagesPreserveBrowsingAndTerminalFocus() {
+        QFETCH(bool, autoCollapse);
         Fixture fixture;
         fixture.delaySearch = true;
         PtyProbe child;
@@ -1713,6 +1721,7 @@ class WindowTests : public QObject {
         const auto current = Session::fromThread(profile.id, fixture.thread());
         QString error;
         QVERIFY2(area->open(profile, current, &error), qPrintable(error));
+        window.autoCollapseServers->setChecked(autoCollapse);
         auto *query = window.findChild<QLineEdit *>("sessionSearch");
         auto *tree = window.findChild<QTreeView *>();
         query->setText("needle");
@@ -1937,6 +1946,226 @@ class WindowTests : public QObject {
         query->clear();
         window.close();
     }
+    void autoCollapseServersKeepsHostsAndAllowsBrowsingUntilTerminalSwitch() {
+        QTemporaryDir data;
+        QList<BackendProfile> profiles;
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            for (const auto &id : {"local", "container", "remote", "remote-container"}) {
+                BackendProfile p{id, "Same name", "local-unix", "/unused", "codex", false};
+                if (QString(id).contains("remote")) {
+                    p.kind = "ssh-unix";
+                    p.sshHost = "fixture-host";
+                }
+                if (QString(id).contains("container")) {
+                    p.kind = "mycodex";
+                    p.containerId = QString(64, 'a');
+                    p.containerEpoch = "epoch";
+                    p.runtimeUser = "test";
+                    p.runtimeHome = "/home/test";
+                    p.dockerContext = "default";
+                    p.identity["containerWorkdir"] = "/work";
+                }
+                p.discoveryHost = p.sshHost.isEmpty() ? "local" : p.sshHost;
+                QVERIFY2(p.validate().isEmpty(), qPrintable(p.validate()));
+                profiles << p;
+                store.save(p);
+            }
+        }
+        Window window(data.path(), false);
+        window.show();
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        QCOMPARE(window.backends.size(), profiles.size());
+        for (const auto &p : profiles) {
+            auto s = Session::fromThread(p.id, {{"id", "same-id"},
+                                                {"name", "Same title"},
+                                                {"cwd", "/work/project"},
+                                                {"path", "/saved"},
+                                                {"status", QJsonObject{{"type", "idle"}}}});
+            window.backends[p.id]->sessionChanged(s);
+            QVERIFY(!window.terminal->prepare(p, s, false).id.isEmpty());
+        }
+        const auto server = [&](const QString &id) {
+            for (const auto &node : serverNodes(window.tree))
+                if (node.data(BackendRole).toString() == id)
+                    return node;
+            return QModelIndex{};
+        };
+        const auto focus = [&](const QString &id) {
+            QVERIFY(window.terminal->focusSession(sessionKey(id, "same-id")));
+        };
+        const auto onlyExpanded = [&](const QString &id) {
+            for (const auto &p : profiles) {
+                QVERIFY(server(p.id).isValid());
+                QCOMPARE(window.tree->isExpanded(server(p.id)), p.id == id);
+                QVERIFY(window.tree->isExpanded(server(p.id).parent()));
+            }
+            const auto current = window.tree->currentIndex();
+            QCOMPARE(current.data(KeyRole).toString(), sessionKey(id, "same-id"));
+            for (auto node = current.parent(); node.isValid(); node = node.parent())
+                QVERIFY(window.tree->isExpanded(node));
+        };
+        window.tabs->setCurrentIndex(int(SessionView::Opened));
+        focus("local");
+        window.tree->expandAll();
+        QVERIFY(!window.autoCollapseServers->isChecked());
+        window.autoCollapseServers->setChecked(true);
+        onlyExpanded("local");
+        // Browsing survives same-terminal focus, metadata and tree recompression.
+        window.tree->expand(server("remote-container"));
+        focus("local");
+        QVERIFY(window.tree->isExpanded(server("remote-container")));
+        auto extra = window.sessions[sessionKey("remote-container", "same-id")];
+        extra.id = "extra";
+        extra.cwd = "/elsewhere";
+        window.backends[extra.backendId]->sessionChanged(extra);
+        window.terminal->prepare(profiles.last(), extra, false);
+        QVERIFY(window.tree->isExpanded(server("remote-container")));
+        // Remember the temporary choice across tabs, until an actual terminal switch.
+        window.tabs->setCurrentIndex(int(SessionView::All));
+        window.tabs->setCurrentIndex(int(SessionView::Opened));
+        QVERIFY(window.tree->isExpanded(server("remote-container")));
+        focus("remote");
+        onlyExpanded("remote");
+        focus("container");
+        onlyExpanded("container");
+        const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
+        if (!screenshots.isEmpty())
+            QVERIFY(window.grab().save(screenshots + "/projects-auto-collapse.png"));
+        // Disabling restores expanded servers, but respects explicit manual collapses.
+        window.tree->expand(server("local"));
+        window.tree->collapse(server("local"));
+        window.autoCollapseServers->setChecked(false);
+        QVERIFY(!window.tree->isExpanded(server("local")));
+        for (const auto &id : {"container", "remote", "remote-container"})
+            QVERIFY(window.tree->isExpanded(server(id)));
+        window.close();
+    }
+    void autoCollapseServersRespectsEachViewAndFilters() {
+        QTemporaryDir data;
+        BackendProfile p{"a", "First", "local-unix", "/unused", "codex", false};
+        auto other = p;
+        other.id = "b";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+            store.save(other);
+        }
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+        auto a = Session::fromThread("a", {{"id", "a"},
+                                           {"name", "First"},
+                                           {"cwd", "/work"},
+                                           {"path", "/saved/a"},
+                                           {"status", QJsonObject{{"type", "idle"}}}});
+        auto b = a;
+        b.backendId = b.id = "b";
+        b.title = "Second";
+        for (auto s : {a, b}) {
+            window.backends[s.backendId]->sessionChanged(s);
+            window.terminal->prepare(window.profiles[s.backendId], s, false);
+            s.terminalOpen = true;
+            window.clientStateChanged(s); // Loaded client, rather than pending launch.
+        }
+        QVERIFY(window.terminal->focusSession(sessionKey("a", "a")));
+        window.autoCollapseServers->setChecked(true);
+        const auto expanded = [&](const QString &id) {
+            const auto node = nodeWithKey(window.tree, sessionKey(id, id));
+            QVERIFY(node.isValid());
+            for (auto parent = node.parent(); parent.isValid(); parent = parent.parent())
+                QVERIFY(window.tree->isExpanded(parent));
+        };
+        for (int tab = 0; tab < 5; ++tab) {
+            for (auto s : {a, b}) {
+                s.status = {{"type", tab == int(SessionView::Running) ? "active" : "idle"},
+                            {"activeFlags", QJsonArray{}}};
+                window.backends[s.backendId]->sessionChanged(s);
+            }
+            window.tabs->setCurrentIndex(tab);
+            expanded("a");
+            for (const auto &node : serverNodes(window.tree))
+                QCOMPARE(window.tree->isExpanded(node), node.data(BackendRole).toString() == "a");
+        }
+        // A filter excluding the displayed terminal restores normal browsing.
+        window.searchBox->setText("Second");
+        QCOMPARE(visibleThreads(window.tree), QStringList{"b"});
+        expanded("b");
+        QCOMPARE(window.terminal->currentKey(), sessionKey("a", "a"));
+        window.searchBox->clear();
+        expanded("a");
+        for (const auto &node : serverNodes(window.tree))
+            QCOMPARE(window.tree->isExpanded(node), node.data(BackendRole).toString() == "a");
+        // No displayed terminal: the option must not leave servers hidden.
+        window.terminal->closeSession(sessionKey("a", "a"));
+        window.terminal->closeSession(sessionKey("b", "b"));
+        window.tabs->setCurrentIndex(int(SessionView::All));
+        for (const auto &node : serverNodes(window.tree))
+            QVERIFY(window.tree->isExpanded(node));
+        window.close();
+    }
+    void autoCollapseServersMenusAndPersistence() {
+        QTemporaryDir data;
+        BackendProfile p{"a", "First", "local-unix", "/unused", "codex", false};
+        auto other = p;
+        other.id = "b";
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+            store.save(other);
+        }
+        QStringList logicalExpansion;
+        {
+            Window window(data.path(), false);
+            window.show();
+            QTRY_VERIFY(window.workspaceLoaded && window.cachePending.isEmpty());
+            QCOMPARE(window.commands->collection()->action("auto_collapse_servers"),
+                     window.autoCollapseServers);
+            QVERIFY(window.autoCollapseServers->shortcuts().isEmpty());
+            for (auto *widget : {static_cast<QWidget *>(window.tabs),
+                                 window.findChild<QWidget *>("projectsHeading"),
+                                 static_cast<QWidget *>(window.tree)}) {
+                widget->customContextMenuRequested(QPoint(-1, -1));
+                auto *menu = window.findChild<QMenu *>("projectsContextMenu");
+                QVERIFY(menu);
+                QCOMPARE(menu->actions(), QList<QAction *>{window.autoCollapseServers});
+                delete menu;
+            }
+            window.tree->setCurrentIndex({});
+            QTest::keyClick(window.tree, Qt::Key_Menu);
+            auto *keyboardMenu = window.findChild<QMenu *>("projectsContextMenu");
+            QVERIFY(keyboardMenu);
+            QCOMPARE(keyboardMenu->actions(), QList<QAction *>{window.autoCollapseServers});
+            delete keyboardMenu;
+            for (const auto &profile : {p, other}) {
+                auto s = Session::fromThread(
+                    profile.id, {{"id", "thread"}, {"cwd", "/work"}, {"path", "/saved"}});
+                window.backends[profile.id]->sessionChanged(s);
+                window.terminal->prepare(profile, s, false);
+            }
+            window.terminal->focusSession(sessionKey("a", "thread"));
+            window.tree->expandAll();
+            logicalExpansion = window.navigationExpansion(0);
+            window.autoCollapseServers->setChecked(true);
+            QVERIFY(!window.explorer[0].autoCollapsedServers.isEmpty());
+            window.close();
+        }
+        QSettings settings(data.filePath("window.ini"), QSettings::IniFormat);
+        QVERIFY(settings.value("projects/autoCollapseOtherServers").toBool());
+        auto saved = settings.value("expanded").toStringList();
+        saved.sort();
+        logicalExpansion.sort();
+        QCOMPARE(saved, logicalExpansion);
+        // Reopening retains the preference without changing data compatibility.
+        settings.setValue("application/restoreOpenedTerminals", false);
+        settings.sync();
+        Window reopened(data.path(), false);
+        QTRY_VERIFY(reopened.workspaceLoaded && reopened.cachePending.isEmpty());
+        QVERIFY(reopened.autoCollapseServers->isChecked());
+        reopened.autoCollapseServers->setChecked(false);
+        reopened.close();
+        settings.sync();
+        QVERIFY(!settings.value("projects/autoCollapseOtherServers").toBool());
+    }
     void contextMenusUseClickedRowsAndExpandOnlyTheirSubtree() {
         Fixture first, second;
         QTemporaryDir data;
@@ -1974,7 +2203,8 @@ class WindowTests : public QObject {
         auto labels = [](QMenu *menu) {
             QStringList names;
             for (auto *action : menu->actions())
-                names << action->text();
+                if (!action->isSeparator())
+                    names << action->text();
             return names;
         };
         auto dispose = [](QMenu *menu) {
@@ -2001,7 +2231,8 @@ class WindowTests : public QObject {
             QCOMPARE(server("first").parent().data(KindRole).toInt(), int(NodeKind::Group));
             auto menu = menuFor(session("first"));
             QVERIFY(menu);
-            QCOMPARE(labels(menu), (QStringList{"Fork", "New", "Close"}));
+            QCOMPARE(labels(menu),
+                     (QStringList{"Fork", "New", "Close", "Auto-collapse other servers"}));
             QVERIFY(menu->actions()[0]->isEnabled());
             QVERIFY(menu->actions()[1]->isEnabled());
             QVERIFY(!menu->actions()[2]->isEnabled());
@@ -2010,14 +2241,14 @@ class WindowTests : public QObject {
         tree->collapse(folder("first"));
         tree->collapse(folder("second"));
         auto menu = menuFor(folder("first"));
-        QCOMPARE(labels(menu), (QStringList{"New", "Expand All"}));
-        menu->actions().last()->trigger();
+        QCOMPARE(labels(menu), (QStringList{"New", "Expand All", "Auto-collapse other servers"}));
+        menu->actions()[1]->trigger();
         QVERIFY(tree->isExpanded(folder("first")));
         QVERIFY(!tree->isExpanded(folder("second")));
         dispose(menu);
         for (const auto &parent : {server("first"), server("first").parent()}) {
             menu = menuFor(parent);
-            QCOMPARE(labels(menu), QStringList{"Expand All"});
+            QCOMPARE(labels(menu), (QStringList{"Expand All", "Auto-collapse other servers"}));
             dispose(menu);
         }
         // The selected row differs from the right-clicked row. A preflight must

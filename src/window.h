@@ -22,6 +22,7 @@ class QPushButton;
 class QSplitter;
 class QToolButton;
 class QDialog;
+class QAction;
 class KSqueezedTextLabel;
 class WindowTests;
 namespace Archcodex {
@@ -184,8 +185,15 @@ class Window : public QMainWindow {
         QString scopeLabel;
         bool scopeCaptured = false, filtering = false;
         NavigationState navigation, unfiltered;
+        // Automatic server collapses are a presentation overlay, not manual choices.
+        QSet<QString> autoCollapsedServers, browsedServers;
     };
     QHash<int, ExplorerState> explorer;
+    QAction *autoCollapseServers = nullptr;
+    QString expansionSession;
+    void projectsContextMenu(QWidget *widget, const QPoint &position);
+    void updateServerExpansion();
+    QStringList navigationExpansion(int tab) const;
     void rememberNavigation(int tab);
     void beginFiltering();
     void endFiltering();
