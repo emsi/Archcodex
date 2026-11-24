@@ -18,6 +18,7 @@ listing.
 
 | Version | Changes |
 | --- | --- |
+| [0.14.0](v0.14.0.md) | Persistent Unread indicators, optional server auto-collapse and labeled terminal hyperlinks |
 | [0.13.0](v0.13.0.md) | Sortable nonmodal Connections and reliable terminal/editor paste shortcuts |
 | [0.12.0](v0.12.0.md) | Unified hosts, interactive SSH authentication, notification activation and host recency |
 | [0.11.1](v0.11.1.md) | Responsive conversation search, compact search feedback and Refresh of stale automatic connections |
