@@ -300,6 +300,19 @@
       "sha256": "25c7e32afc0bb4ca50dd0f0ea79078a53804dee5c7a530b5b977fa93875766a7",
       "bytes": 2529632,
       "notes": "v0.13.0.md"
+    },
+    {
+      "version": "0.14.0",
+      "tag": "v0.14.0",
+      "previous_tag": "v0.13.0",
+      "title": "Archcodex 0.14.0 \u2014 Unread sessions and terminal hyperlinks",
+      "source_commit": "eaada239b79730863923fbb7260486e412e372d2",
+      "source_commit_date": "2026-11-24T15:52:56Z",
+      "flatpak_commit": "3d0f13cd300dc7af6a4a263be0c0c84eb8ba5a007dcf2a5a9ec6763d4f81d274",
+      "asset": "Archcodex-0.14.0-x86_64.flatpak",
+      "sha256": "fc7d7bc4a2d116d28832cdc1e6314e5ad61dbf524e0e1757204ef55f43cd7547",
+      "bytes": 2551272,
+      "notes": "v0.14.0.md"
     }
   ]
 }
