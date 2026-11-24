@@ -63,6 +63,7 @@ struct Session {
     bool unavailable = false;
     bool terminalOpen = false;  // UI lifetime; deliberately not persisted.
     bool clientPending = false; // A remembered view has not started its client yet.
+    bool unread = false;        // GUI-owned; stored separately from server metadata.
     bool contextRequired = false;
     bool executionObserved = false; // Evidence from this backend's loaded inventory/events only.
     QString executionEnvironment;   // Bind cached evidence to the container/mount identity.
@@ -73,6 +74,10 @@ struct Session {
     bool isActive() const;
     bool isRunning() const;
     bool isWaiting() const;
+    bool isBlocked() const;
+    bool needsAttention() const {
+        return unread || isBlocked();
+    }
     bool isSaved() const;
     bool inWorkdir(const QString &workdir) const;
     QString stateText() const;
@@ -85,6 +90,13 @@ struct SessionAttention {
     enum class Reason { Waiting, Question };
     Session session;
     Reason reason = Reason::Waiting;
+    quint64 sequence = 0;
+    void observe();
+    static quint64 latestSequence();
+};
+struct SessionReadState {
+    QString backendId, id, sourceIdentity;
+    bool unread = false;
 };
 QString sessionKey(const QString &backend, const QString &thread);
 QString projectKey(const QString &backend, const QString &path);

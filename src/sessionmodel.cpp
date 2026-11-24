@@ -9,7 +9,7 @@
 #include <algorithm>
 
 namespace Archcodex {
-static QIcon dot(int attention) {
+static QIcon dot(int attention, bool unread = false) {
     QPixmap p(16, 16);
     p.fill(Qt::transparent);
     QPainter paint(&p);
@@ -21,6 +21,12 @@ static QIcon dot(int attention) {
     paint.setPen(QPen(color, 2));
     paint.setBrush(attention ? QBrush(color) : Qt::NoBrush);
     paint.drawEllipse(QRectF(3, 3, 10, 10));
+    if (unread) {
+        // A separate marker preserves the execution/error/unknown status dot.
+        paint.setPen(QPen(QApplication::palette().color(QPalette::Base), 1));
+        paint.setBrush(QColor("#f0b232"));
+        paint.drawEllipse(QRectF(9, 0, 7, 7));
+    }
     // These colours communicate state. Supplying every mode prevents the style
     // from tinting an error dot when a row is selected or gains keyboard focus.
     QIcon icon;
@@ -42,6 +48,9 @@ SessionModel::SessionModel(QObject *parent) : QStandardItemModel(parent) {
     setHorizontalHeaderLabels({"Hosts, servers, folders and sessions"});
 }
 void SessionModel::updateItem(QStandardItem *item, QMap<int, QVariant> values) {
+    if (values.contains(Qt::DisplayRole) && !values.contains(NeedsAttentionCountRole) &&
+        values.value(KindRole, item->data(KindRole)).toInt() != int(NodeKind::Session))
+        values[BaseTitleRole] = values[Qt::DisplayRole];
     for (auto it = values.begin(); it != values.end();)
         if (item->data(it.key()) == it.value())
             it = values.erase(it);
@@ -67,24 +76,28 @@ bool SessionModel::visible(const Session &s) const {
     // setting excludes their history or the client has exited.
     if (view == SessionView::Opened)
         return s.terminalOpen;
-    if (myCodexWorkdirOnly && containerWorkdirs.contains(s.backendId) &&
-        !s.inWorkdir(containerWorkdirs.value(s.backendId)))
-        return false;
-    if (!s.terminalOpen && hideUnsaved && (s.unavailable || (s.persistenceKnown && !s.isSaved())))
+    if (!passesVisibilitySettings(s))
         return false;
     switch (view) {
     case SessionView::Active:
         return s.isActive();
     case SessionView::Running:
         return s.isRunning();
-    case SessionView::Waiting:
-        return s.isWaiting();
+    case SessionView::Unread:
+        return s.needsAttention() || sessionKey(s.backendId, s.id) == reviewedSession;
     case SessionView::All:
         return true;
     case SessionView::Opened:
         return s.terminalOpen;
     }
     return false;
+}
+bool SessionModel::passesVisibilitySettings(const Session &s) const {
+    if (myCodexWorkdirOnly && containerWorkdirs.contains(s.backendId) &&
+        !s.inWorkdir(containerWorkdirs.value(s.backendId)))
+        return false;
+    return s.terminalOpen || !hideUnsaved ||
+           (!s.unavailable && (!s.persistenceKnown || s.isSaved()));
 }
 QModelIndex SessionModel::sessionIndex(const QString &key) const {
     const auto *item = threads.value(key);
@@ -102,11 +115,27 @@ void SessionModel::setView(SessionView value, const SessionQuery &selection) {
     if (view == value && query == selection)
         return;
     view = value;
+    if (view != SessionView::Unread)
+        reviewedSession.clear();
     query = selection;
     // Build paths and aggregates from the selected sessions, not the full history.
     // Records remain intact so switching views never discards metadata or clients.
     for (const auto &backend : backendNames.keys())
         rebuild(backend);
+}
+void SessionModel::setReviewedSession(const QString &key) {
+    if (reviewedSession == key)
+        return;
+    const auto old = reviewedSession;
+    reviewedSession = key;
+    if (view == SessionView::Unread) {
+        QSet<QString> backends;
+        for (const auto &candidate : {old, key})
+            if (records.contains(candidate))
+                backends.insert(records[candidate].backendId);
+        for (const auto &backend : backends)
+            rebuild(backend);
+    }
 }
 void SessionModel::setHideUnsaved(bool hide) {
     if (hideUnsaved == hide)
@@ -162,6 +191,7 @@ void SessionModel::placeRoot(const QString &backend) {
     auto *group = groups.value(key);
     if (!group) {
         group = new QStandardItem(groupLabels.value(key));
+        group->setData(groupLabels.value(key), BaseTitleRole);
         group->setEditable(false);
         group->setColumnCount(1);
         group->setData("group:" + key, KeyRole);
@@ -210,10 +240,18 @@ void SessionModel::updateSession(QStandardItem *item, const Session &s) {
                              : s.isSaved()        ? "Saved session"
                              : s.persistenceKnown ? "Unsaved session"
                                                   : "Persistence unknown";
-    const auto text = s.stateText() + "\n" + s.cwd + "\n" + persistence + "\n" + s.id;
+    const auto readText = s.unread        ? QString("Unread update")
+                          : s.isBlocked() ? QString("Read · unresolved request")
+                                          : QString();
+    const auto text = s.stateText() + "\n" + s.cwd + "\n" + persistence + "\n" + s.id +
+                      (readText.isEmpty() ? QString() : "\n" + readText);
+    QFont font;
+    font.setBold(s.unread);
     QMap<int, QVariant> values{
         {Qt::DisplayRole,
-         s.title + (s.contextRequired && !s.executionObserved ? " · History only" : "")},
+         s.title + (s.contextRequired && !s.executionObserved ? " · History only" : "") +
+             (view == SessionView::Unread && !s.needsAttention() ? " · Read" : "")},
+        {Qt::FontRole, font},
         {KeyRole, sessionKey(s.backendId, s.id)},
         {KindRole, int(NodeKind::Session)},
         {BackendRole, s.backendId},
@@ -231,14 +269,19 @@ void SessionModel::updateSession(QStandardItem *item, const Session &s) {
         {RunningCountRole, int(s.isRunning())},
         {WaitingCountRole, int(s.isWaiting())},
         {UnknownCountRole, int(!s.known)},
+        {UnreadRole, s.unread},
+        {UnreadCountRole, int(s.unread)},
+        {NeedsAttentionCountRole, int(s.needsAttention())},
         {Qt::ToolTipRole, text},
-        {Qt::AccessibleTextRole, s.title + " — " + s.stateText()}};
-    if (item->data(AttentionRole) != s.attention())
-        values[Qt::DecorationRole] = dot(s.attention());
+        {Qt::AccessibleTextRole, s.title + " — " + s.stateText() + " " + readText}};
+    if (item->data(AttentionRole) != s.attention() ||
+        item->data(NeedsAttentionCountRole).toInt() != int(s.needsAttention()))
+        values[Qt::DecorationRole] = dot(s.attention(), s.needsAttention());
     updateItem(item, values);
 }
 void SessionModel::aggregate(QStandardItem *p) {
     int count = 0, active = 0, running = 0, waiting = 0, unknown = 0, attention = 0;
+    int unread = 0, needsAttention = 0;
     qint64 recency = 0;
     for (int i = 0; i < p->rowCount(); ++i) {
         const auto *s = p->child(i);
@@ -247,6 +290,8 @@ void SessionModel::aggregate(QStandardItem *p) {
         running += s->data(RunningCountRole).toInt();
         waiting += s->data(WaitingCountRole).toInt();
         unknown += s->data(UnknownCountRole).toInt();
+        unread += s->data(UnreadCountRole).toInt();
+        needsAttention += s->data(NeedsAttentionCountRole).toInt();
         attention = std::max(attention, s->data(AttentionRole).toInt());
         recency = std::max(recency, s->data(RecencyRole).toLongLong());
     }
@@ -255,6 +300,8 @@ void SessionModel::aggregate(QStandardItem *p) {
                          {RunningCountRole, running},
                          {WaitingCountRole, waiting},
                          {UnknownCountRole, unknown},
+                         {UnreadCountRole, unread},
+                         {NeedsAttentionCountRole, needsAttention},
                          {RecencyRole, recency},
                          {AttentionRole, attention}});
 }
@@ -278,10 +325,14 @@ void SessionModel::publishAggregate(QStandardItem *p, QMap<int, QVariant> values
         values[BackendsRole] = backends;
     }
     const auto prefix =
-        kind == NodeKind::Group ? p->text()
+        kind == NodeKind::Group ? p->data(BaseTitleRole).toString()
         : kind == NodeKind::Server
             ? details.value(backend, backendNames.value(backend)) + "\nCommon folder: " + path
             : path;
+    const auto needsAttention = values[NeedsAttentionCountRole].toInt();
+    const auto unread = values[UnreadCountRole].toInt();
+    values[Qt::DisplayRole] = p->data(BaseTitleRole).toString() +
+                              (needsAttention ? QString(" (%1)").arg(needsAttention) : QString());
     const auto text =
         prefix +
         QString("\n%1 sessions · %2 active/last active · %3 running · %4 waiting · %5 unknown")
@@ -289,14 +340,20 @@ void SessionModel::publishAggregate(QStandardItem *p, QMap<int, QVariant> values
             .arg(active)
             .arg(running)
             .arg(waiting)
-            .arg(unknown);
+            .arg(unknown) +
+        QString("\n%1 unread or unresolved · %2 unread").arg(needsAttention).arg(unread);
+    QFont font;
+    font.setBold(unread > 0);
+    values[Qt::FontRole] = font;
+    values[UnreadRole] = unread > 0;
     values[ActiveRole] = active > 0;
     values[RunningRole] = running > 0;
     values[WaitingRole] = waiting > 0;
     values[Qt::ToolTipRole] = text;
     values[Qt::AccessibleDescriptionRole] = text;
-    if (p->data(AttentionRole) != attention)
-        values[Qt::DecorationRole] = dot(attention);
+    if (p->data(AttentionRole) != attention ||
+        (p->data(NeedsAttentionCountRole).toInt() > 0) != (needsAttention > 0))
+        values[Qt::DecorationRole] = dot(attention, needsAttention > 0);
     updateItem(p, values);
 }
 void SessionModel::aggregateAncestors(QStandardItem *item) {
@@ -465,14 +522,17 @@ void SessionModel::addAggregates(QStandardItem *parent, const QList<const Sessio
     // Additions cannot lower a maximum. Existing-row changes/removals use the
     // general aggregate path; appending history never rescans all siblings.
     QMap<int, QVariant> values;
-    for (int role : {CountRole, ActiveCountRole, RunningCountRole, WaitingCountRole,
-                     UnknownCountRole, RecencyRole, AttentionRole})
+    for (int role :
+         {CountRole, ActiveCountRole, RunningCountRole, WaitingCountRole, UnknownCountRole,
+          RecencyRole, AttentionRole, UnreadCountRole, NeedsAttentionCountRole})
         values[role] = parent->data(role);
     for (const auto *s : added) {
         for (const auto &[role, increment] : {std::pair{CountRole, 1},
                                               {ActiveCountRole, int(s->isActive())},
                                               {RunningCountRole, int(s->isRunning())},
                                               {WaitingCountRole, int(s->isWaiting())},
+                                              {UnreadCountRole, int(s->unread)},
+                                              {NeedsAttentionCountRole, int(s->needsAttention())},
                                               {UnknownCountRole, int(!s->known)}})
             values[role] = values[role].toInt() + increment;
         values[RecencyRole] =
@@ -497,6 +557,7 @@ void SessionModel::rebuild(const QString &backend, const QSet<QString> *changed)
         placeRoot(backend);
     }
     root->setText(backendNames.value(backend, backend));
+    root->setData(root->text(), BaseTitleRole);
     root->setData(environment(backend), EnvironmentRole);
     QSet<QString> paths;
     auto &indexedPaths = directoryPaths[backend];

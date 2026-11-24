@@ -22,6 +22,7 @@ class Notifications : public QObject {
     void withdrawBackend(const QString &backend);
     void withdrawSession(const QString &backend, const QString &thread);
     void setViewedSession(const QString &backend, const QString &thread);
+    bool inScope(const Session &session, const BackendProfile &profile) const;
     // Explicit notification clicks only: tokenless X11 clicks obtain a fresh server time.
     static void presentWindow(QWidget *window, const QString &activationToken);
   signals:
@@ -44,7 +45,6 @@ class Notifications : public QObject {
     QHash<QString, Target> targets;
     QStringList order;
     QString viewedSession;
-    bool inScope(const Session &session, const BackendProfile &profile) const;
     void remove(const QString &id);
     void activate(const QString &id, const QString &token);
     void clear();

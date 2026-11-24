@@ -15,11 +15,13 @@ class Store {
     QList<BackendProfile> backends() const;
     QList<Project> projects() const;
     QList<Session> sessions() const;
+    QList<SessionReadState> readStates() const;
     WorkspaceSnapshot workspace() const;
     void save(const WorkspaceSnapshot &snapshot);
     void save(const BackendProfile &profile);
     void save(const Project &project);
     void save(const Session &session);
+    void save(const SessionReadState &state);
     void removeBackend(const QString &id);
     void removeSession(const QString &backend, const QString &id);
 

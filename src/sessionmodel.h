@@ -25,9 +25,13 @@ enum ModelRole {
     ActiveCountRole,
     RunningCountRole,
     WaitingCountRole,
-    UnknownCountRole
+    UnknownCountRole,
+    UnreadRole,
+    UnreadCountRole,
+    NeedsAttentionCountRole,
+    BaseTitleRole
 };
-enum class SessionView { All, Active, Running, Waiting, Opened };
+enum class SessionView { All, Active, Running, Unread, Opened };
 enum class NodeKind { Server, Folder, Session, Group };
 // Literal, case-insensitive matching of metadata already held in memory.
 // An empty selected scope deliberately matches nothing, never all backends.
@@ -57,6 +61,8 @@ class SessionModel : public QStandardItemModel {
     void setContainerWorkdir(const QString &backend, const QString &path);
     void setMyCodexWorkdirOnly(bool enabled);
     void setView(SessionView view, const SessionQuery &query = {});
+    void setReviewedSession(const QString &key);
+    bool passesVisibilitySettings(const Session &session) const;
     QModelIndex sessionIndex(const QString &key) const;
     QModelIndex nodeIndex(const QString &key) const;
     SessionView currentView() const {
@@ -73,6 +79,7 @@ class SessionModel : public QStandardItemModel {
     bool myCodexWorkdirOnly = true;
     SessionView view = SessionView::All;
     SessionQuery query;
+    QString reviewedSession;
     QHash<QString, QString> backendNames, details, environments, projectNames;
     QHash<QString, QString> containerWorkdirs;
     QHash<QString, QStandardItem *> roots, folders, threads;

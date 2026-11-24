@@ -7,6 +7,7 @@ struct StoreSnapshot {
     QList<BackendProfile> profiles;
     QList<Project> projects;
     QList<Session> sessions;
+    QList<SessionReadState> readStates;
     WorkspaceSnapshot workspace;
     QString workspaceError;
 };
@@ -18,6 +19,7 @@ class AsyncStore : public QObject {
     ~AsyncStore() override;
     void save(const BackendProfile &profile);
     void save(const Session &session);
+    void save(const SessionReadState &state);
     void save(const WorkspaceSnapshot &snapshot);
     void removeBackend(const QString &id);
     // A retirement blocks later metadata saves until explicit rediscovery/cancellation.

@@ -6,8 +6,19 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QRegularExpression>
+#include <atomic>
 
 namespace Archcodex {
+namespace {
+std::atomic<quint64> attentionSequence{0};
+}
+void SessionAttention::observe() {
+    if (!sequence)
+        sequence = ++attentionSequence;
+}
+quint64 SessionAttention::latestSequence() {
+    return attentionSequence.load();
+}
 QString ConnectionState::label() const {
     switch (phase) {
     case Phase::Connected:
@@ -130,6 +141,13 @@ bool Session::isWaiting() const {
     return status["type"] == "idle" ||
            (status["type"] == "active" &&
             (flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput")));
+}
+bool Session::isBlocked() const {
+    // Keep a last-known request visible during disconnection. A fresh status
+    // snapshot clears it; an ordinary idle prompt is never a blocking request.
+    const auto flags = status["activeFlags"].toArray();
+    return !unavailable && status["type"] == "active" && (!contextRequired || executionObserved) &&
+           (flags.contains("waitingOnApproval") || flags.contains("waitingOnUserInput"));
 }
 int Session::attention() const {
     if (clientPending)

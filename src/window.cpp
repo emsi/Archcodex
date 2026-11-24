@@ -232,14 +232,15 @@ void restoreTree(QTreeView *tree, const QStringList &keys, const QString &select
     }
 }
 bool expandsByDefault(int index) {
-    return index == int(SessionView::Running) || index == int(SessionView::Waiting) ||
+    return index == int(SessionView::Running) || index == int(SessionView::Unread) ||
            index == int(SessionView::Opened);
 }
 const QStringList viewDescriptions{
     "All sessions, including saved history. Hollow dots mean unknown state.",
     "Live sessions, including idle prompts and errors. Hollow dots mean last-known active.",
     "Sessions currently executing a turn.",
-    "Live sessions ready for a prompt, an answer or an approval.",
+    "Unvisited updates and unresolved input or approval requests. Viewing marks updates read; "
+    "unresolved requests stay until answered.",
     "Open terminal views, including retained output from exited clients."};
 } // namespace
 Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(directory) {
@@ -295,7 +296,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     tabs->addTab("All");
     tabs->addTab("Active");
     tabs->addTab("Running");
-    tabs->addTab("Waiting");
+    tabs->addTab("Unread");
     tabs->addTab("Opened");
     for (int i = 0; i < tabs->count(); ++i)
         tabs->setTabToolTip(i, viewDescriptions[i]);
@@ -526,6 +527,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     connect(terminal, &TerminalArea::sessionFocused, this, &Window::terminalFocused);
     connect(sessionTree, &SessionTree::activationRepeated, terminal, &TerminalArea::focusCurrent);
     connect(terminal, &TerminalArea::currentSessionChanged, this, [this](const QString &key) {
+        model->setReviewedSession({});
         if (key.isEmpty()) {
             tree->selectionModel()->clear();
             for (auto &state : explorer) {
@@ -626,6 +628,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
         settings.sync();
         model->setHideUnsaved(hide);
         results->setHideUnsaved(hide);
+        updateUnreadCount();
         if (globalSearchActive)
             updateSearchSummary();
     });
@@ -680,6 +683,7 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
     view->addAction(commands->add("expand_branch", "Expand selected branch", "Projects", {},
                                   [this] { contextualCommand("expand"); }));
     view->addSeparator();
+    // Keep the stored action ID so customized Alt+4 bindings survive the rename.
     const QStringList viewIds{"all", "active", "running", "waiting", "opened"};
     for (int i = 0; i < tabs->count(); ++i)
         view->addAction(commands->add("view_" + viewIds[i], "Show " + tabs->tabText(i), "Projects",
@@ -687,6 +691,28 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                                           tabs->setCurrentIndex(i);
                                           tree->setFocus(Qt::ShortcutFocusReason);
                                       }));
+    view->addAction(commands->add("next_unread", "Next unread session", "Projects", {}, [this] {
+        QList<Session> pending;
+        for (const auto &key : std::as_const(attentionKeys)) {
+            const auto session = sessions.value(key, searchSessions.value(key));
+            if (model->passesVisibilitySettings(session))
+                pending << session;
+        }
+        std::sort(pending.begin(), pending.end(), [](const auto &a, const auto &b) {
+            // Visits must not reorder this cycle while an unresolved request
+            // remains eligible. Activity order is stable across those visits.
+            const auto x = a.recency, y = b.recency;
+            return x != y ? x > y : sessionKey(a.backendId, a.id) > sessionKey(b.backendId, b.id);
+        });
+        if (pending.isEmpty())
+            return;
+        int next = 0;
+        for (int i = 0; i < pending.size(); ++i)
+            if (sessionKey(pending[i].backendId, pending[i].id) == terminal->currentKey())
+                next = (i + 1) % pending.size();
+        activateSession(pending[next].backendId, pending[next].id);
+    }));
+    commands->collection()->action("next_unread")->setEnabled(false);
     auto *terminalMenu = menuBar()->addMenu("&Terminal");
     terminalMenu->addAction(commands->add("terminal_find", "Find in terminal scrollback",
                                           "Terminal", {QKeySequence("Ctrl+Shift+F")}, [this] {
@@ -846,6 +872,11 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 }
                 attach(p, connectOnStart && p.autoConnect && !p.discovered && p.isLocal());
             }
+            for (const auto &state : cache.readStates) {
+                const auto key = sessionKey(state.backendId, state.id);
+                if (!readStates.contains(key) && !readThrough.contains(key))
+                    readStates[key] = state;
+            }
             workspaceError = cache.workspaceError;
             workspaceWritable = workspaceError.isEmpty();
             workspaceRevision = cache.workspace.revision;
@@ -858,7 +889,8 @@ Window::Window(const QString &directory, bool connectOnStart) : dataDirectory(di
                 QSet<QString> remembered;
                 for (const auto &view : cache.workspace.views)
                     remembered.insert(view.key());
-                for (const auto &session : cache.sessions) {
+                for (auto session : cache.sessions) {
+                    applyReadState(session);
                     const auto key = sessionKey(session.backendId, session.id);
                     if (remembered.contains(key) && !sessions.contains(key))
                         sessions[key] = session;
@@ -905,6 +937,7 @@ void Window::restoreCache(bool connectOnStart) {
             s.executionObserved = false;
         if (sessions.contains(key))
             continue; // New events take precedence over cache.
+        applyReadState(s);
         sessions[key] = s;
         batch << s;
     }
@@ -1051,6 +1084,7 @@ void Window::attach(const BackendProfile &p, bool start) {
             [this, b = QPointer<Backend>(b), id = p.id](const SessionAttention &event) {
                 if (!closing && backends.value(id) == b && b->ready() && profiles.contains(id)) {
                     updateViewedSession();
+                    receivedAttention(event);
                     notifications->show(event, profiles[id]);
                 }
             });
@@ -1060,8 +1094,13 @@ void Window::attach(const BackendProfile &p, bool start) {
                     return;
                 notifications->withdrawSession(id, thread);
                 const auto key = sessionKey(id, thread);
+                readStates.remove(key);
+                attentionKeys.remove(key);
+                updateUnreadCount();
+                readThrough[key] = SessionAttention::latestSequence();
                 if (sessions.value(key).terminalOpen) {
                     auto &s = sessions[key];
+                    s.unread = false;
                     s.unavailable = true;
                     s.known = false;
                     terminal->updateSession(s, profiles.value(id).name);
@@ -1104,6 +1143,7 @@ void Window::attach(const BackendProfile &p, bool start) {
                     s = sessions[key];
                 else
                     s.known = false;
+                applyReadState(s);
                 searchSessions[key] = s;
                 updates << s;
             }
@@ -1235,6 +1275,12 @@ void Window::sessionContextMenu(const QPoint &position) {
         create->setEnabled(connected && QDir::isAbsolutePath(path) && validText(path));
     }
     if (kind == NodeKind::Session) {
+        const bool unread = sessions.value(key, searchSessions.value(key)).unread;
+        auto *mark = menu->addAction(unread ? "Mark as read" : "Mark as unread", this,
+                                     [this, key, unread] { setUnread(key, !unread); });
+        mark->setObjectName("toggleUnread");
+        mark->setEnabled(!thread.isEmpty() && !thread.startsWith("new-"));
+        mark->setToolTip("Read state does not dismiss an unresolved input or approval request.");
         auto *close =
             menu->addAction("Close", terminal, [this, key] { terminal->closeSession(key); });
         close->setEnabled(sessions.value(key).terminalOpen);
@@ -1348,6 +1394,7 @@ void Window::applySessions(const QList<Session> &items) {
                 (old.executionObserved && old.executionEnvironment == environment);
             s.executionEnvironment = environment;
         }
+        applyReadState(s);
         sessions[key] = s;
         terminal->updateSession(s, profiles[s.backendId].name);
         updates << s;
@@ -2139,6 +2186,25 @@ QString Window::groupLabel(const BackendProfile &p) const {
                         : " · " + (user.isEmpty() ? QString() : user + "@") + name);
 }
 void Window::presentProfile(const BackendProfile &p, const QString &label) {
+    const auto sourceIdentity = sessionSourceIdentity(p);
+    for (auto it = readStates.begin(); it != readStates.end(); ++it) {
+        if (it->backendId != p.id || !it->unread || it->sourceIdentity == sourceIdentity)
+            continue;
+        it->unread = false;
+        store->save(*it);
+        const auto key = it.key();
+        if (sessions.contains(key)) {
+            auto &session = sessions[key];
+            applyReadState(session);
+            model->upsert(session);
+        }
+        if (searchSessions.contains(key)) {
+            auto &session = searchSessions[key];
+            applyReadState(session);
+            results->upsert(session);
+        }
+    }
+    updateUnreadCount();
     for (auto *source : {model, results}) {
         source->backendGroup(p.id, groupKey(p), groupLabel(p));
         source->backendName(p.id, label.isEmpty() ? serverTreeLabel(p) : label);
@@ -2146,6 +2212,7 @@ void Window::presentProfile(const BackendProfile &p, const QString &label) {
     }
 }
 void Window::terminalFocused(const QString &key) {
+    updateViewedSession(true);
     auto it = sessions.find(key);
     if (it == sessions.end()) {
         syncCurrentSession();
@@ -2187,6 +2254,7 @@ void Window::clientStateChanged(const Session &client) {
     s.terminalOpen = client.terminalOpen;
     s.clientIssue = client.clientIssue;
     s.clientPending = client.clientPending;
+    applyReadState(s);
     if (!s.terminalOpen && s.id.startsWith("new-")) {
         sessions.remove(key);
         model->remove(s.backendId, s.id);
@@ -2365,6 +2433,7 @@ void Window::showSettings() {
                     configuredLocalCodex.isEmpty() ? discoveredLocalCodex : configuredLocalCodex);
                 model->setMyCodexWorkdirOnly(!showAll);
                 results->setMyCodexWorkdirOnly(!showAll);
+                updateUnreadCount();
                 if (globalSearchActive)
                     updateSearchSummary();
             });
@@ -2661,6 +2730,12 @@ void Window::discover(bool reconcile, bool interactive) {
     updateHostSummary();
 }
 bool Window::protectsConnection(const QString &id) const {
+    for (const auto &key : attentionKeys)
+        if (key.startsWith(id + QChar(0x1f)))
+            return true;
+    for (const auto &state : readStates)
+        if (state.backendId == id && state.unread)
+            return true;
     if (!workspaceLoaded || !workspaceWritable || !cachePending.isEmpty() ||
         savedWorkspaceBackends.contains(id) || opening->referencesBackend(id) ||
         (!hostId(profiles.value(id)).isEmpty() &&
@@ -2696,6 +2771,9 @@ void Window::cancelRetirement(const QString &id) {
     for (const auto &session : std::as_const(sessions))
         if (session.backendId == id)
             store->save(session);
+    for (const auto &state : std::as_const(readStates))
+        if (state.backendId == id)
+            store->save(state);
     QTimer::singleShot(0, this, &Window::updateRefreshSummary);
 }
 void Window::forgetConnection(const QString &id) {
@@ -2707,6 +2785,11 @@ void Window::forgetConnection(const QString &id) {
         backend->deleteLater();
     }
     profiles.remove(id);
+    readStates.removeIf([&](const auto &entry) { return entry.value().backendId == id; });
+    readThrough.removeIf(
+        [&](const auto &entry) { return entry.key().startsWith(id + QChar(0x1f)); });
+    attentionKeys.removeIf([&](const auto &key) { return key.startsWith(id + QChar(0x1f)); });
+    updateUnreadCount();
     connectionStates.remove(id);
     connectionReady.remove(id);
     more.remove(id);
@@ -3317,12 +3400,116 @@ void Window::showWorkspaceDetails() {
     dialog->resize(680, 420);
     dialog->show();
 }
-void Window::updateViewedSession() {
+void Window::applyReadState(Session &session) {
+    const auto key = sessionKey(session.backendId, session.id);
+    auto it = readStates.find(key);
+    if (it != readStates.end() && it->unread &&
+        it->sourceIdentity != sessionSourceIdentity(profiles.value(session.backendId))) {
+        it->unread = false; // Never transfer an update to a replacement execution context.
+        store->save(*it);
+    }
+    session.unread = it != readStates.end() && it->unread;
+    const bool wasPending = attentionKeys.contains(key);
+    if (session.needsAttention())
+        attentionKeys.insert(key);
+    else
+        attentionKeys.remove(key);
+    if (wasPending != session.needsAttention())
+        updateUnreadCount();
+}
+void Window::setUnread(const QString &key, bool unread) {
+    auto session = sessions.value(key, searchSessions.value(key));
+    if (session.id.isEmpty() || session.id.startsWith("new-") ||
+        !profiles.contains(session.backendId))
+        return;
+    if (!unread) {
+        readThrough[key] = SessionAttention::latestSequence();
+        if (key == viewedSession && tabs->currentIndex() == int(SessionView::Unread) &&
+            model->sessionIndex(key).isValid())
+            model->setReviewedSession(key);
+    }
+    const SessionReadState state{session.backendId, session.id,
+                                 sessionSourceIdentity(profiles[session.backendId]), unread};
+    const bool changed = !readStates.contains(key) || readStates[key].unread != unread ||
+                         readStates[key].sourceIdentity != state.sourceIdentity;
+    readStates[key] = state;
+    if (!changed && session.unread == unread)
+        return;
+    session.unread = unread;
+    applyReadState(session);
+    sessions[key] = session;
+    model->upsert(session);
+    if (searchSessions.contains(key)) {
+        searchSessions[key] = session;
+        results->upsert(session);
+    }
+    if (unread)
+        cancelRetirement(session.backendId);
+    // Preserve metadata for a manually marked search-only result too.
+    store->save(session);
+    store->save(state);
+}
+void Window::receivedAttention(SessionAttention event) {
+    const auto &session = event.session;
+    const auto key = sessionKey(session.backendId, session.id);
+    if (!profiles.contains(session.backendId) || !session.isSaved() ||
+        !notifications->inScope(session, profiles[session.backendId]))
+        return;
+    event.observe(); // Test/alternate backends can deliver unstamped occurrences.
+    if (event.sequence <= readThrough.value(key))
+        return; // The user visited after detection but before delayed delivery.
+    if (!sessions.contains(key))
+        applySessions({session}); // Metadata can follow the occurrence in a later GUI batch.
+    if (viewedSession == key) {
+        setUnread(key, false);
+        return;
+    }
+    setUnread(key, true);
+}
+void Window::updateUnreadCount() {
+    if (unreadCountScheduled)
+        return;
+    unreadCountScheduled = true;
+    QTimer::singleShot(0, this, [this] {
+        unreadCountScheduled = false;
+        int count = 0;
+        // Only pending sessions, not a traversal of the entire history/tree.
+        for (const auto &key : std::as_const(attentionKeys)) {
+            const auto session = sessions.value(key, searchSessions.value(key));
+            if (model->passesVisibilitySettings(session))
+                ++count;
+        }
+        tabs->setTabText(int(SessionView::Unread),
+                         count ? QString("Unread (%1)").arg(count) : QString("Unread"));
+        commands->collection()->action("next_unread")->setEnabled(count > 0);
+        tabs->setTabToolTip(int(SessionView::Unread),
+                            viewDescriptions[int(SessionView::Unread)] +
+                                " Counts include sessions hidden by this tab's search or scope.");
+    });
+}
+void Window::updateViewedSession(bool visit) {
     if (!notifications || !terminal)
         return;
-    const auto session =
+    auto session =
         isVisible() && !isMinimized() && isActiveWindow() ? terminal->currentSession() : Session{};
     notifications->setViewedSession(session.backendId, session.id);
+    auto key = session.id.isEmpty() ? QString() : sessionKey(session.backendId, session.id);
+    if (!key.isEmpty() &&
+        (!terminal->hasClient(key) || session.clientPending || !session.clientIssue.isEmpty() ||
+         terminal->view(key).sourceIdentity !=
+             workspaceSourceIdentity(profiles.value(session.backendId)))) {
+        session = {};
+        key.clear();
+    }
+    const bool entered = key != viewedSession;
+    viewedSession = key;
+    if (!key.isEmpty() && (visit || entered)) {
+        // Retain the just-read row until another terminal is selected. It no
+        // longer contributes to the unread/unresolved count.
+        if (tabs->currentIndex() == int(SessionView::Unread) && model->sessionIndex(key).isValid())
+            model->setReviewedSession(key);
+        setUnread(key, false);
+    }
 }
 bool Window::event(QEvent *event) {
     const bool result = QMainWindow::event(event);

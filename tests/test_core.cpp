@@ -22,6 +22,37 @@ class CoreTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void unreadStateSurvivesMetadataAndHasAnExactSource() {
+        QTemporaryDir directory;
+        const auto path = directory.filePath("metadata.sqlite");
+        const BackendProfile first{"first", "First"}, second{"second", "Second"};
+        {
+            Store store(path);
+            store.save(first);
+            store.save(second);
+            store.save(SessionReadState{first.id, "thread", "source-a", true});
+            store.save(SessionReadState{second.id, "thread", "source-b", true});
+            auto session = Session::fromThread(first.id, {{"id", "thread"}, {"name", "Renamed"}});
+            store.save(session); // Metadata arriving after the event cannot erase unread state.
+            QCOMPARE(store.readStates().size(), 2);
+        }
+        {
+            Store store(path);
+            const auto states = store.readStates();
+            QCOMPARE(states.size(), 2);
+            for (const auto &s : states) {
+                QVERIFY(s.unread);
+                QCOMPARE(s.sourceIdentity, s.backendId == first.id ? "source-a" : "source-b");
+            }
+            store.save(SessionReadState{first.id, "thread", "source-a", false});
+            QCOMPARE(store.readStates().size(), 1);
+            store.removeBackend(second.id);
+            QVERIFY(store.readStates().isEmpty());
+            store.save(SessionReadState{first.id, "thread", "source-a", true});
+            store.removeSession(first.id, "thread");
+            QVERIFY(store.readStates().isEmpty());
+        }
+    }
     void hostConfigurationMigratesWithoutDisablingThisComputer() {
         const QJsonArray legacy{
             QJsonObject{{"id", "local-mycodex"}, {"ssh", ""}, {"enabled", false}},

@@ -65,7 +65,6 @@ void CodexBackend::shutdownProcess() {
     searchContinuation = {};
     liveTurns.clear();
     unclassifiedAttention.clear();
-    attentionMetadataOverflow = false;
     initialized = false;
     listing = false;
     pending.clear();
@@ -398,7 +397,9 @@ void CodexBackend::message(const QJsonObject &m) {
         requestAttention({session, SessionAttention::Reason::Question});
     }
 }
-void CodexBackend::requestAttention(const SessionAttention &event) {
+void CodexBackend::requestAttention(SessionAttention event) {
+    // Stamp at detection, before metadata reads or GUI delivery can delay it.
+    event.observe();
     const auto metadata = sessions.constFind(event.session.id);
     if (metadata != sessions.cend()) {
         if (metadata->ephemeral) {
@@ -418,19 +419,13 @@ void CodexBackend::requestAttention(const SessionAttention &event) {
     }
     // Status handling already schedules metadata reads for unknown/unsaved threads.
     // Keep the occurrence until those reads classify it; never add notification I/O.
-    if (unclassifiedAttention.size() == 256) {
-        unclassifiedAttention.dequeue();
-        if (!attentionMetadataOverflow)
-            qWarning("Notification metadata backlog exceeded 256; oldest event discarded.");
-        attentionMetadataOverflow = true;
-    }
     qCDebug(notificationLog) << "await metadata" << profile.id << event.session.id;
-    unclassifiedAttention.enqueue(event);
+    // One pending occurrence per thread; a burst cannot evict another thread's
+    // unread update. These entries live only while its metadata read is pending.
+    unclassifiedAttention[event.session.id] = event;
 }
 void CodexBackend::discardAttention(const QString &id) {
-    unclassifiedAttention.removeIf([&](const auto &event) { return event.session.id == id; });
-    if (unclassifiedAttention.isEmpty())
-        attentionMetadataOverflow = false;
+    unclassifiedAttention.remove(id);
 }
 void CodexBackend::resolveAttention(const QString &id) {
     const auto metadata = sessions.value(id);
@@ -438,15 +433,12 @@ void CodexBackend::resolveAttention(const QString &id) {
     // materialized history since the older read; wait for that existing refresh.
     if (!metadata.isSaved() && !metadata.ephemeral && dirtyReads.contains(id))
         return;
-    QList<SessionAttention> ready;
-    for (const auto &event : std::as_const(unclassifiedAttention))
-        if (event.session.id == id)
-            ready << event;
-    discardAttention(id);
-    if (metadata.isSaved()) {
-        for (const auto &event : ready)
-            requestAttention(event);
-    } else if (!ready.isEmpty())
+    if (!unclassifiedAttention.contains(id))
+        return;
+    const auto event = unclassifiedAttention.take(id);
+    if (metadata.isSaved())
+        requestAttention(event);
+    else
         qCDebug(notificationLog) << "suppress unsaved" << profile.id << id;
 }
 void CodexBackend::upsert(QJsonObject t, bool verified) {

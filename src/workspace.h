@@ -29,5 +29,6 @@ struct WorkspaceSnapshot {
 // Logical execution identity, excluding display names and ephemeral relay paths.
 // An initialized server must supply CODEX_HOME before automatic restoration.
 QString workspaceSourceIdentity(const BackendProfile &profile);
+QString sessionSourceIdentity(const BackendProfile &profile);
 } // namespace Archcodex
 Q_DECLARE_METATYPE(Archcodex::WorkspaceSnapshot)

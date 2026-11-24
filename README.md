@@ -135,7 +135,7 @@ trying again. Archcodex never automatically repeats a creation request.
 | **All** | Saved and live sessions; search full conversations by pressing Enter. |
 | **Active** | Live sessions, including idle prompts, plus retained exited/error terminals. |
 | **Running** | Sessions currently executing a turn. |
-| **Waiting** | Sessions at an input prompt or waiting for input or approval. |
+| **Unread** | Unvisited updates and unresolved input or approval requests. |
 | **Opened** | All open terminal views, including retained exited/error output. |
 
 Each view keeps its own query and scope. In **All**, choose all servers or a
@@ -143,10 +143,17 @@ selected server/folder to scope conversation search. **Load more history**
 retrieves older session entries. Search counts and progress stay above the tree;
 **Details…** opens a scrollable report of any connections with incomplete coverage.
 
-In **Active**, **Running**, **Waiting** and **Opened**, typing filters cached
+In **Active**, **Running**, **Unread** and **Opened**, typing filters cached
 titles, working-directory paths and session IDs without making server search
-requests. Each view compresses its own folder paths. Running, Waiting and Opened
+requests. Each view compresses its own folder paths. Running, Unread and Opened
 start expanded; waiting indicators are green and running indicators are blue.
+
+An amber marker identifies an unread update or unresolved request and propagates
+to its folders, server and host. Unread titles are bold. Viewing the terminal marks
+its update read; a blocking request stays in Unread until resolved. Right-click a
+session for **Mark as read** or **Mark as unread**. Markers survive restarts; an
+ordinary idle session discovered on reconnect is not marked unread. See
+[Unread sessions](docs/unread.md) for the exact behavior and limitations.
 
 ### Navigate with the keyboard
 
@@ -155,7 +162,7 @@ start expanded; waiting indicators are green and running indicators are blue.
 | Ctrl+Shift+P | Open the command palette |
 | Ctrl+Shift+F | Search terminal scrollback |
 | Ctrl+Alt+P / Ctrl+Alt+F | Focus Projects / its search or filter field |
-| Alt+1–5 | Select All / Active / Running / Waiting / Opened |
+| Alt+1–5 | Select All / Active / Running / Unread / Opened |
 | Alt+0 | Return to the terminal |
 | F6 / Shift+F6 | Switch pane |
 | Ctrl+Tab / Ctrl+Shift+Tab | Cycle recent terminals |

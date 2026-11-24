@@ -187,6 +187,184 @@ class WindowTests : public QObject {
     Q_OBJECT
     TestHome home;
   private slots:
+    void unreadEventsPersistWithoutNotificationsAndIgnoreLateDelivery() {
+        QTemporaryDir data;
+        Fixture fixture;
+        auto p = fixture.profile();
+        p.identity["codexHome"] = "/home/test/.codex-work";
+        auto other = p;
+        other.id = "other";
+        const auto first = Session::fromThread(p.id, fixture.thread());
+        const auto second = Session::fromThread(other.id, fixture.thread());
+        const auto key = sessionKey(p.id, first.id), otherKey = sessionKey(other.id, second.id);
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+            store.save(other);
+        }
+        {
+            Window window(data.path(), false);
+            QTRY_VERIFY(window.workspaceLoaded);
+            window.notifications->setEnabled(false);
+            window.applySessions({first, second});
+            QVERIFY(!window.sessions[key].unread); // Inventory alone does not set unread.
+            SessionAttention old{first};
+            old.observe();
+            window.setUnread(key, false);
+            window.receivedAttention(old);
+            QVERIFY(!window.sessions[key].unread);
+            SessionAttention current{first};
+            current.observe();
+            window.receivedAttention(current);
+            QVERIFY(window.sessions[key].unread);
+            QVERIFY(!window.sessions[otherKey].unread);
+            auto renamed = first;
+            renamed.title = "Renamed";
+            renamed.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+            window.applySessions({renamed});
+            QVERIFY(window.sessions[key].unread); // A new turn and metadata do not mark read.
+            window.receivedAttention({second, SessionAttention::Reason::Question});
+            QVERIFY(window.sessions[otherKey].unread);
+            window.tabs->setCurrentIndex(int(SessionView::Unread));
+            QTRY_COMPARE(window.tabs->tabText(3), "Unread (2)");
+        }
+        QVERIFY(Worker::finishPending());
+        {
+            Window restored(data.path(), false);
+            QTRY_VERIFY(restored.cachePending.isEmpty() && restored.sessions.contains(otherKey));
+            QVERIFY(restored.sessions[key].unread);
+            QVERIFY(!restored.sessions[key].known);
+            QVERIFY(restored.sessions[otherKey].unread);
+            // Replacing one source cannot transfer its marker, even with the same thread ID.
+            restored.profiles[p.id].environmentId = "replacement";
+            restored.presentProfile(restored.profiles[p.id]);
+            QVERIFY(!restored.sessions[key].unread);
+            QVERIFY(restored.sessions[otherKey].unread);
+            restored.setUnread(otherKey, false);
+        }
+        QVERIFY(Worker::finishPending());
+        Store store(data.filePath("metadata.sqlite"));
+        QVERIFY(store.readStates().isEmpty());
+    }
+    void unreadVisitsRequireAVisibleClientAndContextMenuTogglesOneAction() {
+        QTemporaryDir data;
+        Fixture fixture;
+        PtyProbe probe;
+        QVERIFY(probe.install());
+        auto p = fixture.profile();
+        p.identity["codexHome"] = "/home/test/.codex-work";
+        p.executable = probe.executable();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        window.show();
+        window.activateWindow();
+        QTRY_VERIFY(window.workspaceLoaded && window.isActiveWindow());
+        const auto s = Session::fromThread(p.id, fixture.thread());
+        const auto key = sessionKey(p.id, s.id);
+        window.applySessions({s});
+        window.receivedAttention({s});
+        window.terminal->prepare(p, s, true);
+        window.updateViewedSession(true);
+        QVERIFY(window.sessions[key].unread); // A selected restore/open placeholder is not a visit.
+        QString error;
+        QVERIFY2(window.terminal->startPrepared(window.terminal->view(key).id, p, s, &error),
+                 qPrintable(error));
+        QTRY_VERIFY(window.terminal->hasClient(key));
+        QTRY_VERIFY(!window.sessions[key].unread);
+        window.receivedAttention({s});
+        QVERIFY(!window.sessions[key].unread); // Already viewing the completed response.
+        QWidget other;
+        other.show();
+        other.activateWindow();
+        QTRY_VERIFY(!window.isActiveWindow());
+        window.receivedAttention({s});
+        QVERIFY(window.sessions[key].unread);
+        window.activateWindow();
+        QTRY_VERIFY(window.isActiveWindow());
+        QTRY_VERIFY(!window.sessions[key].unread);
+        auto second = s;
+        second.id = "second";
+        const auto secondKey = sessionKey(p.id, second.id);
+        window.applySessions({second});
+        const auto secondView = window.terminal->prepare(p, second, false);
+        QVERIFY2(window.terminal->startPrepared(secondView.id, p, second, &error),
+                 qPrintable(error));
+        window.receivedAttention({second});
+        for (const bool commit : {false, true}) {
+            window.terminal->focusCurrent();
+            QKeyEvent shortcut(QEvent::ShortcutOverride, Qt::Key_Tab, Qt::ControlModifier);
+            QKeyEvent press(QEvent::KeyPress, Qt::Key_Tab, Qt::ControlModifier);
+            QApplication::sendEvent(QApplication::focusWidget(), &shortcut);
+            QApplication::sendEvent(QApplication::focusWidget(), &press);
+            QCOMPARE(window.terminal->currentKey(), key);
+            QVERIFY(window.sessions[secondKey].unread);
+            if (!commit)
+                QTest::keyClick(QApplication::focusWidget(), Qt::Key_Escape);
+            QKeyEvent release(QEvent::KeyRelease, Qt::Key_Control, Qt::NoModifier);
+            QApplication::sendEvent(QApplication::focusWidget(), &release);
+            QCOMPARE(window.sessions[secondKey].unread, !commit);
+        }
+        window.terminal->closeSession(secondKey);
+        QVERIFY(window.terminal->focusSession(key));
+        window.showMinimized();
+        window.receivedAttention({s});
+        QVERIFY(window.sessions[key].unread);
+        window.showNormal();
+        window.activateWindow();
+        QTRY_VERIFY(!window.sessions[key].unread);
+        auto blocked = s;
+        blocked.status = {{"type", "active"}, {"activeFlags", QJsonArray{"waitingOnUserInput"}}};
+        window.applySessions({blocked});
+        window.tabs->setCurrentIndex(int(SessionView::Unread));
+        QVERIFY(window.model->sessionIndex(key).isValid());
+        QCOMPARE(window.model->sessionIndex(key).data(NeedsAttentionCountRole).toInt(), 1);
+        auto contextAction = [&] {
+            window.tree->expandAll();
+            const auto index = nodeWithKey(window.tree, key);
+            window.sessionContextMenu(window.tree->visualRect(index).center());
+            return window.tree->findChild<QMenu *>("sessionContextMenu");
+        };
+        for (const bool unread : {false, true}) {
+            QPointer<QMenu> menu = contextAction();
+            QVERIFY(menu);
+            auto *action = menu->findChild<QAction *>("toggleUnread");
+            QVERIFY(action);
+            QCOMPARE(action->text(), unread ? "Mark as read" : "Mark as unread");
+            action->trigger();
+            QCOMPARE(window.sessions[key].unread, !unread);
+            delete menu;
+        }
+        QVERIFY(window.model->sessionIndex(key).isValid()); // Mark read cannot answer the request.
+        window.applySessions({s});
+        QCOMPARE(window.model->sessionIndex(key).data(NeedsAttentionCountRole).toInt(), 0);
+        QVERIFY(window.model->sessionIndex(key).data().toString().endsWith(" · Read"));
+        window.terminal->closeCurrent();
+        QTRY_VERIFY(!window.model->sessionIndex(key).isValid());
+    }
+    void unreadUsesTheContainerWorkdirScope() {
+        QTemporaryDir data;
+        Fixture fixture;
+        auto p = fixture.profile();
+        {
+            Store store(data.filePath("metadata.sqlite"));
+            store.save(p);
+        }
+        Window window(data.path(), false);
+        QTRY_VERIFY(window.workspaceLoaded);
+        // Exercise the same visibility policy as desktop notifications.
+        window.profiles[p.id].kind = "mycodex";
+        window.profiles[p.id].identity["containerWorkdir"] = "/work/project";
+        auto session = Session::fromThread(p.id, fixture.thread());
+        session.cwd = "/work/project-other";
+        window.receivedAttention({session});
+        QVERIFY(window.readStates.isEmpty());
+        session.cwd = "/work/project/subdirectory";
+        window.receivedAttention({session});
+        QVERIFY(window.sessions[sessionKey(p.id, session.id)].unread);
+    }
     void connectionsTableRoutesActionsWhileTerminalRemainsUsable() {
         QTemporaryDir data;
         Fixture a, b;
@@ -580,11 +758,13 @@ class WindowTests : public QObject {
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();
         auto *query = window.findChild<QLineEdit *>("sessionSearch");
-        auto a = Session::fromThread(first.id, {{"id", "same-id"},
-                                                {"name", "Identical title"},
-                                                {"cwd", "/work/a"},
-                                                {"path", "/saved/a"},
-                                                {"status", QJsonObject{{"type", "idle"}}}});
+        auto a = Session::fromThread(
+            first.id, {{"id", "same-id"},
+                       {"name", "Identical title"},
+                       {"cwd", "/work/a"},
+                       {"path", "/saved/a"},
+                       {"status", QJsonObject{{"type", "active"},
+                                              {"activeFlags", QJsonArray{"waitingOnUserInput"}}}}});
         auto b = a;
         b.backendId = second.id;
         b.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
@@ -663,7 +843,7 @@ class WindowTests : public QObject {
         QVERIFY(nodeWithKey(tree, bKey).isValid());
         QVERIFY(!tree->currentIndex().isValid());
         QVERIFY(tree->selectionModel()->selectedRows().isEmpty());
-        tabs->setCurrentIndex(int(SessionView::Waiting));
+        tabs->setCurrentIndex(int(SessionView::Unread));
         revealed(aKey);
         query->setFocus();
         query->setText("late title");
@@ -691,7 +871,7 @@ class WindowTests : public QObject {
         QCOMPARE(visibleThreads(tree), QStringList{c.id});
         query->clear();
         revealed(aKey);
-        tabs->setCurrentIndex(int(SessionView::Waiting));
+        tabs->setCurrentIndex(int(SessionView::Unread));
         QCOMPARE(query->text(), "late title");
         QVERIFY(!tree->currentIndex().isValid());
         tabs->setCurrentIndex(int(SessionView::All));
@@ -1172,7 +1352,7 @@ class WindowTests : public QObject {
             fixture.notify("thread/status/changed",
                            {{"threadId", "created-1"}, {"status", QJsonObject{{"type", "idle"}}}});
             QTRY_VERIFY(visibleThreads(tree).isEmpty());
-            for (auto tab : {SessionView::Waiting, SessionView::Active, SessionView::Opened}) {
+            for (auto tab : {SessionView::Unread, SessionView::Active, SessionView::Opened}) {
                 tabs->setCurrentIndex(int(tab));
                 QTRY_VERIFY(visibleThreads(tree).contains("created-1"));
             }
@@ -1321,6 +1501,7 @@ class WindowTests : public QObject {
                       {"status", QJsonObject{{"type", QString(id) == "waiting" ? "idle" : "active"},
                                              {"activeFlags", QJsonArray{}}}}});
             backend->sessionChanged(s);
+            window.setUnread(sessionKey(s.backendId, s.id), QString(id) == "waiting");
         }
         auto *tree = window.findChild<QTreeView *>();
         auto *query = window.findChild<QLineEdit *>("sessionSearch");
@@ -1561,6 +1742,7 @@ class WindowTests : public QObject {
         auto *feedback = window.findChild<KSqueezedTextLabel *>("searchFeedback");
         auto *terminal = window.findChild<TerminalArea *>();
         QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
+        window.setUnread(sessionKey(backend->profile.id, "thread-1"), true);
         QTRY_VERIFY(backend->ready());
         QPushButton *loadMore = nullptr;
         for (auto *button : window.findChildren<QPushButton *>())
@@ -1576,6 +1758,7 @@ class WindowTests : public QObject {
             fields["status"] = QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}};
             auto s = Session::fromThread(b->profile.id, fields);
             b->sessionChanged(s);
+            window.setUnread(sessionKey(s.backendId, s.id), type == "idle");
             return s;
         };
         auto waiting = put(backend, "waiting", "/work/project/deep", "idle");
@@ -1610,7 +1793,7 @@ class WindowTests : public QObject {
         query->setText("needle");
         QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
         QCOMPARE(serverNode(tree).parent().data(KindRole).toInt(), int(NodeKind::Group));
-        QCOMPARE(waitingNode().parent().data().toString(), "deep");
+        QCOMPARE(waitingNode().parent().data(BaseTitleRole).toString(), "deep");
         QVERIFY(feedback->fullText().contains(waiting.cwd));
         query->setText("no match");
         QCOMPARE(visibleThreads(tree).size(), 0);
@@ -1620,10 +1803,12 @@ class WindowTests : public QObject {
         query->setText("Needle waiting");
         QVERIFY(!tree->isExpanded(waitingNode().parent()));
         query->setText("needle");
+        window.setUnread(sessionKey(waiting.backendId, waiting.id), false);
         waiting.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
         backend->sessionChanged(waiting);
         QCOMPARE(visibleThreads(tree).size(), 0);
         QCOMPARE(query->text(), "needle");
+        window.setUnread(sessionKey(waiting.backendId, waiting.id), true);
         waiting.status = {{"type", "idle"}};
         backend->sessionChanged(waiting);
         QCOMPARE(visibleThreads(tree), QStringList{"waiting"});
@@ -1662,7 +1847,7 @@ class WindowTests : public QObject {
         QVERIFY(visibleThreads(tree).contains("sibling"));
         QCOMPARE(tree->currentIndex().data(KeyRole).toString(), selectedBeforeFiltering);
         QVERIFY(!tree->isExpanded(nodeWithKey(tree, folderKey)));
-        // Server and group scopes are intersections with Waiting, never a global search.
+        // Server and group scopes are intersections with Unread, never a global search.
         scope->setCurrentIndex(0);
         tree->setCurrentIndex(nodeWithKey(tree, "server:" + waiting.backendId));
         scope->setCurrentIndex(1);
@@ -1890,6 +2075,7 @@ class WindowTests : public QObject {
         auto *query = window.findChild<QLineEdit *>("sessionSearch");
         auto *feedback = window.findChild<KSqueezedTextLabel *>("searchFeedback");
         QTRY_VERIFY(visibleThreads(tree).contains("thread-1"));
+        window.setUnread(sessionKey(backend->profile.id, "thread-1"), true);
         query->setText("conversation text");
         QTest::keyClick(query, Qt::Key_Return);
         QTRY_COMPARE(fixture.searchIds.size(), 1);
@@ -2063,6 +2249,7 @@ class WindowTests : public QObject {
         b.title = "Second";
         for (auto s : {a, b}) {
             window.backends[s.backendId]->sessionChanged(s);
+            window.setUnread(sessionKey(s.backendId, s.id), true);
             window.terminal->prepare(window.profiles[s.backendId], s, false);
             s.terminalOpen = true;
             window.clientStateChanged(s); // Loaded client, rather than pending launch.
@@ -2080,6 +2267,7 @@ class WindowTests : public QObject {
                 s.status = {{"type", tab == int(SessionView::Running) ? "active" : "idle"},
                             {"activeFlags", QJsonArray{}}};
                 window.backends[s.backendId]->sessionChanged(s);
+                window.setUnread(sessionKey(s.backendId, s.id), true);
             }
             window.tabs->setCurrentIndex(tab);
             expanded("a");
@@ -2226,16 +2414,18 @@ class WindowTests : public QObject {
                 for (auto *backend : window.findChildren<Backend *>())
                     backend->sessionChanged(
                         Session::fromThread(backend->profile.id, first.thread()));
+            for (auto *backend : window.findChildren<Backend *>())
+                window.setUnread(sessionKey(backend->profile.id, "thread-1"), true);
             tabs->setCurrentIndex(tab);
             tree->expandAll();
             QCOMPARE(server("first").parent().data(KindRole).toInt(), int(NodeKind::Group));
             auto menu = menuFor(session("first"));
             QVERIFY(menu);
-            QCOMPARE(labels(menu),
-                     (QStringList{"Fork", "New", "Close", "Auto-collapse other servers"}));
+            QCOMPARE(labels(menu), (QStringList{"Fork", "New", "Mark as read", "Close",
+                                                "Auto-collapse other servers"}));
             QVERIFY(menu->actions()[0]->isEnabled());
             QVERIFY(menu->actions()[1]->isEnabled());
-            QVERIFY(!menu->actions()[2]->isEnabled());
+            QVERIFY(!menu->actions()[3]->isEnabled());
             dispose(menu);
         }
         tree->collapse(folder("first"));
@@ -2594,12 +2784,14 @@ class WindowTests : public QObject {
                      {"path", "/saved/example"},
                      {"status", QJsonObject{{"type", tab == 2 ? "active" : "idle"},
                                             {"activeFlags", QJsonArray{}}}}}));
+            for (auto *backend : window.findChildren<Backend *>())
+                window.setUnread(sessionKey(backend->profile.id, "example"), tab == 3);
             window.findChild<QTabBar *>()->setCurrentIndex(tab);
             QCOMPARE(tree->model()->rowCount(), 2);
             for (int i = 0; i < 2; ++i) {
                 const auto group = tree->model()->index(i, 0);
                 QCOMPARE(group.data(KindRole).toInt(), int(NodeKind::Group));
-                QVERIFY(labels.contains(group.data().toString()));
+                QVERIFY(labels.contains(group.data(BaseTitleRole).toString()));
                 QCOMPARE(tree->model()->index(0, 0, group).data(KindRole).toInt(),
                          int(NodeKind::Server));
             }
@@ -3332,14 +3524,14 @@ class WindowTests : public QObject {
         tabs->setCurrentIndex(2);
         QCOMPARE(serverNodes(tree).size(), 0);
         tabs->setCurrentIndex(3);
-        QCOMPARE(serverNodes(tree).size(), 1);
+        QCOMPARE(serverNodes(tree).size(), 0); // An ordinary idle snapshot is already read.
         fixture.notify(
             "thread/status/changed",
             {{"threadId", "thread-1"},
              {"status", QJsonObject{{"type", "active"}, {"activeFlags", QJsonArray{}}}}});
         QTRY_COMPARE(serverNodes(tree).size(), 0);
         tabs->setCurrentIndex(2);
-        QCOMPARE(serverNodes(tree).size(), 1);
+        QTRY_COMPARE(serverNodes(tree).size(), 1);
         tabs->setCurrentIndex(1);
         // Tooltips keep a stable snapshot while events arrive under the pointer.
         const auto pos = tree->visualRect(project()).center();
@@ -3374,7 +3566,7 @@ class WindowTests : public QObject {
         auto *tree = window.findChild<QTreeView *>();
         auto *tabs = window.findChild<QTabBar *>();
         QVERIFY(backend);
-        QCOMPARE(tabs->tabText(3), "Waiting");
+        QCOMPARE(tabs->tabText(3), "Unread");
         auto put = [&](const QString &id, const QString &cwd, const QString &type) {
             auto s = Session::fromThread(
                 "b", {{"id", id},
@@ -3382,6 +3574,7 @@ class WindowTests : public QObject {
                       {"status", QJsonObject{{"type", type}, {"activeFlags", QJsonArray{}}}}});
             s.title = id + " session";
             backend->sessionChanged(s);
+            window.setUnread(sessionKey(s.backendId, s.id), type == "idle");
             return s;
         };
         put("old-home", data.filePath("home"), "notLoaded");
@@ -3398,7 +3591,7 @@ class WindowTests : public QObject {
             QVERIFY(tree->isExpanded(root().parent()));
             QVERIFY(tree->isExpanded(root()));
             QVERIFY(tree->isExpanded(folder()));
-            QCOMPARE(folder().data(Qt::DisplayRole).toString(), tab == 2 ? "build" : "Chats");
+            QCOMPARE(folder().data(BaseTitleRole).toString(), tab == 2 ? "build" : "Chats");
             const auto screenshots = qEnvironmentVariable("ARCHCODEX_TEST_SCREENSHOT_DIR");
             if (!screenshots.isEmpty()) {
                 QApplication::processEvents();
@@ -3425,7 +3618,8 @@ class WindowTests : public QObject {
                 QVERIFY(!tree->isExpanded(branch));
         }
         QVERIFY(sawNewBranch);
-        // Leaving and rejoining Waiting must keep the explicit collapse for its stable path.
+        // Leaving and rejoining Unread must keep the explicit collapse for its stable path.
+        window.setUnread(sessionKey(fresh.backendId, fresh.id), false);
         fresh.status = {{"type", "notLoaded"}};
         backend->sessionChanged(fresh);
         QCOMPARE(folder().data(PathRole).toString(), waiting.cwd);
@@ -3442,7 +3636,7 @@ class WindowTests : public QObject {
         query->setText("needle");
         QTest::keyClick(query, Qt::Key_Return);
         query->clear();
-        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
+        QCOMPARE(folder().data(BaseTitleRole).toString(), "Chats");
         QVERIFY(tree->isExpanded(root()) && tree->isExpanded(folder()));
         QCOMPARE(tree->currentIndex().data(ThreadRole).toString(), "waiting");
         window.close();

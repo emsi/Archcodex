@@ -235,6 +235,7 @@ class RuntimeTests : public QObject {
         status({{"type", "idle"}});
         QTRY_COMPARE(events.size(), 1);
         const auto event = qvariant_cast<SessionAttention>(events.first()[0]);
+        QVERIFY(event.sequence > 0);
         QCOMPARE(event.session.backendId, b.profile.id);
         QCOMPARE(event.session.id, "thread-1");
         QCOMPARE(event.reason, SessionAttention::Reason::Waiting);
@@ -270,7 +271,12 @@ class RuntimeTests : public QObject {
             f.notify("thread/status/changed",
                      {{"threadId", "thread-1"}, {"status", QJsonObject{{"type", "idle"}}}});
         }
-        QTRY_COMPARE(events.size(), 20);
+        QTRY_VERIFY(!events.isEmpty());
+        QTRY_VERIFY(qvariant_cast<SessionAttention>(events.last()[0]).sequence ==
+                    SessionAttention::latestSequence());
+        // GUI backpressure may combine occurrences of the same thread. Its
+        // latest occurrence must survive, independently of replaceable status.
+        QCOMPARE(qvariant_cast<SessionAttention>(events.last()[0]).session.id, "thread-1");
         b.disconnectServer();
         const auto count = events.size();
         QTest::qWait(100);
@@ -369,8 +375,6 @@ class RuntimeTests : public QObject {
         QSignalSpy events(&b, &Backend::attentionRequested), metadata(&b, &Backend::sessionChanged);
         b.connectServer();
         QTRY_VERIFY(b.ready());
-        QTest::ignoreMessage(QtWarningMsg,
-                             "Notification metadata backlog exceeded 256; oldest event discarded.");
         for (int i = 0; i < 300; ++i) {
             for (const auto &type : {"active", "idle"})
                 f.notify("thread/status/changed",
@@ -398,7 +402,7 @@ class RuntimeTests : public QObject {
             f.reply(f.readId, {{"thread", f.thread("pending")}});
         }
         QTest::qWait(30);
-        QCOMPARE(events.size(), outcome == "saved" ? 256 : 0);
+        QCOMPARE(events.size(), outcome == "saved" ? 1 : 0);
         QVERIFY(!f.methods.contains("thread/resume"));
     }
     void blockedFacadeRetainsTransitionsButReconnectDiscardsThem() {
@@ -422,7 +426,7 @@ class RuntimeTests : public QObject {
         QTest::qWait(50);
         b.blockSignals(false);
         emit b.batchAccepted();
-        QTRY_COMPARE(events.size(), 2);
+        QTRY_COMPARE(events.size(), 1);
         b.blockSignals(true);
         change("active");
         QTest::qWait(50);
@@ -434,7 +438,7 @@ class RuntimeTests : public QObject {
         b.connectServer();
         QTRY_VERIFY(b.ready());
         QTest::qWait(50);
-        QCOMPARE(events.size(), 2);
+        QCOMPARE(events.size(), 1);
     }
     void attentionBackpressureIsBoundedWithoutExtraRequests() {
         Fixture f;
@@ -452,8 +456,6 @@ class RuntimeTests : public QObject {
         change("active");
         QTest::qWait(50);
         const auto requests = f.methods.size();
-        QTest::ignoreMessage(QtWarningMsg,
-                             "Session notification backlog exceeded 256; oldest event discarded.");
         for (int i = 0; i < 300; ++i) {
             change("idle");
             change("active");
@@ -461,7 +463,9 @@ class RuntimeTests : public QObject {
         QTest::qWait(250);
         b.blockSignals(false);
         emit b.batchAccepted();
-        QTRY_COMPARE(events.size(), 256);
+        QTRY_COMPARE(events.size(), 1);
+        QCOMPARE(qvariant_cast<SessionAttention>(events.first()[0]).sequence,
+                 SessionAttention::latestSequence());
         QCOMPARE(f.methods.size(), requests);
         QVERIFY(b.ready());
     }

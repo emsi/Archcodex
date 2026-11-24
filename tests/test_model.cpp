@@ -9,6 +9,61 @@ using namespace Archcodex;
 class ModelTests : public QObject {
     Q_OBJECT
   private slots:
+    void unreadAndUnresolvedAreIndependentOfExecutionState() {
+        SessionModel model;
+        SessionFilter filter;
+        filter.setSourceModel(&model);
+        QAbstractItemModelTester tester(&filter,
+                                        QAbstractItemModelTester::FailureReportingMode::QtTest);
+        model.backendGroup("b", "host", "Host");
+        auto s = Session::fromThread("b", {{"id", "thread"},
+                                           {"name", "Title"},
+                                           {"cwd", "/work/project"},
+                                           {"path", "/saved/thread"},
+                                           {"status", QJsonObject{{"type", "idle"}}}});
+        const auto key = sessionKey(s.backendId, s.id);
+        model.upsert(s);
+        filter.setView(SessionView::Unread);
+        QCOMPARE(filter.rowCount(), 0); // A snapshot of an idle prompt is not new work.
+        s.unread = true;
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 1);
+        const auto icon = model.sessionIndex(key).data(Qt::DecorationRole).value<QIcon>();
+        QVERIFY(!icon.isNull());
+        for (auto i = model.sessionIndex(key); i.isValid(); i = i.parent()) {
+            QCOMPARE(i.data(UnreadCountRole).toInt(), 1);
+            QCOMPARE(i.data(NeedsAttentionCountRole).toInt(), 1);
+            QVERIFY(i.data(Qt::FontRole).value<QFont>().bold());
+        }
+        s.known = false;
+        s.status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 1); // Neither disconnect nor a new turn acknowledges it.
+        s.status["activeFlags"] = QJsonArray{"waitingOnApproval"};
+        s.known = true;
+        s.unread = false;
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 1); // Reading cannot answer an approval.
+        QVERIFY(!model.sessionIndex(key).data(Qt::FontRole).value<QFont>().bold());
+        QCOMPARE(model.sessionIndex(key).data(NeedsAttentionCountRole).toInt(), 1);
+        s.known = false;
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 1); // Last-known request stays visible, with an unknown dot.
+        model.setReviewedSession(key);
+        s.status = {{"type", "idle"}};
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 1);
+        QCOMPARE(model.sessionIndex(key).data(NeedsAttentionCountRole).toInt(), 0);
+        QVERIFY(model.sessionIndex(key).data().toString().endsWith(" · Read"));
+        model.setReviewedSession({});
+        QCOMPARE(filter.rowCount(), 0);
+        model.setContainerWorkdir("b", "/different");
+        s.unread = true;
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 0);
+        model.setMyCodexWorkdirOnly(false);
+        QCOMPARE(filter.rowCount(), 1);
+    }
     void hostsFollowVisibleSessionRecency_data() {
         QTest::addColumn<int>("view");
         for (int view = 0; view <= int(SessionView::Opened); ++view)
@@ -36,6 +91,7 @@ class ModelTests : public QObject {
                  {"status",
                   QJsonObject{{"type", view == int(SessionView::Running) ? "active" : "idle"}}}});
             s.terminalOpen = true;
+            s.unread = view == int(SessionView::Unread);
             return s;
         };
         auto selected = make("remote", "selected", 100);
@@ -319,6 +375,7 @@ class ModelTests : public QObject {
                  {"path", "/saved/" + id},
                  {"ephemeral", false},
                  {"status", QJsonObject{{"type", status}, {"activeFlags", QJsonArray{}}}}});
+            s.unread = status == "idle";
             records << s;
         };
         add("a", "waiting", "/work/project/deep", "idle");
@@ -328,7 +385,7 @@ class ModelTests : public QObject {
         add("b", "other-server", "/work/project", "idle");
         model.upsertMany(records);
         SessionQuery query{"nEeDlE [literal]", true, {"a"}, "/work/project"};
-        filter.setView(SessionView::Waiting, query);
+        filter.setView(SessionView::Unread, query);
         auto group = [&] { return filter.index(0, 0); };
         auto server = [&] { return filter.index(0, 0, group()); };
         auto folder = [&] { return filter.index(0, 0, server()); };
@@ -337,7 +394,7 @@ class ModelTests : public QObject {
         QCOMPARE(group().data(KindRole).toInt(), int(NodeKind::Group));
         QCOMPARE(group().data(CountRole).toInt(), 1);
         QCOMPARE(server().data(BackendRole).toString(), "a");
-        QCOMPARE(folder().data().toString(), "deep");
+        QCOMPARE(folder().data(BaseTitleRole).toString(), "deep");
         QCOMPARE(session().data(ThreadRole).toString(), "waiting");
         filter.setView(SessionView::Running, query);
         QCOMPARE(session().data(ThreadRole).toString(), "running");
@@ -350,19 +407,21 @@ class ModelTests : public QObject {
         filter.setView(SessionView::Active, query);
         QCOMPARE(group().data(CountRole).toInt(), 2);
         query.text = "WAITING"; // Session IDs are searchable even if not in the title.
-        filter.setView(SessionView::Waiting, query);
+        filter.setView(SessionView::Unread, query);
         QCOMPARE(session().data(ThreadRole).toString(), "waiting");
         query.text = "/PROJECT/DEEP";
-        filter.setView(SessionView::Waiting, query);
+        filter.setView(SessionView::Unread, query);
         QCOMPARE(group().data(CountRole).toInt(), 1);
         records[0].status = {{"type", "active"}, {"activeFlags", QJsonArray{}}};
+        records[0].unread = false;
         model.upsert(records[0]);
         QCOMPARE(filter.rowCount(), 0);
         records[0].status = {{"type", "idle"}};
+        records[0].unread = true;
         model.upsert(records[0]);
         QCOMPARE(group().data(CountRole).toInt(), 1);
         query.text = "Needle";
-        filter.setView(SessionView::Waiting, query);
+        filter.setView(SessionView::Unread, query);
         records[0].title = "Renamed";
         model.upsert(records[0]);
         QCOMPARE(filter.rowCount(), 0);
@@ -381,10 +440,10 @@ class ModelTests : public QObject {
         model.upsert(records[0]);
         QCOMPARE(filter.rowCount(), 0);
         query.backends.clear();
-        filter.setView(SessionView::Waiting, query);
+        filter.setView(SessionView::Unread, query);
         QCOMPARE(filter.rowCount(), 0); // Missing scope fails closed.
         model.setMyCodexWorkdirOnly(false);
-        filter.setView(SessionView::Waiting);
+        filter.setView(SessionView::Unread);
         QCOMPARE(group().data(CountRole).toInt(), 2);
     }
     void groupedActivityViewsKeepAncestryAndResortOnEvents_data() {
@@ -409,12 +468,13 @@ class ModelTests : public QObject {
                                                        {"name", "Unchanged title"},
                                                        {"status", QJsonObject{{"type", "idle"}}}});
                 s.recency = i + 1;
+                s.unread = true;
                 sessions << s;
             }
         }
         model.upsertMany(sessions);
-        for (const auto view : {SessionView::Waiting, SessionView::Running, SessionView::All,
-                                running ? SessionView::Running : SessionView::Waiting}) {
+        for (const auto view : {SessionView::Unread, SessionView::Running, SessionView::All,
+                                running ? SessionView::Running : SessionView::Unread}) {
             filter.setView(view);
             for (int i = 0; i < filter.rowCount(); ++i) {
                 const auto group = filter.index(i, 0);
@@ -442,7 +502,7 @@ class ModelTests : public QObject {
         for (auto &s : sessions)
             s.known = false;
         model.upsertMany(sessions);
-        QCOMPARE(filter.rowCount(), 0);
+        QCOMPARE(filter.rowCount(), running ? 0 : 2);
         for (auto &s : sessions)
             s.known = true;
         model.upsertMany(sessions);
@@ -553,9 +613,15 @@ class ModelTests : public QObject {
         s.status = {{"type", "idle"}};
         model.upsert(s);
         QCOMPARE(filter.rowCount(), 1);
-        filter.setView(SessionFilter::View::Waiting);
+        filter.setView(SessionFilter::View::Unread);
+        QCOMPARE(filter.rowCount(), 0);
+        s.unread = true;
+        model.upsert(s);
         QCOMPARE(filter.rowCount(), 1);
         s.status = {{"type", "notLoaded"}};
+        model.upsert(s);
+        QCOMPARE(filter.rowCount(), 1); // Unloading does not acknowledge the update.
+        s.unread = false;
         model.upsert(s);
         QCOMPARE(filter.rowCount(), 0);
         filter.setView(SessionFilter::View::Active);
@@ -603,10 +669,11 @@ class ModelTests : public QObject {
         SessionFilter filter;
         filter.setSourceModel(&model);
         model.upsert(s);
-        for (const auto [view, visible] : {std::pair{SessionFilter::View::All, true},
-                                           {SessionFilter::View::Active, active},
-                                           {SessionFilter::View::Running, running},
-                                           {SessionFilter::View::Waiting, waiting}}) {
+        for (const auto [view, visible] :
+             {std::pair{SessionFilter::View::All, true},
+              {SessionFilter::View::Active, active},
+              {SessionFilter::View::Running, running},
+              {SessionFilter::View::Unread, waiting && type == "active"}}) {
             filter.setView(view);
             QCOMPARE(filter.rowCount(), visible ? 1 : 0);
             if (visible)
@@ -698,6 +765,7 @@ class ModelTests : public QObject {
                 "b", {{"id", id},
                       {"cwd", cwd},
                       {"status", QJsonObject{{"type", state}, {"activeFlags", QJsonArray{}}}}});
+            s.unread = state == "idle";
             model.upsert(s);
             return s;
         };
@@ -731,8 +799,8 @@ class ModelTests : public QObject {
         QCOMPARE(root().data(WaitingCountRole).toInt(), 0);
         QCOMPARE(root().data(AttentionRole), running.attention());
         QCOMPARE(filter.index(0, 0, folder()).data(ThreadRole).toString(), "running");
-        filter.setView(SessionFilter::View::Waiting);
-        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
+        filter.setView(SessionFilter::View::Unread);
+        QCOMPARE(folder().data(BaseTitleRole).toString(), "Chats");
         QCOMPARE(root().data(PathRole).toString(), data.filePath("home/user/Documents"));
         QCOMPARE(root().data(CountRole).toInt(), 1);
         QCOMPARE(root().data(RunningCountRole).toInt(), 0);
@@ -745,17 +813,19 @@ class ModelTests : public QObject {
         QVERIFY(leaf.isValid());
         // A pushed status change adds/removes a branch and recomputes the common root.
         running.status = {{"type", "idle"}};
+        running.unread = true;
         running.cwd = data.filePath("srv/work");
         model.upsert(running);
         QCOMPARE(root().data(PathRole).toString(), data.path());
         QCOMPARE(root().data(CountRole).toInt(), 2);
         QSet<QString> labels;
         for (int i = 0; i < filter.rowCount(root()); ++i)
-            labels.insert(filter.index(i, 0, root()).data(Qt::DisplayRole).toString());
+            labels.insert(filter.index(i, 0, root()).data(BaseTitleRole).toString());
         QCOMPARE(labels, (QSet<QString>{"home/user/Documents/Chats", "srv/work"}));
         running.status = {{"type", "active"}};
+        running.unread = false;
         model.upsert(running);
-        QCOMPARE(folder().data(Qt::DisplayRole).toString(), "Chats");
+        QCOMPARE(folder().data(BaseTitleRole).toString(), "Chats");
         QCOMPARE(root().data(CountRole).toInt(), 1);
         filter.setView(SessionFilter::View::All);
         QCOMPARE(root().data(CountRole).toInt(), 6); // Hidden history was never discarded.
@@ -817,8 +887,9 @@ class ModelTests : public QObject {
         QCOMPARE(filter.rowCount(), 1);
         filter.setView(SessionFilter::View::Running);
         QCOMPARE(filter.rowCount(), 0);
-        filter.setView(SessionFilter::View::Waiting);
+        filter.setView(SessionFilter::View::Unread);
         QCOMPARE(filter.rowCount(), 0);
+        filter.setView(SessionFilter::View::All);
         auto restored = Session::fromThread("b", s.metadata());
         QVERIFY(!restored.terminalOpen);
         QVERIFY(restored.clientIssue.isEmpty());
@@ -861,6 +932,7 @@ class ModelTests : public QObject {
                                                {"status", QJsonObject{{"type", "idle"}}}});
         auto second = first;
         second.id = "fork-2";
+        second.unread = true;
         model.upsertMany({first, second});
         first.terminalOpen = true;
         first.clientIssue = "Terminal client exited with code 1";
@@ -877,11 +949,12 @@ class ModelTests : public QObject {
             }
             QCOMPARE(ids, (QSet<QString>{first.id, second.id}));
         }
-        model.setView(SessionView::Waiting);
+        model.setView(SessionView::Unread);
         QCOMPARE(model.item(0)->data(CountRole).toInt(), 1);
         QCOMPARE(model.item(0)->child(0)->child(0)->data(ThreadRole).toString(), second.id);
         first.terminalOpen = false;
         first.clientIssue.clear();
+        first.unread = true;
         model.upsert(first);
         QCOMPARE(model.item(0)->data(CountRole).toInt(), 2);
         QCOMPARE(model.item(0)->data(WaitingCountRole).toInt(), 2);
@@ -900,19 +973,21 @@ class ModelTests : public QObject {
                                 "/elsewhere",
                                 "relative"};
         for (const auto &backend : {"container", "other", "host"})
-            for (qsizetype i = 0; i < paths.size(); ++i)
-                model.upsert(
-                    Session::fromThread(backend, {{"id", QString::number(i)},
-                                                  {"cwd", paths[i]},
-                                                  {"path", "/saved/file"},
-                                                  {"status", QJsonObject{{"type", "idle"}}}}));
+            for (qsizetype i = 0; i < paths.size(); ++i) {
+                auto s = Session::fromThread(backend, {{"id", QString::number(i)},
+                                                       {"cwd", paths[i]},
+                                                       {"path", "/saved/file"},
+                                                       {"status", QJsonObject{{"type", "idle"}}}});
+                s.unread = true;
+                model.upsert(s);
+            }
         const auto count = [&](const QString &backend) {
             for (int i = 0; i < model.rowCount(); ++i)
                 if (model.item(i)->data(BackendRole) == backend)
                     return model.item(i)->data(CountRole).toInt();
             return -1;
         };
-        for (const auto view : {SessionView::All, SessionView::Active, SessionView::Waiting}) {
+        for (const auto view : {SessionView::All, SessionView::Active, SessionView::Unread}) {
             model.setView(view);
             QCOMPARE(count("container"), 2);
             QCOMPARE(count("other"), 1);

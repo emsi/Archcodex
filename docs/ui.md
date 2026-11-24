@@ -11,7 +11,7 @@ Start with a familiar IDE arrangement: a narrow project navigator on the left
 and a large terminal workspace on the right. Use ordinary native widgets and a
 resizable divider. Keep the first version simple.
 
-The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, **Waiting**, then **Opened**. These tabs are views of the same
+The left navigator has horizontal tabs above its content: **All**, **Active**, **Running**, **Unread**, then **Opened**. These tabs are views of the same
 project/session data. Each view uses a predicate over the same session model.
 
 Top-level rows group configurations by host: **This Computer** contains local
@@ -27,7 +27,7 @@ the full server/container/host labels. Manual connection names are preserved.
 The directory prefix common to visible sessions on a server is omitted and shown
 in that server's details. This is calculated after applying the current view and
 unsaved-entry filter, so hidden history cannot leave extra folder levels in Active,
-Running or Waiting. Counts and aggregate indicators also describe only the visible
+Running or Unread. Counts and aggregate indicators also describe only the visible
 sessions. Folder chains without sessions or branching are
 collapsed into one label; folders containing sessions stay explicit. With one
 working directory, its basename remains as a folder under the server. For example,
@@ -35,7 +35,7 @@ with common root `/home/alice`:
 
 ```text
 Projects                             Terminal workspace
-[All] [Active] [Running] [Waiting] [Opened]
+[All] [Active] [Running] [Unread] [Opened]
 Search conversations…
 Scope: All servers
 v alice @ workstation
@@ -74,7 +74,7 @@ tab navigation.
 | All | Saved history and visible live sessions, including disconnected cached rows and open terminals. |
 | Active | Loaded sessions and open terminal views, including retained client errors and other runtime states. |
 | Running | Confirmed active turn with no waiting flags. |
-| Waiting | Confirmed idle prompt or active turn waiting for input/approval. |
+| Unread | Observed updates not yet visited, manually marked sessions, and unresolved blocking input/approval requests. |
 | Opened | Every open GUI terminal view, including retained exited/error output; visibility settings do not hide these views. |
 
 Active includes server runtime presence and terminal views that the user has
@@ -88,7 +88,8 @@ Active without being misclassified as running or waiting. Unrecognized activity
 flags also stay in Active and have an explicit other-activity label.
 
 On disconnect, retain last-known Active membership with a hollow unknown dot.
-Unknown rows never appear in Running or Waiting. At reconnect, the
+Unknown rows never appear in Running. Unread retains observed markers and last-known
+unresolved requests during a disconnection. See [Unread sessions](unread.md). At reconnect, the
 complete loaded inventory reconciles cached rows outside the history page too;
 partial/failed inventories do not falsely mark them unloaded. Pushed status and
 closed events take priority over older snapshots. `thread/closed` moves a row to
@@ -99,7 +100,7 @@ an unsubscribed idle thread for its unload grace period. This is the observable
 runtime boundary, rather than a guess based on terminal output or process lists.
 
 All and Active remember expanded groups; the first visit inherits the current
-expansion state. Running, Waiting and Opened expand every branch by default, including
+expansion state. Running, Unread and Opened expand every branch by default, including
 new branches arriving through events. Explicitly collapsed branches are remembered
 separately for those views during the current GUI run and are not reopened by
 updates or tab changes unless needed to reveal the displayed terminal. Matching
@@ -345,7 +346,7 @@ controller. Modal dialogs and shortcut recording retain their input.
 
 | Default | Command |
 | --- | --- |
-| Alt+1 / Alt+2 / Alt+3 / Alt+4 / Alt+5 | All / Active / Running / Waiting / Opened; focus the tree without opening a session. |
+| Alt+1 / Alt+2 / Alt+3 / Alt+4 / Alt+5 | All / Active / Running / Unread / Opened; focus the tree without opening a session. |
 | Alt+0 | Focus the current terminal. |
 | Ctrl+Alt+P | Focus Projects in its current view. |
 | Ctrl+Alt+F | Focus that view's search/filter field. |
@@ -413,7 +414,7 @@ The search field has two explicit modes:
   the query restores its tree and navigation. A submitted search may finish while
   another tab is selected; its results and errors belong only to All. New searches
   and clearing invalidate older replies. Partial/offline coverage remains visible.
-- **Active, Running, Waiting, Opened:** immediately filter the tab's existing
+- **Active, Running, Unread, Opened:** immediately filter the tab's existing
   members by **cached title, working-directory path or session ID**, using a
   case-insensitive literal substring. Conversation bodies are not searched in
   these views. Enter performs no additional action. There is no backend search,
@@ -526,7 +527,7 @@ omitted; they are held in memory and copied only on the user's action.
 
 ## 7. First UI validation checklist
 
-- The left pane offers All, Active, Running, Waiting and Opened; all preserve project/session
+- The left pane offers All, Active, Running, Unread and Opened; all preserve project/session
   hierarchy and distinguish same-named projects on different backends.
 - Existing sessions appear without project setup. Separate servers within host groups preserve
   routing even for identical working directories and thread IDs.
